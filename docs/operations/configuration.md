@@ -200,7 +200,9 @@ Kaneo 是随平台 Compose 同启的单用户项目管理看板：官方
   它同时作为 308 跳转目标与 app 的 `KANEO_CLIENT_URL`/`KANEO_API_URL`，换用
   非规范 origin（如直连 8090 或带路径前缀）会破坏原生登录。本地默认
   `https://localhost:8445`；生产未显式配置时由部署脚本从 `PUBLIC_TLS_IP` 与
-  `KANEO_HTTPS_PORT` 推导，两者都缺失则 fail closed。
+  `KANEO_HTTPS_PORT` 推导。已有服务器配置缺少 `PUBLIC_TLS_IP` 时，从显式
+  部署 `HEALTH_URL` 中校验出的公网 IP 初始化并持久化；已有值不覆盖。若健康
+  地址使用域名、回环地址或无法确定公网 IP，须先配置 `PUBLIC_TLS_IP`。
 - readiness：backend 与 pipeline_executor 强依赖 kaneo-app 健康，
   `/health/ready` 经 `/api/instance/status` 校验 `hasUsers`/`hasAdmin` 均为
   true；静态 `/api/health` 200 不算就绪。

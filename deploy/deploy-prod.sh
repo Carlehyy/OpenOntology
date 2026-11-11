@@ -77,6 +77,7 @@ compose_environment() {
   env \
     -u ENVIRONMENT \
     -u PUBLIC_PORT \
+    -u PUBLIC_TLS_IP \
     -u POSTGRES_DB \
     -u POSTGRES_USER \
     -u POSTGRES_PASSWORD \
@@ -1049,6 +1050,60 @@ configure_integrated_dbx() {
   fi
 }
 
+ensure_public_tls_ip() {
+  # The WeKnora/Kaneo public HTTPS origins derive from the server's literal
+  # public IP. An existing operator-configured PUBLIC_TLS_IP always wins; only
+  # a missing or empty value is initialized exactly once from the deployment
+  # health URL's host and persisted into .env. Hostnames, loopback, private
+  # and non-literal hosts are rejected: this deployment model is a bare public
+  # IP with dedicated ports, and a wrong silent guess would strand the public
+  # gateways behind origins nothing can reach.
+  local current candidate
+  current="$(env_value PUBLIC_TLS_IP)"
+  if [ -n "$current" ]; then
+    return 0
+  fi
+  if [ -z "$HEALTH_URL" ]; then
+    log "PUBLIC_TLS_IP is not configured and no deployment health URL is available to derive it; set PUBLIC_TLS_IP in ${APP_DIR}/.env or deploy with an explicit HEALTH_URL using the public IP"
+    exit 1
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    log "PUBLIC_TLS_IP cannot be derived without python3; set it explicitly in ${APP_DIR}/.env"
+    exit 1
+  fi
+  # Strict validation without echoing any part of HEALTH_URL: scheme limited
+  # to http(s), no credentials/query/fragment, a valid optional port, and a
+  # literal routable public IP (IPv4 or IPv6, stored in canonical form).
+  if ! candidate="$(
+    python3 - "$HEALTH_URL" <<'PY'
+import ipaddress
+import sys
+from urllib.parse import urlsplit
+
+try:
+    parsed = urlsplit(sys.argv[1])
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("scheme")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("credentials")
+    if parsed.query or parsed.fragment:
+        raise ValueError("query or fragment")
+    _ = parsed.port  # raises ValueError for an out-of-range port
+    address = ipaddress.ip_address((parsed.hostname or "").strip("[]"))
+except ValueError:
+    sys.exit(1)
+if address.is_loopback or not address.is_global:
+    sys.exit(1)
+print(address.compressed)
+PY
+  )"; then
+    log "HEALTH_URL must use a literal public IP host to initialize PUBLIC_TLS_IP; set PUBLIC_TLS_IP explicitly for hostname or private-address deployments"
+    exit 1
+  fi
+  set_env_value PUBLIC_TLS_IP "$candidate"
+  log "initialized PUBLIC_TLS_IP from the deployment health URL host (persisted in ${APP_DIR}/.env)"
+}
+
 configure_weknora_env() {
   # Keep independent database/cache and encryption credentials stable across
   # deployments. Models and MCP tokens belong to the native UI, not this file.
@@ -1613,6 +1668,8 @@ apply_production_dependency_config() {
 apply_production_dependency_config
 chmod 600 .env
 configure_integrated_dbx
+# Seed the public TLS address before the service origins are derived from it.
+ensure_public_tls_ip
 configure_weknora_env
 configure_kaneo_env
 configure_hindsight_env

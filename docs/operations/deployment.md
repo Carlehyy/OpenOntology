@@ -102,7 +102,10 @@ WeKnora 式开放注册的 init 容器；重复部署不修改已存在账号的
 时 `.env` 缺失或仍为本地默认值的 `KANEO_ADMIN_PASSWORD`、`KANEO_DB_PASSWORD`、
 `KANEO_AUTH_SECRET` 由部署脚本随机生成并持久化，之后保持稳定，不会回显到
 Actions 日志。`KANEO_WEB_URL` 未显式配置时从 `PUBLIC_TLS_IP` 与
-`KANEO_HTTPS_PORT` 推导为规范 HTTPS origin，两者都缺失则部署 fail closed；
+`KANEO_HTTPS_PORT` 推导为规范 HTTPS origin。旧服务器 `.env` 缺少
+`PUBLIC_TLS_IP` 时，部署脚本从显式传入的 `HEALTH_URL` 提取并校验公网 IP，
+持久化后供证书与 Kaneo 共用；已有值保持不变。健康地址使用域名或回环地址、
+无法确定公网 IP 时，须先在服务器 `.env` 配置 `PUBLIC_TLS_IP`，否则部署失败。
 公开入口检查要求 HTTP 8090 精确 308 跳转该 origin、HTTPS 8445 网关健康。
 密码获取只能在服务器受控终端读取 `.env`，边界同
 [首个管理员密码](#首次登录与管理员密码恢复)。服务与地址契约详见

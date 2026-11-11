@@ -1120,6 +1120,162 @@ set_test_env_value KANEO_WEB_URL ""
 )
 grep -Fxq 'KANEO_WEB_URL=https://64.83.14.139:8445' "$test_dir/.env"
 
+# PUBLIC_TLS_IP initialization: an existing operator-configured value always
+# wins; only a missing or empty value is derived exactly once from the literal
+# public IP host of the deployment health URL and persisted. Loopback, private
+# and hostname health URLs are rejected, and the generated Kaneo secrets must
+# stay byte-identical across these repeated validation runs.
+kaneo_secrets_snapshot() {
+  for key in KANEO_ADMIN_PASSWORD KANEO_AUTH_SECRET KANEO_DB_PASSWORD; do
+    awk -F= -v key="$key" '$1 == key {print substr($0, index($0, "=") + 1)}' \
+      "$test_dir/.env" | tail -n1
+  done
+}
+kaneo_secrets_before_public_tls="$(kaneo_secrets_snapshot)"
+
+set_test_env_value KANEO_WEB_URL ""
+(
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    HEALTH_URL="http://93.184.216.34:8080/" \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT" >public-tls-explicit-preserve.log 2>&1
+)
+# The template-derived 64.83.14.139 stays authoritative; the health URL host
+# must never silently replace an existing configured address.
+grep -Fxq 'PUBLIC_TLS_IP=64.83.14.139' "$test_dir/.env"
+grep -Fxq 'KANEO_WEB_URL=https://64.83.14.139:8445' "$test_dir/.env"
+if grep -q 'initialized PUBLIC_TLS_IP' "$test_dir/public-tls-explicit-preserve.log"; then
+  printf 'an existing PUBLIC_TLS_IP must not be re-derived from HEALTH_URL\n' >&2
+  exit 1
+fi
+
+set_test_env_value PUBLIC_TLS_IP ""
+set_test_env_value KANEO_WEB_URL ""
+(
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    HEALTH_URL="http://93.184.216.34:8080/" \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT" >public-tls-derived-empty.log 2>&1
+)
+grep -Fxq 'PUBLIC_TLS_IP=93.184.216.34' "$test_dir/.env"
+grep -Fxq 'KANEO_WEB_URL=https://93.184.216.34:8445' "$test_dir/.env"
+grep -q 'initialized PUBLIC_TLS_IP from the deployment health URL host' \
+  "$test_dir/public-tls-derived-empty.log"
+
+sed -i.bak '/^PUBLIC_TLS_IP=/d' "$test_dir/.env"
+find "$test_dir" -maxdepth 1 -name '.env.bak' -delete
+set_test_env_value KANEO_WEB_URL ""
+(
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    HEALTH_URL="http://[2606:4700:4700::1111]:8080/" \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT" >public-tls-derived-v6.log 2>&1
+)
+grep -Fxq 'PUBLIC_TLS_IP=2606:4700:4700::1111' "$test_dir/.env"
+grep -Fxq 'KANEO_WEB_URL=https://[2606:4700:4700::1111]:8445' "$test_dir/.env"
+
+sed -i.bak '/^PUBLIC_TLS_IP=/d' "$test_dir/.env"
+find "$test_dir" -maxdepth 1 -name '.env.bak' -delete
+set_test_env_value KANEO_WEB_URL ""
+if (
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    HEALTH_URL="http://127.0.0.1:8080/" \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT"
+) >"$test_dir/public-tls-loopback.log" 2>&1; then
+  printf 'a loopback health URL must not initialize PUBLIC_TLS_IP\n' >&2
+  exit 1
+fi
+grep -q 'must use a literal public IP host' "$test_dir/public-tls-loopback.log"
+
+set_test_env_value KANEO_WEB_URL ""
+if (
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    HEALTH_URL="http://kaneo.example.invalid/" \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT"
+) >"$test_dir/public-tls-hostname.log" 2>&1; then
+  printf 'a hostname health URL must not initialize PUBLIC_TLS_IP\n' >&2
+  exit 1
+fi
+grep -q 'must use a literal public IP host' "$test_dir/public-tls-hostname.log"
+
+set_test_env_value KANEO_WEB_URL ""
+if (
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT"
+) >"$test_dir/public-tls-no-health-url.log" 2>&1; then
+  printf 'a missing PUBLIC_TLS_IP with no health URL must be rejected\n' >&2
+  exit 1
+fi
+grep -q 'no deployment health URL is available' \
+  "$test_dir/public-tls-no-health-url.log"
+
+# An exported shell PUBLIC_TLS_IP must not bypass or poison the persisted
+# authority: the derivation still uses only the health URL host and .env.
+set_test_env_value KANEO_WEB_URL ""
+(
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    PUBLIC_TLS_IP=203.0.113.9 \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    HEALTH_URL="http://93.184.216.34:8080/" \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT" >/dev/null
+)
+grep -Fxq 'PUBLIC_TLS_IP=93.184.216.34' "$test_dir/.env"
+if grep -Fxq 'PUBLIC_TLS_IP=203.0.113.9' "$test_dir/.env"; then
+  printf 'an exported PUBLIC_TLS_IP must not override the persisted .env authority\n' >&2
+  exit 1
+fi
+
+if [ "$(kaneo_secrets_snapshot)" != "$kaneo_secrets_before_public_tls" ]; then
+  printf 'repeated validation runs must not rotate the generated Kaneo secrets\n' >&2
+  exit 1
+fi
+
+# Restore the state the fake-deployment sections expect: the template IP and a
+# freshly re-derived Kaneo origin.
+set_test_env_value PUBLIC_TLS_IP 64.83.14.139
+set_test_env_value KANEO_WEB_URL ""
+(
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT" >/dev/null
+)
+grep -Fxq 'KANEO_WEB_URL=https://64.83.14.139:8445' "$test_dir/.env"
+
 set_test_env_value KANEO_BASE_URL http://elsewhere.example.invalid:5173
 (
   cd "$test_dir"
@@ -1177,7 +1333,7 @@ for key in \
   HINDSIGHT_ENABLED HINDSIGHT_BASE_URL HINDSIGHT_WEB_URL HINDSIGHT_API_KEY \
   HINDSIGHT_SERVICE_TOKEN HINDSIGHT_TIMEOUT_SECONDS HINDSIGHT_NAMESPACE \
   HINDSIGHT_DB_NAME HINDSIGHT_DB_USER HINDSIGHT_DB_PASSWORD \
-  HINDSIGHT_IMAGE HINDSIGHT_POSTGRES_IMAGE HINDSIGHT_HF_OFFLINE; do
+  HINDSIGHT_IMAGE HINDSIGHT_POSTGRES_IMAGE HINDSIGHT_HF_OFFLINE PUBLIC_TLS_IP; do
   if [ "${!key+x}" = "x" ]; then
     printf 'compose environment leaked authority key: %s\n' "$key" \
       >>"$FAKE_DOCKER_LOG"
@@ -1232,6 +1388,7 @@ if (
     FAKE_DOCKER_LOG="$fake_docker_log" \
     ENVIRONMENT=development \
     PUBLIC_PORT=65535 \
+    PUBLIC_TLS_IP=203.0.113.9 \
     POSTGRES_DB=shell_override \
     POSTGRES_USER=shell_override \
     POSTGRES_PASSWORD=shell-override-password \
@@ -1821,7 +1978,7 @@ for key in \
   HINDSIGHT_ENABLED HINDSIGHT_BASE_URL HINDSIGHT_WEB_URL HINDSIGHT_API_KEY \
   HINDSIGHT_SERVICE_TOKEN HINDSIGHT_TIMEOUT_SECONDS HINDSIGHT_NAMESPACE \
   HINDSIGHT_DB_NAME HINDSIGHT_DB_USER HINDSIGHT_DB_PASSWORD \
-  HINDSIGHT_IMAGE HINDSIGHT_POSTGRES_IMAGE HINDSIGHT_HF_OFFLINE; do
+  HINDSIGHT_IMAGE HINDSIGHT_POSTGRES_IMAGE HINDSIGHT_HF_OFFLINE PUBLIC_TLS_IP; do
   if [ "${!key+x}" = "x" ]; then
     printf 'compose environment leaked authority key: %s\n' "$key" \
       >>"$FAKE_DOCKER_LOG"
