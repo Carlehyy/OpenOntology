@@ -51,8 +51,6 @@ def _production_settings(**updates):
         "n8n_api_key": "strong-n8n-api-key",
         "weknora_web_url": "https://kb.example.com",
         "kaneo_web_url": "https://pm.example.com",
-        "kaneo_admin_email": "admin@kaneo.example.com",
-        "kaneo_admin_password": "strong-kaneo-admin-password",
         "python_kernel_gateway_auth_token": "strong-kernel-gateway-token",
         "pipeline_file_public_app_base_url": "https://platform.example.com",
         "pipeline_file_public_api_base_url": "https://api.example.com",
@@ -280,26 +278,13 @@ def test_production_accepts_public_kaneo_web_origin():
     )) == []
 
 
-@pytest.mark.parametrize(
-    "email", ["", "not-an-email"], ids=["empty", "malformed"],
-)
-def test_production_requires_kaneo_admin_email_for_sso_relay(email):
-    """一键免登录中继用管理员邮箱做服务端 sign-in：邮箱缺失/畸形即 fail-closed。"""
-    errors = production_config_errors(_production_settings(
-        kaneo_admin_email=email))
-    assert "KANEO_ADMIN_EMAIL" in errors
-
-
-@pytest.mark.parametrize(
-    "password",
-    ["", "short", "admin123", "localKaneoAdmin2026!"],
-    ids=["empty", "too-short", "weak-default", "local-compose-default"],
-)
-def test_production_rejects_missing_or_weak_kaneo_admin_password(password):
-    """中继凭据缺失、过短（上游 better-auth 下限 8 位）或本地开发默认值都拒绝。"""
-    errors = production_config_errors(_production_settings(
-        kaneo_admin_password=password))
-    assert "KANEO_ADMIN_PASSWORD" in errors
+def test_sso_relay_credentials_are_not_a_global_production_requirement():
+    """中继凭据只注入 backend；executor/task_worker 被掩码合法置空，全局
+    生产校验若要求它们会让这些容器启动即崩（2026-11-11 部署事故根因）。
+    存在性与强度由 deploy-prod.sh 与 backend 的 compose :? 承担。"""
+    assert production_config_errors(_production_settings(
+        kaneo_admin_email="", kaneo_admin_password="",
+    )) == []
 
 
 def test_kaneo_internal_contract_rejects_malformed_values():
