@@ -248,10 +248,12 @@ class HindsightConfig(StrictModel):
     base_url: str = Field(
         default="http://127.0.0.1:18888", min_length=1, max_length=500
     )
-    # Optional browser-accessible, separately protected management UI. The
-    # local compose profile publishes it on http://127.0.0.1:19999; production
-    # keeps the UI private until it is protected, so the default stays empty
-    # and hostnames are stored exactly as entered, never rewritten.
+    # Optional browser-accessible management UI. The local compose profile
+    # publishes it on http://127.0.0.1:19999; production derives the entry
+    # from PUBLIC_TLS_IP + HINDSIGHT_WEB_PORT behind a generated
+    # HINDSIGHT_CP_ACCESS_KEY login gate (deploy-prod.sh), so the config
+    # center default stays empty and hostnames are stored exactly as entered,
+    # never rewritten.
     web_url: str = Field(default="", min_length=0, max_length=500)
     timeout_seconds: float = Field(default=2.0, gt=0, le=60)
 

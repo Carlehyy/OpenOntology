@@ -342,20 +342,35 @@ def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
     assert compose["networks"]["hindsight_internal"] == {"driver": "bridge"}
     assert "hindsight" not in backend["depends_on"]
     assert "hindsight-db" not in backend["depends_on"]
+    hindsight_service = compose["services"]["hindsight"]
     for service in ("hindsight", "hindsight-db"):
         assert compose["services"][service]["profiles"] == ["hindsight"]
-        assert "ports" not in compose["services"][service]
+    # The admin Control Plane is the only published Hindsight surface: the API
+    # (8888) stays compose-internal and hindsight-db publishes nothing.
+    assert hindsight_service["ports"] == ["${HINDSIGHT_WEB_PORT:-19999}:9999"]
+    assert "ports" not in compose["services"]["hindsight-db"]
     # HINDSIGHT_WEB_URL is the optional admin-only native Web entry: only the
     # backend explicitly maps it from the validated .env (empty default; other
-    # env_file consumers merely inherit the non-secret value without using it),
-    # and the UI gains no published host port.
+    # env_file consumers merely inherit the non-secret value without using it).
+    # deploy-prod.sh derives it from PUBLIC_TLS_IP + HINDSIGHT_WEB_PORT.
     assert backend["environment"]["HINDSIGHT_WEB_URL"] == (
         "${HINDSIGHT_WEB_URL:-}"
     )
     assert "HINDSIGHT_WEB_URL" not in compose["services"]["pipeline_executor"][
         "environment"
     ]
-    assert "19999" not in (ROOT / "docker-compose.prod.yml").read_text()
+    # The published Control Plane must be login-gated by the official access
+    # key, and its BFF must carry the dataplane tenant key so the console can
+    # actually query memory banks (the API enforces ApiKeyTenantExtension).
+    assert hindsight_service["environment"]["HINDSIGHT_CP_ACCESS_KEY"] == (
+        "${HINDSIGHT_CP_ACCESS_KEY:-}"
+    )
+    assert hindsight_service["environment"][
+        "HINDSIGHT_CP_DATAPLANE_API_KEY"
+    ] == "${HINDSIGHT_API_KEY:-}"
+    # backend/pipeline_executor/task_worker inherit .env but never need the
+    # control-plane key: the shared mask anchor pins it to "" there (asserted
+    # below with the other stack-only secrets).
     assert backend["depends_on"]["weknora-app"]["condition"] == "service_healthy"
     for service in (
         "weknora-app",
@@ -412,6 +427,12 @@ def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
         "KANEO_DB_PASSWORD",
         "KANEO_AUTH_SECRET",
     )
+    # Hindsight stack-only secrets follow the same isolation: the DB password
+    # and the published Control-Plane access key never reach env_file consumers.
+    hindsight_stack_only = (
+        "HINDSIGHT_DB_PASSWORD",
+        "HINDSIGHT_CP_ACCESS_KEY",
+    )
     env_file_services = [
         name for name, service in compose["services"].items()
         if service.get("env_file")
@@ -419,7 +440,9 @@ def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
     assert env_file_services == ["backend", "pipeline_executor", "task_worker"]
     for service in env_file_services:
         environment = compose["services"][service]["environment"]
-        for key in weknora_bootstrap_only + kaneo_bootstrap_only:
+        for key in (
+            weknora_bootstrap_only + kaneo_bootstrap_only + hindsight_stack_only
+        ):
             assert environment[key] == ""
         if service != "backend":
             assert environment["KANEO_ADMIN_PASSWORD"] == ""

@@ -202,10 +202,12 @@ egress 环境先在有网机器预下载同一 repo 并填入该卷，再在 `.e
 API 仅 loopback `18888`，管理 UI 仅 loopback `19999`，都不对外。服务不可用时
 仅记忆特性降级，聊天不受影响；配置中心 `Hindsight` 节为可选测试，不阻塞生成本地配置。
 
-可选的 `HINDSIGHT_WEB_URL`（默认空）是管理员专用的原生 Web 入口：本地填
+可选的 `HINDSIGHT_WEB_URL` 是管理员专用的原生 Web 入口：本地填
 `http://127.0.0.1:19999`（写 `localhost` 也按原样保留，不做改写），不为此发布
-额外端口。该链接不新增任何鉴权、代理或 SSO，URL 内不得携带 tenant 或 API
-key；生产须待外部防护的地址另行开通后，在服务器 `.env` 填写。
+额外端口。URL 内不得携带 tenant 或 API key；生产在 `HINDSIGHT_ENABLED=true`
+且留空时由 `deploy-prod.sh` 从 `PUBLIC_TLS_IP` + `HINDSIGHT_WEB_PORT` 自动
+推导默认入口，控制面由自动生成的 `HINDSIGHT_CP_ACCESS_KEY` 登录保护（详见
+[operations/configuration.md](../operations/configuration.md#hindsight-长期记忆可选默认关闭)）。
 
 ## 最小验证
 

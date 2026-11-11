@@ -154,6 +154,8 @@ compose_environment() {
     -u HINDSIGHT_ENABLED \
     -u HINDSIGHT_BASE_URL \
     -u HINDSIGHT_WEB_URL \
+    -u HINDSIGHT_WEB_PORT \
+    -u HINDSIGHT_CP_ACCESS_KEY \
     -u HINDSIGHT_API_KEY \
     -u HINDSIGHT_SERVICE_TOKEN \
     -u HINDSIGHT_TIMEOUT_SECONDS \
@@ -575,6 +577,41 @@ start_hindsight_memory_stack() {
     log "hindsight memory service is healthy (feature status only)"
   else
     log "warning: hindsight is not healthy yet (first start may download the embedding model); it stays running and chat/platform readiness are unaffected"
+  fi
+  check_hindsight_control_plane_entry
+}
+
+check_hindsight_control_plane_entry() {
+  # 管理 UI 已发布宿主端口：就绪后从本机探测公开入口（/api/health 白名单
+  # 200；设了 HINDSIGHT_CP_ACCESS_KEY 时 / 必须跳登录页）。仅记状态与告警，
+  # 不影响部署结论——控制面起得比 API health 略晚属正常，浏览器侧重试即可。
+  local web_port cp_status root_status attempt
+  web_port="$(env_value HINDSIGHT_WEB_PORT)"
+  web_port="${web_port:-19999}"
+  command -v curl >/dev/null 2>&1 || return 0
+  cp_status=""
+  for attempt in 1 2 3 4; do
+    cp_status="$(curl -s -o /dev/null -w '%{http_code}' \
+      --connect-timeout 2 --max-time 5 "http://127.0.0.1:${web_port}/api/health" \
+      2>/dev/null || true)"
+    [ "$cp_status" = "200" ] && break
+    cp_status=""
+    sleep 2
+  done
+  if [ -z "$cp_status" ]; then
+    log "warning: the Hindsight control plane did not answer on 127.0.0.1:${web_port}/api/health (it may still be starting; the memory feature and this deployment are unaffected)"
+    return 0
+  fi
+  log "hindsight control-plane entry is reachable (feature status only)"
+  if [ -n "$(env_value HINDSIGHT_CP_ACCESS_KEY)" ]; then
+    root_status="$(curl -s -o /dev/null -w '%{http_code}' \
+      --connect-timeout 2 --max-time 5 "http://127.0.0.1:${web_port}/" \
+      2>/dev/null || true)"
+    if [ "$root_status" = "307" ]; then
+      log "hindsight control-plane login gate is active (feature status only)"
+    else
+      log "warning: the Hindsight control-plane root returned HTTP ${root_status:-none} instead of the expected login redirect; verify HINDSIGHT_CP_ACCESS_KEY reached the container"
+    fi
   fi
 }
 
@@ -1291,6 +1328,30 @@ configure_kaneo_env() {
   set_env_values_in_file "${APP_DIR}/.env" "${updates[@]}"
 }
 
+hindsight_web_url_origin_ok() {
+  # HINDSIGHT_WEB_URL 的部署期形态校验：http(s) origin（可带端口/IPv6 括号），
+  # 不带凭据/路径/查询/fragment；允许单个尾部斜杠（backend 会归一化）。运行期
+  # backend memory settings 仍会做同样的净化兜底，这里只负责把配置 typo 在
+  # 部署期暴露出来。
+  local value="${1:-}" rest
+  case "$value" in
+    http://*|https://*) ;;
+    *) return 1 ;;
+  esac
+  case "$value" in
+    *\#*|*\?*|*@*) return 1 ;;
+  esac
+  rest="${value#*://}"
+  case "$rest" in
+    /) return 1 ;;
+    */) rest="${rest%/}" ;;
+  esac
+  case "$rest" in
+    */*) return 1 ;;
+  esac
+  [ -n "$rest" ] || return 1
+}
+
 configure_hindsight_env() {
   # Hindsight 长期记忆（可选）：HINDSIGHT_ENABLED=true 时生成/保留独立凭据并
   # 钉扎镜像 digest；未启用时不动任何值（缺 secret 不阻断平台部署）。
@@ -1318,10 +1379,14 @@ configure_hindsight_env() {
   [ -n "$current" ] || updates+=("HINDSIGHT_DB_NAME=hindsight")
   current="$(env_value HINDSIGHT_DB_USER)"
   [ -n "$current" ] || updates+=("HINDSIGHT_DB_USER=hindsight")
+  # 管理 UI（Control Plane）的宿主发布端口；入口 URL 由此推导。
+  current="$(env_value HINDSIGHT_WEB_PORT)"
+  [ -n "$current" ] || updates+=("HINDSIGHT_WEB_PORT=19999")
   for secret_assignment in \
     "HINDSIGHT_DB_PASSWORD:24" \
     "HINDSIGHT_API_KEY:32" \
-    "HINDSIGHT_SERVICE_TOKEN:32"; do
+    "HINDSIGHT_SERVICE_TOKEN:32" \
+    "HINDSIGHT_CP_ACCESS_KEY:8"; do
     current="$(env_value "${secret_assignment%%:*}")"
     case "$current" in
       ""|change-me|\
@@ -1331,6 +1396,25 @@ configure_hindsight_env() {
         ;;
     esac
   done
+  # 默认管理员入口：未显式配置 HINDSIGHT_WEB_URL 时按 PUBLIC_TLS_IP +
+  # HINDSIGHT_WEB_PORT 推导（与 WEKNORA_WEB_URL 同构）。控制面由上方
+  # HINDSIGHT_CP_ACCESS_KEY 登录保护，运维可随时改写为自有受护地址。
+  current="$(env_value HINDSIGHT_WEB_URL)"
+  if [ -z "$current" ]; then
+    tls_ip="$(env_value PUBLIC_TLS_IP)"
+    web_port="$(env_value HINDSIGHT_WEB_PORT)"
+    web_port="${web_port:-19999}"
+    if [ -z "$tls_ip" ]; then
+      log "HINDSIGHT_WEB_URL is required when PUBLIC_TLS_IP is empty; set the Hindsight control-plane origin explicitly to keep the admin entry"
+      exit 1
+    fi
+    case "$tls_ip" in
+      *:*) web_url="http://[${tls_ip}]:${web_port}" ;;
+      *) web_url="http://${tls_ip}:${web_port}" ;;
+    esac
+    updates+=("HINDSIGHT_WEB_URL=${web_url}")
+    log "configured HINDSIGHT_WEB_URL from PUBLIC_TLS_IP and HINDSIGHT_WEB_PORT"
+  fi
   # 官方 1.2.0 镜像与 DB 镜像的已验证 digest。已存在的值（含运维自选的其它
   # @sha256 钉扎）一律保留；validate 阶段统一拒绝非 digest 引用。
   current="$(env_value HINDSIGHT_IMAGE)"
@@ -1348,7 +1432,7 @@ validate_hindsight_config() {
     log "HINDSIGHT_BASE_URL must remain the internal http://hindsight:8888 contract"
     exit 1
   }
-  for key in HINDSIGHT_DB_PASSWORD HINDSIGHT_API_KEY HINDSIGHT_SERVICE_TOKEN; do
+  for key in HINDSIGHT_DB_PASSWORD HINDSIGHT_API_KEY HINDSIGHT_SERVICE_TOKEN HINDSIGHT_CP_ACCESS_KEY; do
     require_secret "$key"
   done
   hindsight_secret="$(env_value HINDSIGHT_DB_PASSWORD)"
@@ -1363,7 +1447,21 @@ validate_hindsight_config() {
       exit 1
     fi
   done
+  # 控制面访问密钥由管理员在登录页手工输入（会话 24h）：默认 16 个十六进制
+  # 字符（64 位），下限放宽到 12，与机器间 Bearer 密钥的 24 位要求区分。
+  hindsight_secret="$(env_value HINDSIGHT_CP_ACCESS_KEY)"
+  if [ "${#hindsight_secret}" -lt 12 ]; then
+    log "HINDSIGHT_CP_ACCESS_KEY must contain at least 12 characters"
+    exit 1
+  fi
   unset hindsight_secret
+  # HINDSIGHT_WEB_URL 必须是 http(s) origin（无路径/查询/凭据），与 backend
+  # memory settings 的净化契约一致；形态错误在部署期即失败，避免线上静默回退
+  # 成「未配置」提示。
+  if ! hindsight_web_url_origin_ok "$(env_value HINDSIGHT_WEB_URL)"; then
+    log "HINDSIGHT_WEB_URL must be an absolute http(s) origin without credentials, path, query, or fragment"
+    exit 1
+  fi
   case "$(env_value HINDSIGHT_TIMEOUT_SECONDS)" in
     ""|*[!0-9.]*|.*|*.|*.*.*)
       log "HINDSIGHT_TIMEOUT_SECONDS must be a number between 0.1 and 60"
@@ -2081,7 +2179,8 @@ redact_compose_logs() {
     WEKNORA_DB_PASSWORD WEKNORA_REDIS_PASSWORD \
     WEKNORA_JWT_SECRET WEKNORA_SYSTEM_AES_KEY WEKNORA_SYSTEM_SIGNING_KEY \
     KANEO_ADMIN_PASSWORD KANEO_DB_PASSWORD KANEO_AUTH_SECRET \
-    HINDSIGHT_DB_PASSWORD HINDSIGHT_API_KEY HINDSIGHT_SERVICE_TOKEN; do
+    HINDSIGHT_DB_PASSWORD HINDSIGHT_API_KEY HINDSIGHT_SERVICE_TOKEN \
+    HINDSIGHT_CP_ACCESS_KEY; do
     value="$(env_value "$key")"
     [ -z "$value" ] || sensitive_values+=("$value")
   done

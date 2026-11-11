@@ -267,8 +267,9 @@ Hindsight 1.2.0 以独立 Compose profile `hindsight` 提供超级助手长期�
 含专用 pgvector 数据库与模型缓存卷，不共用平台 PostgreSQL。本地启用
 `docker compose -f docker-compose.local.yml --profile hindsight up -d`；
 生产在服务器 `.env` 写 `HINDSIGHT_ENABLED=true` 后由 `deploy-prod.sh` 启停
-（未启用时自动停掉历史容器，不删卷）。API 与管理 UI（9999 控制面）仅
-Compose 内网/loopback（本地 `18888`/`19999`），不暴露公网；生产无宿主端口。
+（未启用时自动停掉历史容器，不删卷）。API 仅 Compose 内网（本地另有 loopback
+`18888`）；管理 UI（9999 控制面）本地经 loopback `19999` 访问，生产由
+`HINDSIGHT_WEB_PORT`（默认 `19999`）发布到宿主并以官方访问密钥登录保护。
 
 平台侧设置：`HINDSIGHT_BASE_URL`（容器内网固定 `http://hindsight:8888`）、
 `HINDSIGHT_API_KEY`（backend → Hindsight Bearer，镜像内 ApiKeyTenantExtension
@@ -286,13 +287,21 @@ deploy-prod.sh 幂等生成，可选经 GitHub `PROD_HINDSIGHT_DB_PASSWORD`/
 `HINDSIGHT_POSTGRES_IMAGE`，可选经同名 `PROD_HINDSIGHT_*` repository
 variables 覆盖）。
 
-`HINDSIGHT_WEB_URL`（可选，默认空）是管理员专用的 Hindsight 原生 Web 入口：
-完整的 http(s) 根地址，非密钥，服务器 `.env` 原样保存，仅 backend 显式映射并
-使用（其余 env_file 服务可能继承该值但不使用；不经 GitHub secrets 物化）。
-本地即 loopback 管理页 `http://127.0.0.1:19999`（写 `localhost` 也按原样保留，
-不做 WeKnora 式主机名改写）；生产 UI 无宿主端口，受外部防护的访问地址须另行
-开通后再填写。该链接不新增任何鉴权、代理或 SSO，URL 内不得携带 tenant 或
-API key；留空只表示不配置入口。
+`HINDSIGHT_WEB_URL` 是管理员专用的 Hindsight 原生 Web 入口：完整的 http(s)
+根地址，非密钥，服务器 `.env` 原样保存，仅 backend 显式映射并使用（其余
+env_file 服务可能继承该值但不使用；不经 GitHub secrets 物化）。**生产默认
+开箱即用**：`HINDSIGHT_ENABLED=true` 且该值为空时，`deploy-prod.sh` 自动按
+`http://<PUBLIC_TLS_IP>:<HINDSIGHT_WEB_PORT>` 推导并写入 `.env`（与
+`WEKNORA_WEB_URL` 同构），记忆面板不再提示手工配置；已有值或运维改写时一律
+保留。本地即 loopback 管理页 `http://127.0.0.1:19999`（写 `localhost` 也按
+原样保留，不做 WeKnora 式主机名改写）。URL 内不得携带 tenant 或 API key。
+
+控制面自身的防护由 `HINDSIGHT_CP_ACCESS_KEY` 提供（官方登录机制，Hindsight
+1.2.0）：未设置时控制面对所有可达者**完全无认证**，因此生产启用记忆时
+`deploy-prod.sh` 强制生成该密钥（16 个十六进制字符，保存在服务器 `.env`，
+登录一次换 24 小时会话 cookie）。控制台检索记忆的 BFF 调用由
+`HINDSIGHT_CP_DATAPLANE_API_KEY`（与 backend 的 `HINDSIGHT_API_KEY` 同值）
+通过数据面租户鉴权。平台入口链接本身不新增任何代理或 SSO。
 
 记忆 LLM 的模型选择是服务级的、每用户只有一个"当前模型"：Compose 三文件
 把 Hindsight 的 `HINDSIGHT_API_LLM_MODEL` 固定为平台别名

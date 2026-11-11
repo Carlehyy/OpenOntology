@@ -61,7 +61,8 @@ x-weknora-app: &weknora-app-base
 # interpolation. Only secrets that still exist are masked; the platform never
 # needs the WeKnora database, cache or token-signing keys (the administrator
 # credentials are the sole SSO-relay exception below). The Hindsight DB
-# password belongs to the hindsight stack only and is masked too.
+# password and the Control-Plane access key belong to the hindsight stack
+# only (the key guards the published admin UI login) and are masked too.
 # Two sanctioned exceptions: `backend` re-declares KANEO_ADMIN_PASSWORD and
 # WEKNORA_ADMIN_PASSWORD with the real values for the one-click SSO relays
 # (explicit keys win over merge keys); every other runtime container keeps the
@@ -78,6 +79,7 @@ x-platform-runtime-weknora-secret-blocks: &platform-runtime-weknora-secret-block
   KANEO_DB_PASSWORD: ""
   KANEO_AUTH_SECRET: ""
   HINDSIGHT_DB_PASSWORD: ""
+  HINDSIGHT_CP_ACCESS_KEY: ""
 
 
 services:
@@ -494,8 +496,10 @@ services:
   # OCI index 元数据核验，且本机 arm64 从 Docker Hub 实拉成功；维护环境到
   # registry-1.docker.io 直连不可达，amd64 服务器实拉与「当前 pg17 tag 头
   # digest sha256:7d0a4146…」的官方重取仍是待办——拉取失败时重取并在 .env
-  # 覆盖，禁止退回浮动 tag。无宿主端口：API 与管理 UI（9999 控制面）都只在
-  # compose 内网。
+  # 覆盖，禁止退回浮动 tag。API（8888）只在 compose 内网；管理 UI（9999 控制
+  # 面）经 HINDSIGHT_WEB_PORT（默认 19999）发布到宿主，入口由 deploy-prod.sh
+  # 默认推导为 HINDSIGHT_WEB_URL，控制面本身由 HINDSIGHT_CP_ACCESS_KEY 登录
+  # 保护（官方机制，未设 key 时控制面完全无认证，生产必须设置）。
   hindsight-db:
     image: ${HINDSIGHT_POSTGRES_IMAGE:-pgvector/pgvector:pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f}
     profiles: [hindsight]
@@ -572,6 +576,17 @@ services:
       # 离线/无 egress 环境预填模型缓存后置 1（huggingface_hub 缓存优先）。
       HF_HOME: /hindsight-model-cache
       HF_HUB_OFFLINE: ${HINDSIGHT_HF_OFFLINE:-0}
+      # 管理 UI（Control Plane，容器 9999）的官方访问密钥登录：未设置时控制面
+      # 对所有可达者完全无认证；生产端口已发布，deploy-prod.sh 强制生成该值。
+      HINDSIGHT_CP_ACCESS_KEY: ${HINDSIGHT_CP_ACCESS_KEY:-}
+      # CP 的 BFF 在服务端调数据面 API（同容器 localhost:8888）；数据面已启用
+      # ApiKeyTenantExtension，必须携带与 backend 相同的 HINDSIGHT_API_KEY，
+      # 否则控制台只能登录、无法检索记忆。
+      HINDSIGHT_CP_DATAPLANE_API_KEY: ${HINDSIGHT_API_KEY:-}
+    ports:
+      # 管理 UI 发布到宿主（默认 19999）；API 8888 保持仅内网。入口 URL 由
+      # deploy-prod.sh 从 PUBLIC_TLS_IP + HINDSIGHT_WEB_PORT 默认推导。
+      - "${HINDSIGHT_WEB_PORT:-19999}:9999"
     volumes:
       - hindsight_model_cache:/hindsight-model-cache
     depends_on:
