@@ -25,6 +25,7 @@ def install_runtime_ports() -> None:
     from app.data_channel.integrated.binding_port import (
         IntegratedRemoteBindingValidator,
     )
+    from app.data_channel.integrated.cdc_port import set_cdc_ontology_port
     from app.data_channel.pipeline_tasks.dispatch import (
         dispatch_ontology_assistant_run,
     )
@@ -43,6 +44,7 @@ def install_runtime_ports() -> None:
     from app.ontologies.mappings.remote_binding import (
         set_remote_binding_validator,
     )
+    from app.ontologies.sentinels.external_events import ExternalCdcOntologyAdapter
 
     register_provider(
         "ontology",
@@ -55,5 +57,6 @@ def install_runtime_ports() -> None:
     set_remote_query_port(OntologyQueryAdapter())
     set_action_write_port(AssetWritePortAdapter())
     set_remote_binding_validator(IntegratedRemoteBindingValidator())
+    set_cdc_ontology_port(ExternalCdcOntologyAdapter())
     # run 账本不反向 import 数据通道：组成根把统一派发端口注入 run_service。
     run_service.set_dispatch_run_port(dispatch_ontology_assistant_run)

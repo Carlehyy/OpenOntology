@@ -402,13 +402,208 @@ def _pattern_definition_errors(
     return errors
 
 
+def _expression_properties(expression: Any, aliases: set[str]) -> set[str]:
+    """Property names an expression reads through the given aliases."""
+    raw = str(expression or "").strip().rstrip(";").strip()
+    if not raw:
+        return set()
+    try:
+        tree = ast.parse(raw, mode="eval")
+    except SyntaxError:
+        # validate_safe_expression owns the canonical syntax error.
+        return set()
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Attribute, ast.Subscript)):
+            continue
+        if not isinstance(node.value, ast.Name) or node.value.id not in aliases:
+            continue
+        if isinstance(node, ast.Attribute):
+            found.add(node.attr)
+        elif (isinstance(node.slice, ast.Constant)
+              and isinstance(node.slice.value, str)):
+            found.add(node.slice.value)
+    return found
+
+
+def _parameter_properties(spec: Any, alias: str, primary_alias: str) -> set[str]:
+    """Properties of ``alias`` that one action-parameter binding reads."""
+    names = {alias}
+    if alias == primary_alias:
+        names |= {"primary", "target"}
+    if isinstance(spec, str):
+        return {
+            match.group("property")
+            for match in _SENTINEL_PARAMETER_TEMPLATE.finditer(spec)
+            if match.group("alias") in names
+        } - {"id"}
+    if not isinstance(spec, dict):
+        return set()
+    source = str(spec.get("sourceType", spec.get("source")) or "").strip(
+        ).lower().replace("-", "_")
+    if source not in {"property", "match", "match_property"}:
+        return set()
+    if str(spec.get("alias") or primary_alias or "").strip() not in names:
+        return set()
+    prop = str(spec.get("property", spec.get("sourceValue")) or "").strip()
+    return {prop} - {"", "id"}
+
+
+def remote_sentinel_scope(snapshot: dict | None) -> dict[str, set[str] | None]:
+    """Remote-bound ObjectType id → property names an event can carry.
+
+    ``None`` marks a remote type the ingress cannot subscribe (ambiguous or
+    unresolvable binding): it has neither local rows nor row events.
+    """
+    from app.ontologies.mappings.remote_binding import (
+        RemoteBindingError, remote_bindings_by_type,
+    )
+    from app.ontologies.sentinels.external_events import (
+        release_remote_subscriptions,
+    )
+    try:
+        grouped = remote_bindings_by_type(snapshot)
+    except RemoteBindingError:
+        # The mapping contract gate reports the broken descriptor itself.
+        return {}
+    subscribed = {
+        item["object_type_id"]: set(item["field_map"].values())
+        for item in release_remote_subscriptions("", "", snapshot)
+    }
+    return {type_id: subscribed.get(type_id) for type_id in grouped}
+
+
+def validate_remote_sentinels(
+        sentinels: list, actions: list, snapshot: dict | None) -> list[dict]:
+    """Restrictions for Sentinels bound to remote (external CDC) ObjectTypes.
+
+    A remote type has no local ObjectInstance: the only observable fact is one
+    source row event's frozen post-image of its mapped physical columns.  Such
+    a Sentinel must therefore be a single-binding, single-stage ``on_pattern``
+    rule over mapped properties of that same row, and may only raise internal
+    notifications.  The same predicates guard execution, so what this gate
+    admits is exactly what the runtime will evaluate.
+    """
+    scope = remote_sentinel_scope(snapshot)
+    if not scope:
+        return []
+    from app.ontologies.sentinels.cep import pattern as cep_pattern
+
+    action_by_id = {str(getattr(item, "id", "")): item for item in actions}
+    errors: list[dict] = []
+    for sentinel in sentinels:
+        sid = sentinel.id or ""
+        label = sentinel.display_name or sentinel.name or sid
+        bindings = [
+            item for item in (sentinel.bindings or [])
+            if isinstance(item, dict)
+        ]
+        remote_aliases = {
+            str(item.get("alias") or ""): str(item.get("objectTypeId") or "")
+            for item in bindings
+            if str(item.get("objectTypeId") or "") in scope
+        }
+        if not remote_aliases:
+            continue
+
+        def _gate(code: str, message: str, field: str = "") -> None:
+            errors.append(_gate_error(
+                code, "sentinel", message, item_id=sid, name=label,
+                field=field))
+
+        mode = str(getattr(sentinel, "trigger_mode", "") or "")
+        if mode != cep_contract.PATTERN_TRIGGER_MODE:
+            _gate(
+                "sentinel_remote_trigger_mode_unsupported",
+                f"哨兵「{label}」绑定了远程对象类型：远程行没有本地实例，"
+                "只支持 triggerMode=on_pattern 的单行事件哨兵",
+                "triggerMode")
+            continue
+        definition = cep_pattern.normalize_pattern(
+            getattr(sentinel, "pattern", None))
+        if definition is None:
+            continue  # the structural pattern gate reports the shape error
+        violation = cep_pattern.external_definition_violation(
+            definition, sentinel)
+        if violation is not None:
+            _gate(
+                "sentinel_remote_pattern_unsupported",
+                f"哨兵「{label}」绑定了远程对象类型：{violation}",
+                "pattern")
+        primary_alias = str(getattr(sentinel, "primary_alias", "") or "")
+        for alias, object_type_id in remote_aliases.items():
+            mapped = scope[object_type_id]
+            if mapped is None:
+                _gate(
+                    "sentinel_remote_binding_unavailable",
+                    f"哨兵「{label}」绑定的远程对象类型没有可订阅的唯一"
+                    "远程映射（映射歧义或列无法解析），无法产生行事件",
+                    "bindings")
+                continue
+            expressions = [
+                (f"pattern.stages[{index}].filter", stage.get("filter"))
+                for index, stage in enumerate(definition["stages"])
+                if stage["alias"] == alias
+            ]
+            expressions.append(("pattern.condition", definition.get("condition")))
+            expressions.append(("condition", getattr(sentinel, "condition", None)))
+            expressions.extend(
+                (f"bindings[{index}].filter", item.get("filter"))
+                for index, item in enumerate(bindings)
+                if str(item.get("alias") or "") == alias
+            )
+            for field, expression in expressions:
+                for prop in sorted(
+                        _expression_properties(expression, {alias, "obj"})
+                        - mapped):
+                    _gate(
+                        "sentinel_remote_property_unmapped",
+                        f"哨兵「{label}」引用了远程行事件不携带的属性 "
+                        f"{alias}.{prop}（仅映射到物理列的属性可用，"
+                        "派生/未映射属性不可用）",
+                        field)
+            parameters = getattr(sentinel, "action_parameters", None) or {}
+            for action_id, configured in (
+                    parameters.items() if isinstance(parameters, dict) else []):
+                if not isinstance(configured, dict):
+                    continue
+                for parameter_name, spec in configured.items():
+                    for prop in sorted(
+                            _parameter_properties(spec, alias, primary_alias)
+                            - mapped):
+                        _gate(
+                            "sentinel_remote_property_unmapped",
+                            f"哨兵「{label}」参数「{parameter_name}」绑定了"
+                            f"远程行事件不携带的属性 {alias}.{prop}",
+                            f"actionParameters.{action_id}.{parameter_name}")
+        for index, raw_action_id in enumerate(
+                getattr(sentinel, "action_ids", None) or []):
+            action = action_by_id.get(str(raw_action_id or ""))
+            if action is None:
+                continue  # the structural gate reports the missing action
+            violation = cep_contract.external_action_rule_violation(
+                getattr(action, "rules", None))
+            if violation is not None:
+                _gate(
+                    "sentinel_remote_action_unsupported",
+                    f"哨兵「{label}」绑定了远程对象类型，动作"
+                    f"「{getattr(action, 'display_name', None) or getattr(action, 'name', '')}」"
+                    f"不受支持：{violation}（远程行事件只允许站内通知）",
+                    f"actionIds[{index}]")
+    return errors
+
+
 def validate_sentinels(
     sentinels: list[Sentinel],
     object_types: list[FoObjectType],
     link_types: list[FoLinkType],
     actions: list[FoActionType],
 ) -> list[dict]:
-    """发布前验证 Sentinel 的所有静态引用和动作参数可供给性。"""
+    """发布前验证 Sentinel 的所有静态引用和动作参数可供给性。
+
+    远程（external CDC）绑定类型的单行限制需要快照里的映射绑定，由调用方
+    另行调用 :func:`validate_remote_sentinels`；本函数签名保持不变。
+    """
     errors: list[dict] = []
     object_by_id = {item.id: item for item in object_types}
     link_by_id = {item.id: item for item in link_types}

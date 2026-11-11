@@ -432,3 +432,47 @@ def test_kaneo_probe_rejects_unknown_instance_status_shape(monkeypatch) -> None:
 
     with pytest.raises(RuntimeError, match="instance/status"):
         probes.probe_kaneo(_profile())
+
+
+def test_hindsight_probe_checks_readiness_without_credentials(monkeypatch) -> None:
+    seen = {}
+
+    class Client:
+        def __init__(self, **kwargs):
+            seen["client_kwargs"] = kwargs
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def get(self, url):
+            seen["url"] = url
+            return FakeResponse({"status": "ok"})
+
+    monkeypatch.setattr(probes.httpx, "Client", Client)
+    message, _ = probes.probe_hindsight(_profile())
+
+    assert message == "Hindsight 服务连接正常"
+    assert seen["url"] == "http://127.0.0.1:18888/health/ready"
+    assert seen["client_kwargs"]["mounts"]["all://127.0.0.1"] is None
+
+
+def test_hindsight_probe_rejects_unready_payload(monkeypatch) -> None:
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def get(self, _url):
+            return FakeResponse({}, status_code=503)
+
+    monkeypatch.setattr(probes.httpx, "Client", Client)
+    with pytest.raises(RuntimeError):
+        probes.probe_hindsight(_profile())

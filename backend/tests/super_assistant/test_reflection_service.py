@@ -1,4 +1,15 @@
-"""超级助手反思服务：触发判定、三种反思执行、JSON 修复与审批决策测试。"""
+"""超级助手反思服务：触发判定、三种反思执行、JSON 修复与审批决策测试。
+
+行为基线（2026-11 Hindsight 迁移后）：
+- micro/full/focused 反思只产出技能候选；模型按旧契约返回
+  memory_candidates/conflicts 时一律忽略，不触碰旧记忆库；
+- 自动反思链不做记忆 auto-accept、不触发画像/宫殿重编译；
+- 技能候选的 accept（skill_service 落地 + 同名 409 + 伴随文件）与
+  reject 完整保留；
+- 历史记忆/冲突候选可 reject 清理，accept/new_supersedes 以
+  ValueError 拒绝（router 映射 400），不写入旧记忆库；
+- stage_memory_candidate（旧 manual memory_save 入口）fail-closed。
+"""
 from __future__ import annotations
 
 import json
@@ -140,6 +151,24 @@ def _chat_recording(payload_text: str, calls: list):
         calls.append(messages)
         return {"content": payload_text, "tool_calls": [], "usage": {}}
     return fake_chat
+
+
+def _spy_recompile(monkeypatch) -> list:
+    """监听画像/宫殿编译调用：旧记忆链路停用后自动反思不应触发任何重编译。"""
+    recompiled = []
+    monkeypatch.setattr(
+        memory_service,
+        "compile_profile_and_palace",
+        lambda db_, owner_id, llm_fn: recompiled.append(owner_id),
+    )
+    return recompiled
+
+
+def _forbid_create_memory(monkeypatch):
+    """旧记忆库写入哨兵：任何调用都以 AssertionError 失败。"""
+    def forbidden_create(*_args, **_kwargs):
+        raise AssertionError("自动反思链不得调用旧记忆库 create_memory")
+    monkeypatch.setattr(memory_service, "create_memory", forbidden_create)
 
 
 def _seed_run(
@@ -334,16 +363,26 @@ def test_parse_json_loose_rejects_garbage():
 # ---------------------------------------------------------------------------
 
 
-def test_micro_run_auto_accepts_medium_confidence_memory(db, monkeypatch):
+def test_micro_run_ignores_memory_candidates_and_skips_old_store(
+    db, monkeypatch,
+):
+    """模型按旧契约返回记忆候选时：不写旧记忆库、不落候选、不重编译。
+
+    记忆学习已移交 Hindsight 逐轮自动学习；即使 auto-accept 开关保持
+    默认开启，micro 反思也不得再产出任何旧记忆。
+    """
     _micro_turn(db)
-    payload = json.dumps({
-        "memory_candidates": [_memory_payload()],
-        "skill_candidates": [],
-    }, ensure_ascii=False)
     calls = []
     monkeypatch.setattr(
-        reflection_service.provider, "chat", _chat_recording(payload, calls)
+        reflection_service.provider,
+        "chat",
+        _chat_recording(json.dumps({
+            "memory_candidates": [_memory_payload()],
+            "skill_candidates": [],
+        }, ensure_ascii=False), calls),
     )
+    recompiled = _spy_recompile(monkeypatch)
+    _forbid_create_memory(monkeypatch)
 
     run = reflection_service.run_micro_reflection(
         db, "owner-1", "conv-1", "msg-anchor"
@@ -351,17 +390,12 @@ def test_micro_run_auto_accepts_medium_confidence_memory(db, monkeypatch):
 
     assert run.status == "success"
     assert run.candidate_count == 0
-    memory = db.query(SuperAssistantMemory).one()
-    assert memory.content == "用户喜欢喝黑咖啡"
-    assert memory.source == "reflection"
-    assert memory.confidence == "medium"
+    assert db.query(SuperAssistantMemory).count() == 0
     assert db.query(SuperAssistantReflectionCandidate).count() == 0
-    # auto-accept 成功后触发了画像/宫殿重编译
-    profile = db.get(SuperAssistantMemoryProfile, "owner-1")
-    assert profile is not None
-    assert profile.compiled_at is not None
-    # prompt 输入：本轮对话、工具 preview、记忆与技能小节
+    assert recompiled == []
+    # prompt 不再注入旧记忆小节，但仍含本轮对话与工具 preview
     prompt = calls[0][0]["content"]
+    assert "已有记忆" not in prompt
     assert "我喜欢喝黑咖啡" in prompt
     assert "web_search" in prompt
     assert "搜索结果" in prompt
@@ -373,7 +407,7 @@ def test_micro_run_idempotent_for_successful_message(db, monkeypatch):
     monkeypatch.setattr(
         reflection_service.provider,
         "chat",
-        _chat_recording('{"memory_candidates": [], "skill_candidates": []}', calls),
+        _chat_recording('{"skill_candidates": []}', calls),
     )
 
     first = reflection_service.run_micro_reflection(
@@ -388,7 +422,8 @@ def test_micro_run_idempotent_for_successful_message(db, monkeypatch):
     assert db.query(SuperAssistantReflectionRun).count() == 1
 
 
-def test_micro_run_pending_candidate_when_auto_accept_disabled(db, monkeypatch):
+def test_micro_run_auto_accept_disabled_also_ignores_memory(db, monkeypatch):
+    """auto-accept 关闭同样不落记忆候选：旧记忆链路整体停用，与开关无关。"""
     _micro_turn(db)
     db.add(SuperAssistantMemoryProfile(
         owner_id="owner-1", auto_accept_enabled=False,
@@ -408,60 +443,9 @@ def test_micro_run_pending_candidate_when_auto_accept_disabled(db, monkeypatch):
     )
 
     assert run.status == "success"
-    assert run.candidate_count == 1
-    candidate = db.query(SuperAssistantReflectionCandidate).one()
-    assert candidate.kind == "memory"
-    assert candidate.status == "pending"
-    assert candidate.payload["content"] == "用户喜欢喝黑咖啡"
+    assert run.candidate_count == 0
+    assert db.query(SuperAssistantReflectionCandidate).count() == 0
     assert db.query(SuperAssistantMemory).count() == 0
-
-
-def test_micro_run_low_confidence_goes_pending(db, monkeypatch):
-    _micro_turn(db)
-    monkeypatch.setattr(
-        reflection_service.provider,
-        "chat",
-        _chat_recording(json.dumps({
-            "memory_candidates": [_memory_payload(confidence="low")],
-            "skill_candidates": [],
-        }, ensure_ascii=False), []),
-    )
-
-    run = reflection_service.run_micro_reflection(
-        db, "owner-1", "conv-1", "msg-anchor"
-    )
-
-    assert run.candidate_count == 1
-    candidate = db.query(SuperAssistantReflectionCandidate).one()
-    assert candidate.confidence == "low"
-    assert db.query(SuperAssistantMemory).count() == 0
-
-
-def test_micro_run_write_conflict_falls_back_to_candidate(db, monkeypatch):
-    _micro_turn(db)
-    memory_service.create_memory(
-        db, "owner-1", "用户喜欢喝黑咖啡", conflict_check=False,
-    )
-    monkeypatch.setattr(
-        reflection_service.provider,
-        "chat",
-        _chat_recording(json.dumps({
-            "memory_candidates": [_memory_payload()],
-            "skill_candidates": [],
-        }, ensure_ascii=False), []),
-    )
-
-    run = reflection_service.run_micro_reflection(
-        db, "owner-1", "conv-1", "msg-anchor"
-    )
-
-    assert run.status == "success"
-    assert run.candidate_count == 1
-    candidate = db.query(SuperAssistantReflectionCandidate).one()
-    assert candidate.kind == "memory"
-    assert candidate.status == "pending"
-    # 只有原有的那条记忆，冲突没有写入
-    assert db.query(SuperAssistantMemory).count() == 1
 
 
 def test_micro_run_skill_candidate_always_pending(db, monkeypatch):
@@ -470,10 +454,12 @@ def test_micro_run_skill_candidate_always_pending(db, monkeypatch):
         reflection_service.provider,
         "chat",
         _chat_recording(json.dumps({
-            "memory_candidates": [],
+            # 同轮混入旧记忆候选：只有技能候选落库
+            "memory_candidates": [_memory_payload("不应落库的记忆")],
             "skill_candidates": [_skill_payload()],
         }, ensure_ascii=False), []),
     )
+    recompiled = _spy_recompile(monkeypatch)
 
     run = reflection_service.run_micro_reflection(
         db, "owner-1", "conv-1", "msg-anchor"
@@ -486,6 +472,8 @@ def test_micro_run_skill_candidate_always_pending(db, monkeypatch):
     assert candidate.payload["name"] == "coffee-guide"
     assert candidate.payload["skill_md"].startswith("---")
     assert db.query(SuperAssistantSkill).count() == 0
+    assert db.query(SuperAssistantMemory).count() == 0
+    assert recompiled == []
 
 
 def test_micro_run_llm_error_marks_run_error_without_raising(db, monkeypatch):
@@ -507,6 +495,7 @@ def test_micro_run_llm_error_marks_run_error_without_raising(db, monkeypatch):
 
 
 def test_micro_run_parses_truncated_json(db, monkeypatch):
+    """截断修复仍工作；修复出的 memory_candidates 属旧契约，被忽略。"""
     _micro_turn(db)
     monkeypatch.setattr(
         reflection_service.provider,
@@ -524,10 +513,9 @@ def test_micro_run_parses_truncated_json(db, monkeypatch):
     )
 
     assert run.status == "success"
-    assert run.candidate_count == 1
-    candidate = db.query(SuperAssistantReflectionCandidate).one()
-    assert candidate.payload["content"] == "用户喜欢手冲咖啡"
-    assert candidate.payload["zone"] == "general"
+    assert run.candidate_count == 0
+    assert db.query(SuperAssistantReflectionCandidate).count() == 0
+    assert db.query(SuperAssistantMemory).count() == 0
 
 
 # ---------------------------------------------------------------------------
@@ -581,7 +569,7 @@ def test_full_run_running_record_prevents_duplicate(db, monkeypatch):
     assert db.query(SuperAssistantReflectionRun).count() == 1
 
 
-def test_full_run_lands_three_candidate_kinds(db, monkeypatch):
+def test_full_run_lands_only_skill_candidates(db, monkeypatch):
     _micro_turn(db)
     old = memory_service.create_memory(
         db, "owner-1", "用户偏好英文报告", conflict_check=False,
@@ -602,6 +590,7 @@ def test_full_run_lands_three_candidate_kinds(db, monkeypatch):
         "chat",
         _chat_recording(json.dumps({
             "summary": "用户明确了报告语言偏好",
+            # 模型仍按旧契约返回记忆/冲突候选：一律忽略，只落技能
             "memory_candidates": [_memory_payload(
                 "用户偏好中文报告",
                 zone="work",
@@ -618,38 +607,31 @@ def test_full_run_lands_three_candidate_kinds(db, monkeypatch):
             }],
         }, ensure_ascii=False), calls),
     )
+    recompiled = _spy_recompile(monkeypatch)
+    _forbid_create_memory(monkeypatch)
 
     run = reflection_service.run_full_reflection(db, "owner-1", "conv-1")
 
     assert run.status == "success"
-    assert run.candidate_count == 3
+    assert run.candidate_count == 1
     candidates = (
         db.query(SuperAssistantReflectionCandidate)
         .filter(SuperAssistantReflectionCandidate.run_id == run.id)
         .all()
     )
-    assert sorted(candidate.kind for candidate in candidates) == [
-        "conflict", "memory", "skill",
-    ]
-    # full 不做 auto-accept（即使 confidence=high），旧记忆不被取代
-    assert all(candidate.status == "pending" for candidate in candidates)
+    assert [candidate.kind for candidate in candidates] == ["skill"]
+    assert candidates[0].status == "pending"
+    assert candidates[0].payload["name"] == "weekly-report"
+    # 旧记忆不被新增/取代，也不触发画像重编译
     db.refresh(old)
     assert old.superseded is False
-    memory_candidate = next(
-        candidate for candidate in candidates if candidate.kind == "memory"
-    )
-    assert memory_candidate.confidence == "high"
-    assert memory_candidate.payload["supersedes"] == [old.id]
-    conflict_candidate = next(
-        candidate for candidate in candidates if candidate.kind == "conflict"
-    )
-    assert conflict_candidate.payload["memory_id"] == old.id
-    assert conflict_candidate.payload["candidate_content"] == "用户偏好中文报告"
-    # 审批历史进入 prompt（meta-reflection）
+    assert db.query(SuperAssistantMemory).count() == 1
+    assert recompiled == []
+    # 审批历史进入 prompt（meta-reflection），旧记忆小节不再进入
     prompt = calls[0][0]["content"]
     assert "reject" in prompt
     assert "用户不喜欢咖啡" in prompt
-    assert old.id in prompt
+    assert "现有记忆" not in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -657,47 +639,36 @@ def test_full_run_lands_three_candidate_kinds(db, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _spy_recompile(monkeypatch) -> list:
-    recompiled = []
-    monkeypatch.setattr(
-        memory_service,
-        "compile_profile_and_palace",
-        lambda db_, owner_id, llm_fn: recompiled.append(owner_id),
-    )
-    return recompiled
-
-
-def test_decide_memory_accept_creates_memory_and_recompiles(db, monkeypatch):
+def test_decide_memory_accept_is_rejected_legacy(db, monkeypatch):
+    """历史记忆候选 accept 被显式拒绝（ValueError → router 映射 400），
+    候选保持 pending，不写旧记忆库、不重编译。"""
     candidate = _seed_candidate(db, kind="memory", payload=_memory_payload())
     recompiled = _spy_recompile(monkeypatch)
+    _forbid_create_memory(monkeypatch)
 
-    decided = reflection_service.decide_candidate(
-        db, "owner-1", candidate.id, "accept"
-    )
+    with pytest.raises(ValueError, match="旧记忆链路已停用"):
+        reflection_service.decide_candidate(
+            db, "owner-1", candidate.id, "accept"
+        )
 
-    assert decided.status == "accepted"
-    assert decided.decision == "accept"
-    assert decided.decided_at is not None
-    memory = db.query(SuperAssistantMemory).one()
-    assert memory.content == "用户喜欢喝黑咖啡"
-    assert memory.source == "reflection"
-    assert memory.zone == "core"
-    assert memory.tags == ["咖啡"]
-    assert recompiled == ["owner-1"]
+    assert candidate.status == "pending"
+    assert db.query(SuperAssistantMemory).count() == 0
+    assert recompiled == []
 
 
-def test_decide_memory_accept_edited_payload_overrides(db, monkeypatch):
+def test_decide_memory_accept_edited_payload_still_rejected(db, monkeypatch):
+    """edited_payload 不能绕过停用拒绝：任何 accept 语义都不生效。"""
     candidate = _seed_candidate(db, kind="memory", payload=_memory_payload())
     _spy_recompile(monkeypatch)
 
-    reflection_service.decide_candidate(
-        db, "owner-1", candidate.id, "accept",
-        edited_payload={"content": "人工修订后的内容", "zone": "work"},
-    )
+    with pytest.raises(ValueError, match="旧记忆链路已停用"):
+        reflection_service.decide_candidate(
+            db, "owner-1", candidate.id, "accept",
+            edited_payload={"content": "人工修订后的内容", "zone": "work"},
+        )
 
-    memory = db.query(SuperAssistantMemory).one()
-    assert memory.content == "人工修订后的内容"
-    assert memory.zone == "work"
+    assert candidate.status == "pending"
+    assert db.query(SuperAssistantMemory).count() == 0
 
 
 def test_decide_memory_reject_only_marks(db, monkeypatch):
@@ -709,8 +680,21 @@ def test_decide_memory_reject_only_marks(db, monkeypatch):
     )
 
     assert decided.status == "rejected"
+    assert decided.decision == "reject"
     assert db.query(SuperAssistantMemory).count() == 0
     assert recompiled == []
+
+
+def test_stage_memory_candidate_fail_closed(db):
+    """旧 manual memory_save 入口 fail-closed：不建 run、不落候选。"""
+    _conversation(db)
+    with pytest.raises(ValueError, match="旧记忆链路已停用"):
+        reflection_service.stage_memory_candidate(
+            db, "owner-1", "conv-1", _memory_payload(),
+        )
+
+    assert db.query(SuperAssistantReflectionRun).count() == 0
+    assert db.query(SuperAssistantReflectionCandidate).count() == 0
 
 
 def test_decide_skill_accept_creates_skill_via_skill_service(db, monkeypatch):
@@ -736,7 +720,8 @@ def test_decide_skill_accept_creates_skill_via_skill_service(db, monkeypatch):
     assert (folder / "references" / "ratios.md").read_text(
         encoding="utf-8"
     ) == "粉水比表"
-    assert recompiled == ["owner-1"]
+    # 技能落地不再触发旧画像/宫殿重编译（旧记忆链路停用）
+    assert recompiled == []
 
 
 def test_decide_skill_accept_duplicate_name_conflicts(db, monkeypatch):
@@ -757,7 +742,8 @@ def test_decide_skill_accept_duplicate_name_conflicts(db, monkeypatch):
     assert db.query(SuperAssistantSkill).count() == 1
 
 
-def test_decide_conflict_new_supersedes_replaces_old_memory(db, monkeypatch):
+def test_decide_conflict_new_supersedes_is_rejected_legacy(db, monkeypatch):
+    """new_supersedes 会向旧记忆库写取代记忆，随旧链路一并停用。"""
     old = memory_service.create_memory(
         db, "owner-1", "用户偏好英文报告", conflict_check=False,
     )
@@ -772,51 +758,19 @@ def test_decide_conflict_new_supersedes_replaces_old_memory(db, monkeypatch):
             "candidate_content": "用户偏好中文报告",
         },
     )
-    _spy_recompile(monkeypatch)
+    recompiled = _spy_recompile(monkeypatch)
+    _forbid_create_memory(monkeypatch)
 
-    decided = reflection_service.decide_candidate(
-        db, "owner-1", candidate.id, "new_supersedes"
-    )
+    with pytest.raises(ValueError, match="旧记忆链路已停用"):
+        reflection_service.decide_candidate(
+            db, "owner-1", candidate.id, "new_supersedes"
+        )
 
-    assert decided.status == "accepted"
-    assert decided.decision == "new_supersedes"
-    new_memory = next(
-        memory for memory in db.query(SuperAssistantMemory).all()
-        if memory.id != old.id
-    )
-    assert new_memory.content == "用户偏好中文报告"
-    assert new_memory.supersedes == [old.id]
+    assert candidate.status == "pending"
     db.refresh(old)
-    assert old.superseded is True
-
-
-def test_decide_conflict_new_supersedes_with_edited_content(db, monkeypatch):
-    old = memory_service.create_memory(
-        db, "owner-1", "用户偏好英文报告", conflict_check=False,
-    )
-    candidate = _seed_candidate(
-        db,
-        kind="conflict",
-        payload={
-            "memory_id": old.id,
-            "conflict_kind": "contradiction",
-            "explain": "报告语言偏好发生变化",
-            "options": [],
-            "candidate_content": "用户偏好中文报告",
-        },
-    )
-    _spy_recompile(monkeypatch)
-
-    reflection_service.decide_candidate(
-        db, "owner-1", candidate.id, "new_supersedes",
-        edited_payload={"content": "用户偏好中英双语报告"},
-    )
-
-    new_memory = next(
-        memory for memory in db.query(SuperAssistantMemory).all()
-        if memory.id != old.id
-    )
-    assert new_memory.content == "用户偏好中英双语报告"
+    assert old.superseded is False
+    assert db.query(SuperAssistantMemory).count() == 1
+    assert recompiled == []
 
 
 def test_decide_conflict_keep_old_and_skip_only_mark(db, monkeypatch):
@@ -851,7 +805,8 @@ def test_decide_candidate_unknown_and_already_decided_errors(db):
     with pytest.raises(ValueError, match="候选不存在"):
         reflection_service.decide_candidate(db, "owner-2", candidate.id, "accept")
 
-    with pytest.raises(ValueError, match="不支持的记忆候选操作"):
+    # 旧记忆候选的任何非 reject 操作都落入停用拒绝（含未知操作）
+    with pytest.raises(ValueError, match="旧记忆链路已停用"):
         reflection_service.decide_candidate(db, "owner-1", candidate.id, "bogus")
 
     reflection_service.decide_candidate(db, "owner-1", candidate.id, "reject")

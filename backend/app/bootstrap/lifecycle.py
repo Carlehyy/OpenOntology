@@ -211,6 +211,14 @@ async def application_lifespan(
             except Exception as exc:
                 _main_logger.warning("超级助手定时任务扫描器启动失败: %s", exc)
 
+        if settings.environment != "test":
+            try:
+                from app.super_assistant.memory_scheduler import start as start_memory_scheduler
+
+                start_memory_scheduler()
+            except Exception as exc:
+                _main_logger.warning("记忆同步对账定时器启动失败: %s", exc)
+
         # 消息通知渠道转发扫描器（每 30 秒投递 pending 单；旁路能力，失败不阻断启动）
         if settings.environment != "test":
             try:
@@ -354,6 +362,12 @@ async def application_lifespan(
             scheduled_scheduler.shutdown()
         except Exception:  # noqa: BLE001
             _main_logger.exception("Super assistant scheduled-task scheduler cleanup failed")
+        try:
+            from app.super_assistant import memory_scheduler
+
+            memory_scheduler.shutdown()
+        except Exception:  # noqa: BLE001
+            _main_logger.exception("Memory sync scheduler cleanup failed")
         try:
             from app.notifications import delivery_scheduler
 

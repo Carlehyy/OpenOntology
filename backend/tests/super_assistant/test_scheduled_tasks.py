@@ -10,6 +10,10 @@ from sqlalchemy.orm import sessionmaker
 
 from app.auth.models import User
 from app.shared.database import Base
+from app.super_assistant.memory_models import (
+    SuperAssistantMemorySetting,
+    SuperAssistantMemorySource,
+)
 from app.super_assistant.models import (
     SuperAssistantConversation,
     SuperAssistantMessage,
@@ -69,6 +73,9 @@ def _session(tmp_path):
             TaskApproval.__table__,
             TaskArtifact.__table__,
             TaskEvent.__table__,
+            # Hindsight 主链：execute_run 落用户消息时入队记忆来源
+            SuperAssistantMemorySource.__table__,
+            SuperAssistantMemorySetting.__table__,
         ],
     )
     return sessionmaker(bind=engine, expire_on_commit=False)
@@ -258,6 +265,59 @@ def test_execute_run_creates_conversation_and_records_summary(tmp_path, monkeypa
         assert messages[0].id == run_id
 
 
+def test_execute_run_memory_disabled_no_source(tmp_path, monkeypatch):
+    """用户关闭跨会话记忆：定时指令执行照常，不登记用户来源。"""
+    Session = _session(tmp_path)
+
+    def fake_stream_chat(**kwargs):
+        db = Session()
+        try:
+            message = db.get(SuperAssistantMessage, kwargs["assistant_message_id"])
+            message.content = "整理完成：两项待办。"
+            message.status = "complete"
+            db.commit()
+        finally:
+            db.close()
+        if False:
+            yield "unused"
+
+    monkeypatch.setattr("app.super_assistant.scheduled_service.stream_chat", fake_stream_chat)
+    monkeypatch.setattr("app.super_assistant.scheduled_service.publish_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr("app.super_assistant.scheduled_service.SessionLocal", Session)
+
+    with Session() as db:
+        _user(db)
+        db.add(SuperAssistantMemorySetting(owner_id="owner-1", enabled=False))
+        task = SuperAssistantScheduledTask(
+            owner_id="owner-1", title="晚报", instruction="整理今日进展",
+            schedule_kind="once", timezone="Asia/Shanghai", enabled=False,
+        )
+        db.add(task)
+        db.flush()
+        run = SuperAssistantScheduledRun(
+            task_id=task.id, owner_id="owner-1",
+            scheduled_for=as_utc_naive(datetime.now(timezone.utc)),
+            status="queued",
+        )
+        db.add(run)
+        db.commit()
+        run_id, task_id = run.id, task.id
+
+    execute_run(run_id)
+    with Session() as db:
+        run = get_run(db, "owner-1", task_id, run_id)
+        assert run.status == "completed"
+        assert run.result_summary == "整理完成：两项待办。"
+        # 指令仍作为用户消息进入会话（聊天面不受记忆开关影响）
+        user_messages = (
+            db.query(SuperAssistantMessage)
+            .filter_by(role="user")
+            .all()
+        )
+        assert [message.content for message in user_messages] == ["整理今日进展"]
+        assert db.query(SuperAssistantMemorySource).count() == 0
+
+
 def test_dispatch_subject_and_handler_registration(monkeypatch):
     from app.data_channel.pipeline_tasks.dispatch import (
         PIPELINE_STREAM_SUBJECTS,
@@ -269,10 +329,11 @@ def test_dispatch_subject_and_handler_registration(monkeypatch):
     from app.super_assistant import scheduled_tasks
 
     assert SUPER_ASSISTANT_SCHEDULED_RUN_SUBJECT == "super_assistant.scheduled.run"
-    # 流扩容只能追加：既有 subject 顺序与 durable 不变；本体助手后台回合为
-    # 当前尾项（WeKnora 已退役宫殿 subject）。
-    assert PIPELINE_STREAM_SUBJECTS[-3:] == (
+    # 流扩容只能追加：既有 subject 顺序与 durable 不变；Hindsight 记忆同步
+    # 为当前尾项（本体助手后台回合之后，WeKnora 已退役宫殿 subject）。
+    assert PIPELINE_STREAM_SUBJECTS[-4:] == (
         "task_instances.control", "integrated.sync", "ontology.assistant.run",
+        "super_assistant.memory.sync",
     )
     assert SUPER_ASSISTANT_SCHEDULED_RUN_SUBJECT in PIPELINE_STREAM_SUBJECTS
     registry = {
@@ -283,6 +344,9 @@ def test_dispatch_subject_and_handler_registration(monkeypatch):
         "super-assistant-scheduled-run",
         scheduled_tasks.run_scheduled_task_message,
     )
+    # 记忆同步 durable：pending 来源 → Hindsight 上游 retain 的派发通道
+    memory_entry = registry["super_assistant.memory.sync"]
+    assert memory_entry[0] == "sa-memory-sync"
     sent = []
     monkeypatch.setattr(dispatch_module, "dispatch_task", lambda subject, payload: sent.append((subject, payload)))
     dispatch_super_assistant_scheduled_run("run-1")

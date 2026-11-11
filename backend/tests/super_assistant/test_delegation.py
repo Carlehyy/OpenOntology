@@ -34,6 +34,8 @@ from app.super_assistant.models import (
     SuperAssistantMcpServer,
     SuperAssistantMemory,
     SuperAssistantMemoryProfile,
+    SuperAssistantMemorySetting,
+    SuperAssistantMemorySource,
     SuperAssistantMessage,
     SuperAssistantMulticaConfig,
     SuperAssistantSkill,
@@ -47,6 +49,7 @@ _TABLES = [
     SuperAssistantToolRun.__table__, SuperAssistantToolSetting.__table__, SuperAssistantDelegation.__table__,
     SuperAssistantSkill.__table__, SuperAssistantMcpServer.__table__,
     SuperAssistantMemory.__table__, SuperAssistantMemoryProfile.__table__,
+    SuperAssistantMemorySetting.__table__, SuperAssistantMemorySource.__table__,
     SuperAssistantMulticaConfig.__table__,
 ]
 

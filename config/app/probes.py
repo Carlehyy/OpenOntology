@@ -291,6 +291,27 @@ def _require_kaneo_ok(response: httpx.Response, endpoint: str) -> None:
     response.raise_for_status()
 
 
+def probe_hindsight(profile: ConfigProfile) -> tuple[str, str]:
+    config = profile.hindsight
+    base = config.base_url.rstrip("/")
+    with httpx.Client(
+        timeout=config.timeout_seconds,
+        follow_redirects=False,
+        mounts=loopback_httpx_mounts(base),
+    ) as client:
+        # /health/ready 覆盖 API 进程与数据库就绪；健康端点不要求租户 key。
+        response = client.get(f"{base}/health/ready")
+        response.raise_for_status()
+        payload = response.json()
+    if not isinstance(payload, dict):
+        raise RuntimeError("Hindsight 健康响应无法识别")
+    return (
+        "Hindsight 服务连接正常",
+        "API 与专用数据库就绪；LLM 由平台内部代理按需调用，"
+        "本测试不代表记忆写入/检索链路已验收",
+    )
+
+
 PROBES: dict[str, Callable[[ConfigProfile], tuple[str, str]]] = {
     "postgres": probe_postgres,
     "redis": probe_redis,
@@ -301,6 +322,7 @@ PROBES: dict[str, Callable[[ConfigProfile], tuple[str, str]]] = {
     "n8n": probe_n8n,
     "weknora": probe_weknora,
     "kaneo": probe_kaneo,
+    "hindsight": probe_hindsight,
 }
 
 

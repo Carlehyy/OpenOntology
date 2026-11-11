@@ -15,6 +15,10 @@ from app.model_configs.models import ModelConfig
 from app.shared.config import settings
 from app.shared.database import Base
 from app.super_assistant import runtime
+from app.super_assistant.memory_models import (
+    SuperAssistantMemorySetting,
+    SuperAssistantMemorySource,
+)
 from app.super_assistant.models import (
     SuperAssistantConversation,
     SuperAssistantMcpServer,
@@ -38,6 +42,9 @@ _TABLES = [
     SuperAssistantMulticaConfig.__table__,
     SuperAssistantMemoryProfile.__table__, SuperAssistantReflectionRun.__table__,
     SuperAssistantReflectionCandidate.__table__,
+    # Hindsight 跨会话记忆主链：召回读 settings，逐轮入队写 sources
+    SuperAssistantMemorySource.__table__,
+    SuperAssistantMemorySetting.__table__,
 ]
 
 
@@ -169,7 +176,7 @@ def test_read_only_tools_run_parallel_and_results_in_call_order(tmp_path, monkey
         {
             "content": None,
             "tool_calls": [
-                {"id": "c1", "name": "palace_zones", "arguments": {}},
+                {"id": "c1", "name": "memory_search", "arguments": {"query": "偏好"}},
                 {"id": "c2", "name": "think", "arguments": {"thought": "x"}},
             ],
             "usage": {},
@@ -178,9 +185,9 @@ def test_read_only_tools_run_parallel_and_results_in_call_order(tmp_path, monkey
     ])
     monkeypatch.setattr(runtime.provider, "chat_stream", _fake_chat_stream(responses))
     events = "".join(runtime.stream_chat(**_stream_args(ids)))
-    assert sorted(executed) == ["palace_zones", "think"]
+    assert sorted(executed) == ["memory_search", "think"]
     # tool_result 严格按 call 顺序（c1 在 c2 前）；SSE data 内嵌 JSON 字符串带转义
-    assert events.index('\\"ok\\": \\"palace_zones\\"') < events.index('\\"ok\\": \\"think\\"')
+    assert events.index('\\"ok\\": \\"memory_search\\"') < events.index('\\"ok\\": \\"think\\"')
 
 
 def test_truncated_tool_call_is_not_executed(tmp_path, monkeypatch):
@@ -209,14 +216,23 @@ def test_truncated_tool_call_is_not_executed(tmp_path, monkeypatch):
         assert "截断" in (run.error or "")
 
 
-def test_memory_save_auto_accepts_then_stages_conflict(tmp_path, monkeypatch):
-    _, ids = _seed(tmp_path, monkeypatch, "save")
+def test_memory_save_marks_latest_user_source_for_hindsight(tmp_path, monkeypatch):
+    """memory_save 新链：把最近一条用户消息标为显式记忆来源（幂等），
+    沉淀事实以用户原文为准；旧记忆库与反思候选零写入。"""
+    _, ids = _seed(
+        tmp_path, monkeypatch, "save", user_content="请记住：我喜欢简洁的回答",
+    )
+    dispatched: list = []
+    monkeypatch.setattr(
+        runtime, "dispatch_super_assistant_reflection",
+        lambda kind, payload: dispatched.append((kind, payload)),
+    )
     responses = iter([
         {
             "content": None,
             "tool_calls": [
-                {"id": "c1", "name": "memory_save", "arguments": {"content": "用户偏好简洁回答", "zone": "core"}},
-                {"id": "c2", "name": "memory_save", "arguments": {"content": "用户偏好简洁回答"}},
+                {"id": "c1", "name": "memory_save", "arguments": {"content": "模型转述：喜欢简洁"}},
+                {"id": "c2", "name": "memory_save", "arguments": {"content": "重复标记"}},
             ],
             "usage": {},
         },
@@ -224,47 +240,139 @@ def test_memory_save_auto_accepts_then_stages_conflict(tmp_path, monkeypatch):
     ])
     monkeypatch.setattr(runtime.provider, "chat_stream", _fake_chat_stream(responses))
     events = "".join(runtime.stream_chat(**_stream_args(ids)))
-    assert '\\"saved\\": true' in events
-    assert "已提交审批" in events
+    # 排队文案如实：标记完成不等于已记住
+    assert "已标记本轮用户输入为显式记忆来源" in events
+    assert "不代表已记住" in events
 
     TestingSession = sessionmaker(bind=create_engine(
         f"sqlite:///{tmp_path / 'save.db'}", connect_args={"check_same_thread": False},
     ))
     with TestingSession() as db:
-        memory = db.query(SuperAssistantMemory).one()
-        assert memory.zone == "core"
-        assert memory.source == "reflection"
-        candidate = db.query(SuperAssistantReflectionCandidate).one()
-        assert candidate.kind == "memory"
-        assert candidate.status == "pending"
-        run = db.query(SuperAssistantReflectionRun).one()
-        assert run.kind == "manual"
+        user_sources = (
+            db.query(SuperAssistantMemorySource)
+            .filter_by(role="user")
+            .all()
+        )
+        # 幂等：两次 memory_save 复用同一条用户来源
+        assert len(user_sources) == 1
+        source = user_sources[0]
+        assert source.explicit is True
+        assert source.status == "pending"
+        assert source.source_message_id == "user-msg-save"
+        # 事实以用户原文为准，模型转述不作为事实写入
+        assert source.content == "请记住：我喜欢简洁的回答"
+        # 旧链路零写入：无旧记忆行、无记忆/冲突候选（技能反思链不受影响：
+        # 教学关键词仍照常派发 micro 反思）
+        assert db.query(SuperAssistantMemory).count() == 0
+        assert db.query(SuperAssistantReflectionCandidate).count() == 0
+        assert dispatched == [("micro", {
+            "owner_id": ids["owner_id"],
+            "conversation_id": ids["conversation_id"],
+            "message_id": ids["assistant_message_id"],
+        })]
 
 
-def test_memory_save_stages_candidate_when_auto_accept_disabled(tmp_path, monkeypatch):
-    TestingSession, ids = _seed(tmp_path, monkeypatch, "noauto")
+def test_memory_save_memory_disabled_returns_truthful_error(tmp_path, monkeypatch):
+    """用户关闭记忆后 memory_save fail-closed：如实返回错误，不建来源。"""
+    TestingSession, ids = _seed(
+        tmp_path, monkeypatch, "saveoff",
+        user_content="请记住：我喜欢简洁的回答",
+    )
     with TestingSession() as db:
-        db.add(SuperAssistantMemoryProfile(
-            owner_id=ids["owner_id"], auto_accept_enabled=False,
+        db.add(SuperAssistantMemorySetting(
+            owner_id=ids["owner_id"], enabled=False,
         ))
         db.commit()
     responses = iter([
         {
             "content": None,
-            "tool_calls": [{"id": "c1", "name": "memory_save", "arguments": {"content": "记住一条事实"}}],
+            "tool_calls": [{
+                "id": "c1", "name": "memory_save",
+                "arguments": {"content": "用户喜欢简洁回答"},
+            }],
+            "usage": {},
+        },
+        _text("好的。"),
+    ])
+    monkeypatch.setattr(runtime.provider, "chat_stream", _fake_chat_stream(responses))
+    events = "".join(runtime.stream_chat(**_stream_args(ids)))
+    # 如实错误（不谎报"已记住"），原因可读
+    assert "跨会话记忆未启用" in events
+    with TestingSession() as db:
+        assert db.query(SuperAssistantMemorySource).count() == 0
+
+
+def test_memory_save_disabled_leaves_existing_source_untouched(tmp_path, monkeypatch):
+    """已存在的非显式来源：关闭记忆后 memory_save 被拒且不翻 explicit。"""
+    TestingSession, ids = _seed(tmp_path, monkeypatch, "saveexist")
+    with TestingSession() as db:
+        user_message = db.get(SuperAssistantMessage, "user-msg-saveexist")
+        db.add(SuperAssistantMemorySource(
+            owner_id=ids["owner_id"],
+            source_message_id=user_message.id, version=1,
+            role="user", content=user_message.content,
+            status="pending", explicit=False,
+            conversation_id=ids["conversation_id"],
+            message_id=user_message.id,
+        ))
+        db.add(SuperAssistantMemorySetting(
+            owner_id=ids["owner_id"], enabled=False,
+        ))
+        db.commit()
+
+    output = runtime._execute_builtin_tool(
+        db,
+        owner_id=ids["owner_id"],
+        conversation_id=ids["conversation_id"],
+        assistant_message_id=ids["assistant_message_id"],
+        call_kwargs={},
+        name="memory_save",
+        arguments={"content": "标记显式"},
+    )
+    payload = json.loads(output)
+    assert "跨会话记忆未启用" in payload["error"]
+    assert "sourceId" not in payload
+    db.expire_all()
+    (source,) = db.query(SuperAssistantMemorySource).all()
+    # enabled 检查先于 existing 复用：既有来源保持原状
+    assert source.explicit is False
+    assert source.status == "pending"
+
+
+def test_memory_save_without_user_message_refuses(tmp_path, monkeypatch):
+    """无可关联的用户来源时 fail-closed 拒绝，不产生用户来源行。"""
+    TestingSession, ids = _seed(tmp_path, monkeypatch, "noassoc")
+    with TestingSession() as db:
+        db.query(SuperAssistantMessage).filter(
+            SuperAssistantMessage.role == "user",
+        ).delete()
+        db.commit()
+    responses = iter([
+        {
+            "content": None,
+            "tool_calls": [{"id": "c1", "name": "memory_save", "arguments": {"content": "记住"}}],
             "usage": {},
         },
         _text("好。"),
     ])
     monkeypatch.setattr(runtime.provider, "chat_stream", _fake_chat_stream(responses))
     events = "".join(runtime.stream_chat(**_stream_args(ids)))
-    assert "已提交审批" in events
+    assert "当前回合没有可关联的用户来源" in events
     with TestingSession() as db:
-        assert db.query(SuperAssistantMemory).count() == 0
-        assert db.query(SuperAssistantReflectionCandidate).count() == 1
+        assert (
+            db.query(SuperAssistantMemorySource)
+            .filter_by(role="user")
+            .count() == 0
+        )
 
 
-def test_system_prompt_includes_pinned_memory(tmp_path, monkeypatch):
+def test_system_prompt_excludes_old_store_memory_and_reports_status(
+    tmp_path, monkeypatch,
+):
+    """旧记忆库（pinned/宫殿索引）不再注入 prompt；未配置 Hindsight 时
+    记忆小节为空、memory_status 播报 unconfigured，且不打桩网络。"""
+    from app.super_assistant import hindsight_memory
+
     TestingSession, ids = _seed(tmp_path, monkeypatch, "prompt")
     with TestingSession() as db:
         db.add(SuperAssistantMemory(
@@ -279,10 +387,251 @@ def test_system_prompt_includes_pinned_memory(tmp_path, monkeypatch):
         seen.append(messages[0]["content"])
         return _text("收到。")
 
+    def _bomb_client(*_args, **_kwargs):
+        raise AssertionError("未配置 Hindsight 时不得构造 HTTP 客户端")
+
+    monkeypatch.setattr(hindsight_memory, "HindsightClient", _bomb_client)
     monkeypatch.setattr(runtime.provider, "chat_stream", _fake)
+    events = "".join(runtime.stream_chat(**_stream_args(ids)))
+    assert "用户是平台管理员" not in seen[0]
+    assert "Pinned memories" not in seen[0]
+    assert "跨会话记忆" not in seen[0]
+    # 未配置（hindsight_base_url 为空）→ unconfigured 状态播报
+    assert "event: memory_status" in events
+    assert '"state": "unconfigured"' in events
+
+
+def test_memory_search_unconfigured_reports_state_without_network(
+    tmp_path, monkeypatch,
+):
+    """未配置 Hindsight：memory_search 返回 unconfigured 状态且零 HTTP。"""
+    from app.super_assistant import hindsight_memory
+
+    _, ids = _seed(tmp_path, monkeypatch, "search")
+
+    def _bomb_client(*_args, **_kwargs):
+        raise AssertionError("未配置 Hindsight 时不得构造 HTTP 客户端")
+
+    monkeypatch.setattr(hindsight_memory, "HindsightClient", _bomb_client)
+    responses = iter([
+        {
+            "content": None,
+            "tool_calls": [{"id": "c1", "name": "memory_search", "arguments": {"query": "偏好"}}],
+            "usage": {},
+        },
+        _text("查完了。"),
+    ])
+    monkeypatch.setattr(runtime.provider, "chat_stream", _fake_chat_stream(responses))
+    events = "".join(runtime.stream_chat(**_stream_args(ids)))
+    assert '\\"state\\": \\"unconfigured\\"' in events
+
+
+def test_completed_answer_enqueues_assistant_source(tmp_path, monkeypatch):
+    """assistant 最终答复 complete 即入队记忆来源（逐轮自动学习）。"""
+    _, ids = _seed(tmp_path, monkeypatch, "complete")
+    monkeypatch.setattr(
+        runtime.provider,
+        "chat_stream",
+        _fake_chat_stream(iter([_text("最终答复。")])),
+    )
     "".join(runtime.stream_chat(**_stream_args(ids)))
-    assert "用户是平台管理员" in seen[0]
-    assert "Pinned memories" in seen[0]
+
+    TestingSession = sessionmaker(bind=create_engine(
+        f"sqlite:///{tmp_path / 'complete.db'}", connect_args={"check_same_thread": False},
+    ))
+    with TestingSession() as db:
+        sources = db.query(SuperAssistantMemorySource).all()
+        assert [(s.role, s.status, s.content) for s in sources] == [
+            ("assistant", "pending", "最终答复。"),
+        ]
+        assert sources[0].message_id == ids["assistant_message_id"]
+
+
+def test_completed_answer_memory_disabled_no_source(tmp_path, monkeypatch):
+    """用户关闭记忆：完成答复不入队来源，回合照常完成。"""
+    TestingSession, ids = _seed(tmp_path, monkeypatch, "memoff")
+    with TestingSession() as db:
+        db.add(SuperAssistantMemorySetting(
+            owner_id=ids["owner_id"], enabled=False,
+        ))
+        db.commit()
+    monkeypatch.setattr(
+        runtime.provider,
+        "chat_stream",
+        _fake_chat_stream(iter([_text("答复。")])),
+    )
+    events = "".join(runtime.stream_chat(**_stream_args(ids)))
+    assert "event: message_end" in events
+    with TestingSession() as db:
+        assistant = db.get(SuperAssistantMessage, ids["assistant_message_id"])
+        assert assistant.status == "complete"
+        assert assistant.content == "答复。"
+        assert db.query(SuperAssistantMemorySource).count() == 0
+
+
+def test_completed_answer_empty_content_no_source(tmp_path, monkeypatch):
+    """模型零文本输出保留界面提示，但不将占位文案作为记忆来源。"""
+    _, ids = _seed(tmp_path, monkeypatch, "empty")
+    monkeypatch.setattr(
+        runtime.provider,
+        "chat_stream",
+        _fake_chat_stream(iter([_text("")])),
+    )
+    events = "".join(runtime.stream_chat(**_stream_args(ids)))
+    assert "event: message_end" in events
+    TestingSession = sessionmaker(bind=create_engine(
+        f"sqlite:///{tmp_path / 'empty.db'}", connect_args={"check_same_thread": False},
+    ))
+    with TestingSession() as db:
+        assistant = db.get(SuperAssistantMessage, ids["assistant_message_id"])
+        assert assistant.status == "complete"
+        assert assistant.content == "模型没有返回可显示的内容。"
+        assert db.query(SuperAssistantMemorySource).count() == 0
+
+
+def test_completed_answer_safe_context_capped_at_limit(tmp_path, monkeypatch):
+    """完成答复的来源 context 只存用户原话前 MAX_CONTEXT_CHARS 字符。"""
+    from app.super_assistant.hindsight_memory import MAX_CONTEXT_CHARS
+
+    long_question = "背景补充：" + "订单明细与物流节点；" * 60
+    assert len(long_question) > MAX_CONTEXT_CHARS * 3
+    _, ids = _seed(tmp_path, monkeypatch, "ctx", user_content=long_question)
+    monkeypatch.setattr(
+        runtime.provider,
+        "chat_stream",
+        _fake_chat_stream(iter([_text("结论。")])),
+    )
+    "".join(runtime.stream_chat(**_stream_args(ids)))
+
+    TestingSession = sessionmaker(bind=create_engine(
+        f"sqlite:///{tmp_path / 'ctx.db'}", connect_args={"check_same_thread": False},
+    ))
+    with TestingSession() as db:
+        (source,) = db.query(SuperAssistantMemorySource).all()
+        assert source.role == "assistant"
+        # 答复正文全文沉淀；context 仅保留安全长度的出处线索
+        assert source.content == "结论。"
+        assert source.context == long_question[:MAX_CONTEXT_CHARS]
+        assert len(source.context) == MAX_CONTEXT_CHARS
+
+
+def test_failed_round_keeps_only_user_source(tmp_path, monkeypatch):
+    """异常回合不沉淀助手答复：来源只剩用户侧（send_message 已入队）。"""
+    from app.super_assistant import hindsight_memory
+
+    TestingSession, ids = _seed(tmp_path, monkeypatch, "errsource")
+    with TestingSession() as db:
+        user_message = db.get(SuperAssistantMessage, "user-msg-errsource")
+        hindsight_memory.enqueue_message(
+            db, owner_id=ids["owner_id"],
+            conversation_id=ids["conversation_id"],
+            message_id=user_message.id, role="user",
+            content=user_message.content,
+            occurred_at=user_message.created_at,
+        )
+        db.commit()
+
+    def failing_stream(*_args, **_kwargs):
+        raise RuntimeError("模型不可用")
+
+    monkeypatch.setattr(runtime.provider, "chat_stream", failing_stream)
+    events = "".join(runtime.stream_chat(**_stream_args(ids)))
+    assert "event: error" in events
+    with TestingSession() as db:
+        roles = [s.role for s in db.query(SuperAssistantMemorySource).all()]
+        assert roles == ["user"]
+        assistant = db.get(SuperAssistantMessage, ids["assistant_message_id"])
+        assert assistant.status == "error"
+
+
+def test_cancelled_round_keeps_only_user_source(tmp_path, monkeypatch):
+    """客户端中断（GeneratorExit）回合同样不沉淀助手答复。"""
+    from app.super_assistant import hindsight_memory
+
+    TestingSession, ids = _seed(tmp_path, monkeypatch, "cancelsrc")
+    with TestingSession() as db:
+        user_message = db.get(SuperAssistantMessage, "user-msg-cancelsrc")
+        hindsight_memory.enqueue_message(
+            db, owner_id=ids["owner_id"],
+            conversation_id=ids["conversation_id"],
+            message_id=user_message.id, role="user",
+            content=user_message.content,
+            occurred_at=user_message.created_at,
+        )
+        db.commit()
+
+    stream = runtime.stream_chat(**_stream_args(ids))
+    next(stream)  # 推进到首个 yield（meta 事件）
+    stream.close()
+    with TestingSession() as db:
+        roles = [s.role for s in db.query(SuperAssistantMemorySource).all()]
+        assert roles == ["user"]
+        assistant = db.get(SuperAssistantMessage, ids["assistant_message_id"])
+        assert assistant.status == "error"
+
+
+def test_memory_delete_requires_confirmation_and_marks_forgetting(
+    tmp_path, monkeypatch,
+):
+    """memory_delete 须用户确认后才执行；未确认超时 fail-closed 不遗忘，
+    执行即把来源置 forgetting（tombstone 先落）。"""
+    TestingSession, ids = _seed(tmp_path, monkeypatch, "del")
+    monkeypatch.setattr(settings, "super_assistant_approval_timeout_seconds", 1)
+    source_id = None
+    with TestingSession() as db:
+        user_message = db.get(SuperAssistantMessage, "user-msg-del")
+        source = SuperAssistantMemorySource(
+            owner_id=ids["owner_id"],
+            source_message_id=user_message.id, version=1,
+            role="user", content="要被遗忘的事实",
+            status="synced", document_id="doc-1",
+            conversation_id=ids["conversation_id"],
+            message_id=user_message.id,
+        )
+        db.add(source)
+        db.commit()
+        source_id = source.id
+
+    responses = iter([
+        {
+            "content": None,
+            "tool_calls": [{
+                "id": "c1", "name": "memory_delete",
+                "arguments": {"memory_id": source_id},
+            }],
+            "usage": {},
+        },
+        _text("好的。"),
+    ])
+    monkeypatch.setattr(runtime.provider, "chat_stream", _fake_chat_stream(responses))
+    events = "".join(runtime.stream_chat(**_stream_args(ids)))
+    assert "event: tool_start" in events
+    with TestingSession() as db:
+        # 确认门：无人批准超时后 ToolRun 过期，遗忘不执行（fail-closed）
+        run = (
+            db.query(SuperAssistantToolRun)
+            .filter_by(tool_name="memory_delete")
+            .one()
+        )
+        assert run.requires_confirmation is True
+        assert run.status == "expired"
+        assert db.get(SuperAssistantMemorySource, source_id).status == "synced"
+
+        # 审批通过后执行：tombstone 先落（forgetting），文案如实
+        output = runtime._execute_builtin_tool(
+            db,
+            owner_id=ids["owner_id"],
+            conversation_id=ids["conversation_id"],
+            assistant_message_id=ids["assistant_message_id"],
+            call_kwargs={},
+            name="memory_delete",
+            arguments={"memory_id": source_id},
+        )
+        payload = json.loads(output)
+        assert payload["sourceId"] == source_id
+        assert payload["status"] == "forgetting"
+        assert "不代表已经忘记" in payload["note"]
+        assert db.get(SuperAssistantMemorySource, source_id).status == "forgetting"
 
 
 def test_micro_reflection_dispatched_on_explicit_intent(tmp_path, monkeypatch):

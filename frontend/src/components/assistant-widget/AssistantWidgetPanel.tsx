@@ -18,6 +18,7 @@ import {
   parseJoinAssertionArguments,
 } from '@/components/ontologyConfirmationModel'
 import { buildChainSteps } from '@/components/assistant-widget/logic'
+import { MemoryStatusNotice } from '@/components/assistant-widget/MemoryStatusNotice'
 import { useAssistantWidgetStore } from '@/stores/assistantWidgetStore'
 import { useThemeStore } from '@/stores/themeStore'
 
@@ -198,6 +199,7 @@ export default function AssistantWidgetPanel({
   const activeId = useAssistantWidgetStore(state => state.activeId)
   const messages = useAssistantWidgetStore(state => state.messages)
   const streaming = useAssistantWidgetStore(state => state.streaming)
+  const memoryStatus = useAssistantWidgetStore(state => state.memoryStatus)
   const draft = useAssistantWidgetStore(state => state.draft)
   const setOpen = useAssistantWidgetStore(state => state.setOpen)
   const setDraft = useAssistantWidgetStore(state => state.setDraft)
@@ -358,6 +360,13 @@ export default function AssistantWidgetPanel({
               <X size={16} />
             </button>
           </header>
+
+          {/* 用户级记忆运行时状态（SSE memory_status）：与消息生成独立，独立状态条呈现 */}
+          {memoryStatus && (
+            <div className="flex shrink-0 justify-center px-3 pt-2">
+              <MemoryStatusNotice status={memoryStatus} />
+            </div>
+          )}
 
           <div className="min-h-0 flex-1 overflow-hidden">
             {unavailable ? (

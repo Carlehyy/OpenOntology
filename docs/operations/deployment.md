@@ -108,6 +108,25 @@ Actions 日志。`KANEO_WEB_URL` 未显式配置时从 `PUBLIC_TLS_IP` 与
 [首个管理员密码](#首次登录与管理员密码恢复)。服务与地址契约详见
 [配置说明](./configuration.md#kaneo-项目管理2490)。
 
+Hindsight 1.2.0 长期记忆是可选 profile，默认不部署：服务器 `.env` 写
+`HINDSIGHT_ENABLED=true` 后，`deploy-prod.sh` 幂等生成
+`HINDSIGHT_DB_PASSWORD`/`HINDSIGHT_API_KEY`/`HINDSIGHT_SERVICE_TOKEN`（可选经
+`PROD_HINDSIGHT_DB_PASSWORD`/`PROD_HINDSIGHT_API_KEY`/`PROD_HINDSIGHT_SERVICE_TOKEN`
+secrets 与 `PROD_HINDSIGHT_IMAGE`/`PROD_HINDSIGHT_POSTGRES_IMAGE` variables
+物化，全部可缺省，缺省时由服务器端生成/钉扎），并校验镜像 `@sha256` 钉扎。
+核心 compose 调用一律不携带 hindsight profile：可选栈只在核心部署成功之后
+（readiness、源码 attestation 与 `deployment succeeded` 已判定，backend 已
+就绪，Hindsight 的 LLM 回调目标存在）才由单独的有时间上界的
+`--profile hindsight up -d hindsight` 启动（`HINDSIGHT_START_TIMEOUT`，默认
+300 秒；本地已有钉扎镜像时不访问 registry，缺镜像时随该调用自拉）。镜像
+拉取、缓存卷属主 init、专用 DB 健康、应用启动或超时的任何失败都只降级记忆
+特性：停掉本次起了一半的可选容器（`hindsight`/`hindsight-db`/
+`hindsight-model-init`，卷保留，下次部署自动重试），绝不停止核心服务或改写
+部署结论；启动成功但未在观察窗内健康（首启可能在下载 embedding 模型）则
+保持运行并仅记录告警。未启用时自动停掉历史容器（保留卷）。它不参与平台
+readiness 与部署成败判定，部署日志仅记录功能健康状态。详见
+[配置流程](./configuration.md#hindsight-长期记忆可选默认关闭)。
+
 ## 数据库迁移停机边界
 
 生产迁移是一次有意的短暂停机。依赖连接预检通过后，`deploy/deploy-prod.sh`
@@ -325,6 +344,71 @@ bind-mount 工作区 + 模型凭据容器环境注入，详见域内 `container_
   完整方案，生产启用前应在隔离 staging 按 AGENTS.md §5 完成验收：
   激活 → 容器执行 → 契约校验 → 审批 → 收货全链路 + 插话实测，证据入
   `.artifacts/`。
+
+## 集成 CDC 执行器（integrated_cdc_executor，opt-in）
+
+集成数据集的源端 CDC（`backend/app/data_channel/integrated/`，控制面
+`cdc_control.py` + 运行时 `cdc_executor.py`）由独立的常驻执行器承接：
+每个受管连接一个 Debezium Server 子进程（Python 监督者管理），事件经
+HTTP sink 发往**同容器** 127.0.0.1 临时端口的接收器，standard-webhooks
+HMAC 密钥每次运行期/每次子进程启动随机生成，只写入 0600 临时配置文件
+（tmpfs），不进环境变量、不进公开 API。执行器不发布任何端口、不挂载
+docker.sock、以非 root（uid 10001）只读 rootfs 运行。
+
+- **启用**（覆盖层只新增服务与专用卷，不改任何既有服务/密钥）：
+
+  ```bash
+  docker compose -f docker-compose.prod.yml -f docker-compose.cdc.yml \
+    up -d --build integrated_cdc_executor
+  ```
+
+- **镜像**：`backend/Dockerfile.cdc`。Python 运行时同 backend 镜像；Debezium
+  Server 发行版与其 Java 21 运行时整体取自固定摘要官方镜像
+  `quay.io/debezium/server:3.7.1.Final@sha256:8c4e6c7efc392f9adfd283ede2e75cd1a3594ef1126b014248054a5e718bfbd5`
+  （升级 = 换摘要重测，不跟踪浮动 tag）。复用已构建 backend 镜像的快速路径
+  见 Dockerfile 头注释（`CDC_PREBUILT_BACKEND=1`）。
+- **状态卷**：`integrated_cdc_state` 挂到 `/var/lib/openontology-cdc`，按
+  `连接/generation` 分目录存 Debezium 偏移与模式历史。订阅增删、凭据轮换
+  （暂停等待连接重测）同代续用偏移；物理端点变更被控制面 409 阻塞，直到
+  旧源观测到停止 + 复制槽清理确认，随后显式换代重锚。执行器重启
+  （SIGTERM/宕机）从不清理活跃源的槽，重启即续流。
+- **覆盖语义（无回填）**：`snapshot.mode=no_data`。新订阅先进入子进程
+  include 集，待该子进程被接收器确认过事件/心跳且健康探测 UP 后才锚定
+  激活前沿；锚定前的区间是显式未覆盖期，绝不回填。WAL/binlog 缺口显式
+  报 `gap`，绝不自动补快照：包括续流前自有 PG 槽缺失/失效，以及任一方言
+  下“已声称覆盖但本地偏移文件缺失/为空”（状态卷丢失）——此时绝不以
+  `no_data` 从当前位点静默续接。模式漂移按
+  **连接级** fail-closed：整源暂停（首版不做单表隔离）。事件事实达到容量
+  上限（100 万条）时接收器把源置为暂停（`EVENT_CAPACITY_EXCEEDED`），
+  执行器保持该暂停、不自动续流，也没有预留额度或自动恢复。超限裁剪只裁到
+  上限本身，不产生余量；恢复需要到期清理后事实总量不超过“上限减去新事件
+  所需事实数”，此时管理员对连接做显式重测，控制面解除暂停后从保留的偏移
+  续流。重测本身不删除事实，容量不足时仍会再次暂停；若 7 天内的本地事件量
+  已达到上限，需先做容量规划或另行运维处理。
+- **源端前置条件**：MySQL `binlog_format=ROW`、`binlog_row_image=FULL`、
+  `REPLICATION SLAVE/CLIENT`，以及 `RELOAD`（或动态权限 `FLUSH_TABLES`）
+  ——`no_data` 模式启动时的 schema 快照用 `FLUSH TABLES ... WITH READ LOCK`
+  取读锁，Debezium Server 3.7.1 的表级回退同样执行 `FLUSH TABLES`，所以仅
+  授予 `LOCK TABLES` 不够；`SHOW DATABASES` 按官方要求建议授予（本平台按
+  显式库表寻址，缺失不致命）。缺 `RELOAD/FLUSH_TABLES` 时预检直接报
+  `SNAPSHOT_LOCK_PRIVILEGE_MISSING`，不会拉起子进程去做“健康 UP 但内部无限
+  重试”的空转。PostgreSQL `wal_level=logical`、订阅表
+  `REPLICA IDENTITY FULL`，并建议设置 `max_slot_wal_keep_size` 等槽保留
+  上限，防止休眠源在等待清理期间推高 WAL。
+- **状态口径（低流量源）**：`active` 需要新鲜窗口（15 秒）内的真实流证据。
+  MySQL 的 Debezium 心跳只在处理 binlog 事件时产生，源端完全空闲时没有
+  新证据，状态会如实回落为 `starting`（健康为 false），有新数据即恢复；
+  执行器不向业务库写入任何东西来制造心跳。回落只影响健康口径，不影响
+  已激活订阅：后续变更照常接收入库，偏移与激活前沿不变。
+- **资源与健康**：`CDC_MAX_SOURCES`（默认 2，与覆盖层默认 3g 内存上限
+  匹配；调大须同步上调 `CDC_EXECUTOR_MEM_LIMIT`）限制并发子进程，每个子进程
+  JVM 堆由 `CDC_CHILD_JAVA_OPTS`（默认 256m）约束；服务级
+  `mem_limit/cpus/pids_limit` 见覆盖层（可用 `CDC_EXECUTOR_MEM_LIMIT`/
+  `CDC_EXECUTOR_CPUS` 收紧）。健康检查基于“最近一拍对账完成”心跳文件：
+  元数据库不可达时如实不健康。多副本/滚动重叠由每源 PostgreSQL 咨询锁
+  租约互斥，同一源不会出现两个子进程争用同一复制槽。
+- **运行日志边界**：子进程输出只分类为稳定错误码后记录，不转发原文；
+  连接配置仅运行期瞬时解密，主机/账号/SQL/源值不进任何日志。
 
 ## 部署前检查
 

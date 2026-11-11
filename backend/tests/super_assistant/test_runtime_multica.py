@@ -15,6 +15,8 @@ from app.super_assistant.models import (
     SuperAssistantMcpServer,
     SuperAssistantMemory,
     SuperAssistantMemoryProfile,
+    SuperAssistantMemorySetting,
+    SuperAssistantMemorySource,
     SuperAssistantMessage,
     SuperAssistantMulticaConfig,
     SuperAssistantReflectionCandidate,
@@ -30,7 +32,8 @@ _RUNTIME_TABLES = [
     SuperAssistantConversation.__table__, SuperAssistantSkill.__table__,
     SuperAssistantMcpServer.__table__, SuperAssistantMessage.__table__,
     SuperAssistantToolRun.__table__, SuperAssistantToolSetting.__table__, SuperAssistantMemory.__table__,
-    SuperAssistantMemoryProfile.__table__, SuperAssistantReflectionRun.__table__,
+    SuperAssistantMemoryProfile.__table__,
+    SuperAssistantMemorySetting.__table__, SuperAssistantMemorySource.__table__, SuperAssistantReflectionRun.__table__,
     SuperAssistantReflectionCandidate.__table__, SuperAssistantMulticaConfig.__table__,
 ]
 

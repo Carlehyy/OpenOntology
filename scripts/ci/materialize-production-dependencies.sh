@@ -143,6 +143,16 @@ append_optional KANEO_ADMIN_EMAIL PROD_KANEO_ADMIN_EMAIL
 append_optional_digest KANEO_APP_IMAGE PROD_KANEO_APP_IMAGE
 append_optional_digest KANEO_POSTGRES_IMAGE PROD_KANEO_POSTGRES_IMAGE
 
+# Hindsight long-term memory is an optional profile. Its secrets are optional
+# here too: deploy-prod.sh generates server-side values when the GitHub secrets
+# are unset, and a missing secret never blocks the platform deployment. The
+# enable toggle (HINDSIGHT_ENABLED) stays server-side in .env only.
+append_optional HINDSIGHT_DB_PASSWORD PROD_HINDSIGHT_DB_PASSWORD
+append_optional HINDSIGHT_API_KEY PROD_HINDSIGHT_API_KEY
+append_optional HINDSIGHT_SERVICE_TOKEN PROD_HINDSIGHT_SERVICE_TOKEN
+append_optional_digest HINDSIGHT_IMAGE PROD_HINDSIGHT_IMAGE
+append_optional_digest HINDSIGHT_POSTGRES_IMAGE PROD_HINDSIGHT_POSTGRES_IMAGE
+
 chmod 600 "$tmp_file"
 mv "$tmp_file" "$target"
 trap - EXIT

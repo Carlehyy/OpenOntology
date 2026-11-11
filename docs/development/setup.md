@@ -180,6 +180,28 @@ Kaneo，使页面 API、认证来源和平台入口一致；不会按当前访�
 `kaneo_data` 卷（`/var/lib/kaneo`）只是运行时资源，不是附件持久化，项目数据
 的权威存储是 `kaneo_postgres_data`。
 
+## Hindsight 长期记忆（可选）
+
+Hindsight 默认不启动。启用本地记忆栈（含专用 pgvector DB 与模型缓存卷）：
+
+```bash
+docker compose -f docker-compose.local.yml --profile hindsight up -d
+curl http://127.0.0.1:18888/health/ready   # API + DB 就绪探针
+```
+
+首次启动需 HuggingFace egress 下载 embedding 模型
+（`intfloat/multilingual-e5-small`，缓存在 `hindsight_model_cache` 卷）；无
+egress 环境先在有网机器预下载同一 repo 并填入该卷，再在 `.env` 设
+`HINDSIGHT_HF_OFFLINE=1`（方法见
+[operations/configuration.md](../operations/configuration.md#hindsight-长期记忆可选默认关闭)）。
+API 仅 loopback `18888`，管理 UI 仅 loopback `19999`，都不对外。服务不可用时
+仅记忆特性降级，聊天不受影响；配置中心 `Hindsight` 节为可选测试，不阻塞生成本地配置。
+
+可选的 `HINDSIGHT_WEB_URL`（默认空）是管理员专用的原生 Web 入口：本地填
+`http://127.0.0.1:19999`（写 `localhost` 也按原样保留，不做改写），不为此发布
+额外端口。该链接不新增任何鉴权、代理或 SSO，URL 内不得携带 tenant 或 API
+key；生产须待外部防护的地址另行开通后，在服务器 `.env` 填写。
+
 ## 最小验证
 
 改动后先跑受影响范围，再执行 [AGENTS.md](../../AGENTS.md) 第 5 节完整门禁：

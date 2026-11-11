@@ -4,7 +4,7 @@ import { Sender } from '@ant-design/x'
 import { ConfigProvider, theme as antdTheme } from 'antd'
 import {
   ArrowDown, Check, Cpu, Layers3, List, Loader2, Menu, Mic, Monitor, MoreHorizontal, Network, Paperclip, Pencil,
-  ScrollText, Send, Settings2, Square, SquareKanban, X,
+  Route as RouteIcon, ScrollText, Send, Settings2, Square, SquareKanban, X,
 } from 'lucide-react'
 
 import { modelApi } from '@/api/ontologies'
@@ -32,6 +32,7 @@ import VoiceRecordingBar from './components/VoiceRecordingBar'
 import QuickInputMenu from './components/QuickInputMenu'
 import QuickInputsDialog from './components/QuickInputsDialog'
 import ConversationSummaryDialog from './components/ConversationSummaryDialog'
+import EventRoutingDialog from './components/EventRoutingDialog'
 import { createSummaryScheduler } from './summaryScheduler'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Dialog, DialogTrigger } from '@/components/ui/dialog'
@@ -40,7 +41,12 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
 import { toast } from 'sonner'
-import { pickInitialConversationId } from '@/components/assistant-widget/logic'
+import {
+  parseMemoryStatusEvent,
+  pickInitialConversationId,
+  type MemoryStatusSnapshot,
+} from '@/components/assistant-widget/logic'
+import { MemoryStatusNotice } from '@/components/assistant-widget/MemoryStatusNotice'
 import { parsePendingConfirmation } from '@/components/ontologyConfirmationModel'
 import { hasMenuAccess } from '@/config/navigation'
 import { useAuthStore } from '@/stores/authStore'
@@ -178,6 +184,11 @@ export default function SuperAssistantPage() {
   // 会话纪要：头部按钮弹窗 + 自动生成落定计数（+1 时若弹窗打开则刷新展示）
   const [summaryOpen, setSummaryOpen] = useState(false)
   const [summaryRefreshKey, setSummaryRefreshKey] = useState(0)
+  // 用户级 Hindsight 记忆运行时状态（SSE memory_status 事件更新）：与消息生成、
+  // 工具步骤完全独立，记忆故障不作为聊天 error 呈现，仅以独立状态条可见
+  const [memoryStatus, setMemoryStatus] = useState<MemoryStatusSnapshot | null>(null)
+  // 事件路由：头部按钮弹窗（入口位于会话纪要与领域知识之间，内容占位待后续迭代）
+  const [eventRoutingOpen, setEventRoutingOpen] = useState(false)
   // 知识库（WeKnora）：页面加载只读后端返回的原生 Web URL；入口不依赖 state、
   // 知识库或模型可用性，也不代表知识检索已就绪。登录走 WeKnora 自己的账号体系。
   const [weknora, setWeknora] = useState<WeKnoraIntegration | null>(null)
@@ -951,7 +962,12 @@ export default function SuperAssistantPage() {
     summarySchedulerRef.current?.notify(conversationId)
     try {
       await superAssistantApi.streamChat(conversationId, { message, model_config_id: modelConfigId, agent_mode: true }, ({ event, data }) => {
-        if (event === 'thinking') {
+        // 记忆状态是用户级运行时状态而非 tools step：不触碰消息缓冲，
+        // 与 text/message_end 完全独立，正文中断绝不影响记忆状态条
+        if (event === 'memory_status') {
+          const snapshot = parseMemoryStatusEvent(data)
+          if (snapshot) setMemoryStatus(snapshot)
+        } else if (event === 'thinking') {
           buffer.thinkingRound = Number(data.round) || null
           applyBuffer()
         } else if (event === 'text_delta') {
@@ -1544,6 +1560,9 @@ export default function SuperAssistantPage() {
         models={models}
         refreshKey={summaryRefreshKey}
       />
+      {eventRoutingOpen && (
+        <EventRoutingDialog onClose={() => setEventRoutingOpen(false)} />
+      )}
       {/* 单一大卡：左聊天区 + 右助手配置面板同卡，内部 1px 分隔线 + 拖拽手柄相接；
           面板展开时聊天列让出 --config-w 宽度（面板本身绝对定位铺右缘），收起时整卡即聊天区 */}
       <section
@@ -1610,7 +1629,7 @@ export default function SuperAssistantPage() {
               </button>
             )}
           </div>
-          {/* 会话纪要入口：位于项目管理（Kaneo）/知识库（WeKnora）入口左侧；窄屏（<md）让位标题/模型选择器，收进「更多操作」溢出菜单 */}
+          {/* 会话纪要入口：位于事件路由/项目管理（Kaneo）/知识库（WeKnora）入口左侧；窄屏（<md）让位标题/模型选择器，收进「更多操作」溢出菜单 */}
           <button
             type="button"
             onClick={() => setSummaryOpen(true)}
@@ -1620,7 +1639,19 @@ export default function SuperAssistantPage() {
           >
             <ScrollText size={16} aria-hidden="true" />
           </button>
-          {/* 项目管理（Kaneo）入口：位于知识库（WeKnora）入口左侧；新标签打开
+          {/* 事件路由入口：位于会话纪要与领域知识之间；弹窗内容占位（规则配置后续迭代）。
+              窄屏（<md）与两侧入口一起收进「更多操作」溢出菜单。 */}
+          <button
+            type="button"
+            onClick={() => setEventRoutingOpen(true)}
+            aria-label="事件路由"
+            title="事件路由"
+            data-workbench-event-routing
+            className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-brand-line bg-[var(--color-context-usage-bg)] text-brand-ink transition-colors hover:border-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:flex"
+          >
+            <RouteIcon size={16} aria-hidden="true" />
+          </button>
+          {/* 项目管理（Kaneo）入口：位于知识库（WeKnora）入口紧左（事件路由右侧）；新标签打开
               原生 Web，登录走 Kaneo 自己的单用户账号。窄屏（<md）收进「更多操作」溢出菜单。 */}
           {kaneoUrl ? (
             <a
@@ -1647,7 +1678,7 @@ export default function SuperAssistantPage() {
               <SquareKanban size={16} aria-hidden="true" />
             </button>
           )}
-          {/* 知识库（WeKnora）入口：位于会话纪要右侧、所有会话（含新会话）可用；
+          {/* 知识库（WeKnora）入口：位于项目管理（Kaneo）入口右侧、所有会话（含新会话）可用；
               新标签打开原生 Web，不在入口上宣称知识已就绪；悬停文案「领域知识」。
               窄屏（<md）让位标题/模型选择器，收进「更多操作」溢出菜单。 */}
           {weknoraUrl ? (
@@ -1779,6 +1810,14 @@ export default function SuperAssistantPage() {
                 <ScrollText size={15} className="shrink-0 text-brand-ink" />
                 会话纪要
               </button>
+              <button
+                type="button"
+                onClick={() => { setHeaderOverflowOpen(false); setEventRoutingOpen(true) }}
+                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <RouteIcon size={15} className="shrink-0 text-brand-ink" />
+                事件路由
+              </button>
               {kaneoUrl ? (
                 <a
                   href={kaneoUrl}
@@ -1862,6 +1901,13 @@ export default function SuperAssistantPage() {
           }}
         >
           <main className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+            {/* 记忆运行时状态条（SSE memory_status）：所有状态均明确可见（含未配置），
+                与聊天内容独立、不作为生成错误呈现 */}
+            {memoryStatus && (
+              <div className="flex shrink-0 justify-center px-4 pt-2 sm:px-8">
+                <MemoryStatusNotice status={memoryStatus} />
+              </div>
+            )}
             {kernelRunId && (
               <div className="mx-auto w-full max-w-4xl px-4 pt-3 sm:px-8">
                 <KernelRunTaskCard
@@ -1960,6 +2006,7 @@ export default function SuperAssistantPage() {
         skills={skills}
         servers={servers}
         tools={tools}
+        models={models}
         refreshSkills={refreshSkills}
         refreshServers={refreshServers}
         refreshTools={refreshTools}

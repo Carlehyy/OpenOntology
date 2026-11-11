@@ -25,6 +25,10 @@ from app.super_assistant.models import (
     SuperAssistantToolSetting,
 )
 from app.super_assistant.kernel.models import CapabilityRevision
+from app.super_assistant.memory_models import (
+    SuperAssistantMemorySetting,
+    SuperAssistantMemorySource,
+)
 from app.super_assistant.skill_store import build_manifest, create_skill_folder, render_skill_markdown, skill_directory
 
 # 流式改造后 runtime 每轮调 provider.chat_stream；测试统一经此伪造响应
@@ -39,6 +43,9 @@ _RUNTIME_TABLES = [
     SuperAssistantMemoryProfile.__table__, SuperAssistantReflectionRun.__table__,
     SuperAssistantReflectionCandidate.__table__,
     CapabilityRevision.__table__,  # 审批后 MCP 实时复核读授权位
+    # Hindsight 跨会话记忆主链：stream_chat 召回读 settings，完成/入队写 sources
+    SuperAssistantMemorySource.__table__,
+    SuperAssistantMemorySetting.__table__,
 ]
 
 
@@ -1159,10 +1166,14 @@ def test_runtime_dispatches_registered_weknora_through_standard_mcp(tmp_path, mo
 
 
 def test_builtin_tool_catalog_no_longer_exposes_palace_graph_tools():
+    """旧宫殿工具全家（graph 检索 + 分区读取/主动回忆）随 Hindsight 迁移
+    退出 runtime 目录与系统 prompt；记忆入口只剩 memory_search/save/delete。"""
     names = {tool["name"] for tool in runtime._builtin_tools(True)}
     assert "palace_graph_search" not in names
     assert "palace_graph_files" not in names
-    assert {"palace_zones", "palace_read_zone", "palace_recall"} <= names
+    assert not ({"palace_zones", "palace_read_zone", "palace_recall"} & names)
+    assert {"memory_search", "memory_save", "memory_delete"} <= names
     prompt = runtime._system_prompt([])
     assert "palace_graph_search" not in prompt
-    assert "palace_zones" in prompt
+    assert "palace_zones" not in prompt
+    assert "palace_recall" not in prompt

@@ -25,7 +25,10 @@ from app.models.sentinel import Sentinel, SentinelMatchState
 from app.ontologies.agent_runtime import schemas as AgentSchemas
 from app.ontologies.agent_runtime.boundary import ToolError
 from app.ontologies.release_context import CurrentReleaseContext, current_release_context
-from app.ontologies.sentinels.validation import validate_sentinels
+from app.ontologies.sentinels.validation import (
+    validate_remote_sentinels,
+    validate_sentinels,
+)
 from app.ontologies.versions.snapshot_contract import (
     snapshot_models,
 )
@@ -409,6 +412,10 @@ def validate_definition(db: Session, context: CurrentReleaseContext, scope,
         )
         errors.extend(validate_sentinels(
             [candidate], models["objectTypes"], models["linkTypes"], models["actions"]))
+        # Remote (external CDC) types carry single-row restrictions that only
+        # the frozen release's mapping bindings can decide.
+        errors.extend(validate_remote_sentinels(
+            [candidate], models["actions"], context.snapshot))
         errors.extend(_dynamic_contract_errors(definition, models))
     except Exception as exc:  # fail closed if the shared governance gate changes
         errors.append(_error(

@@ -1,0 +1,78 @@
+# integrated CDC 执行器 opt-in 覆盖层（默认不启用）。
+#
+#   docker compose -f docker-compose.prod.yml -f docker-compose.cdc.yml \
+#     up -d --build integrated_cdc_executor
+#
+# 只新增一个服务与一个专用卷，不修改任何既有服务或密钥。执行器不发布任何
+# 端口、不挂载 docker.sock；Debezium HTTP sink 的接收端只监听本容器
+# 127.0.0.1 临时端口，签名密钥每运行期随机生成，不来自任何环境变量。
+# 运行细节见 docs/operations/deployment.md 的「集成 CDC 执行器」一节。
+services:
+  integrated_cdc_executor:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.cdc
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
+    # 执行器在运行期解密受管连接配置，需要与 backend 相同的平台密钥
+    # （SECRET_KEY / ENCRYPTION_KEY）；不引入任何新的凭据变量。
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # 覆盖层无法引用 prod 文件的 YAML 锚点：与 backend 相同，逐项置空共享
+      # .env 中仅供 WeKnora 自身使用的凭据，不让它们进入本容器。
+      WEKNORA_ADMIN_PASSWORD: ""
+      WEKNORA_DB_PASSWORD: ""
+      WEKNORA_REDIS_PASSWORD: ""
+      WEKNORA_JWT_SECRET: ""
+      WEKNORA_SYSTEM_AES_KEY: ""
+      WEKNORA_SYSTEM_SIGNING_KEY: ""
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://ontoprompt:ontoprompt@db:5432/ontoprompt}
+      APP_LOG_LEVEL: ${APP_LOG_LEVEL:-INFO}
+      # 每连接/每代的偏移与模式历史（专用持久卷）；含密钥的子进程配置只落
+      # 在 tmpfs。
+      CDC_STATE_ROOT: /var/lib/openontology-cdc
+      CDC_RUN_ROOT: /tmp/cdc
+      # 同时流式的连接数上限（默认 2，与下方 3g 内存上限匹配；调大时须同步
+      # 提高 CDC_EXECUTOR_MEM_LIMIT）；每个子进程 JVM 堆上限见
+      # CDC_CHILD_JAVA_OPTS。
+      CDC_MAX_SOURCES: ${CDC_MAX_SOURCES:-2}
+      CDC_CHILD_JAVA_OPTS: ${CDC_CHILD_JAVA_OPTS:--Xms64m -Xmx256m -XX:MaxDirectMemorySize=64m -XX:ActiveProcessorCount=2 -Djava.awt.headless=true}
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - integrated_cdc_state:/var/lib/openontology-cdc
+    command: python -m app.data_channel.integrated.cdc_executor
+    # 资源上限：默认按 2 源 × 子进程 256m 堆 + 监督进程预算；调大
+    # CDC_MAX_SOURCES 时同步上调。
+    mem_limit: ${CDC_EXECUTOR_MEM_LIMIT:-3g}
+    cpus: ${CDC_EXECUTOR_CPUS:-2.0}
+    pids_limit: 1024
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=256m,nosuid,nodev,mode=1777
+    # 停止时先向全部子进程组发 SIGTERM 再回收，留足优雅退出预算。
+    stop_grace_period: 45s
+    healthcheck:
+      # 执行器每拍（2 秒）完成对账后刷新存活文件；元数据库不可达时不刷新。
+      test: ["CMD", "python", "-c", "import os,time,sys; sys.exit(0 if time.time()-os.path.getmtime('/tmp/integrated_cdc_executor.heartbeat')<30 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    restart: unless-stopped
+
+volumes:
+  integrated_cdc_state:

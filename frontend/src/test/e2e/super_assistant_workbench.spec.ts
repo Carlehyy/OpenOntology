@@ -1027,9 +1027,10 @@ test('工作台骨架：功能入口齐备，近期会话单列表，归档折�
   await expect(page.getByRole('link', { name: '知识库（WeKnora）' })).toBeVisible()
   await expect(page.locator('[data-workbench-palace]')).toHaveCount(0)
 
-  // 功能项顺序契约：全局搜索 → 消息通知 → 事件路由 → 定时任务 → 任务实例 → 能力拓展 → 本体治理
+  // 功能项顺序契约：全局搜索 → 消息通知 → 定时任务 → 任务实例 → 能力拓展 → 本体治理
+  // （事件路由入口已迁至聊天头部，位于会话纪要与领域知识之间）
   const navEntries = page.locator('nav[aria-label="工作台功能"] > *')
-  const expectedOrder = ['全局搜索', '消息通知', '事件路由', '定时任务', '任务实例', '能力拓展', '本体治理']
+  const expectedOrder = ['全局搜索', '消息通知', '定时任务', '任务实例', '能力拓展', '本体治理']
   await expect(navEntries).toHaveCount(expectedOrder.length)
   for (let index = 0; index < expectedOrder.length; index += 1) {
     await expect(navEntries.nth(index)).toContainText(expectedOrder[index])
@@ -1048,13 +1049,26 @@ test('工作台骨架：功能入口齐备，近期会话单列表，归档折�
   await expect(page.getByTestId('super-assistant-composer')).toBeVisible()
 })
 
-test('事件路由：位于消息通知与定时任务之间，点击打开占位弹窗，Esc 关闭', async ({ page }) => {
+test('事件路由：位于会话纪要与领域知识之间，点击打开占位弹窗，Esc 关闭', async ({ page }) => {
   await seedAuth(page)
   await mockApis(page)
   await page.goto('/#/super-assistant')
 
+  // 左侧工作台不再保留事件路由入口，仅聊天头部一处
+  const nav = page.locator('nav[aria-label="工作台功能"]')
+  await expect(nav.getByRole('button', { name: '事件路由' })).toHaveCount(0)
+
+  // 位置契约：位于「会话纪要」右侧、「领域知识」（WeKnora）左侧
   const entry = page.getByRole('button', { name: '事件路由' })
   await expect(entry).toBeVisible()
+  const summary = page.getByRole('button', { name: '查看会话纪要' })
+  const weknora = page.getByRole('link', { name: '知识库（WeKnora）' })
+  const [summaryBox, entryBox, weknoraBox] = await Promise.all([
+    summary.boundingBox(), entry.boundingBox(), weknora.boundingBox(),
+  ])
+  expect(summaryBox!.x + summaryBox!.width).toBeLessThanOrEqual(entryBox!.x + 1)
+  expect(entryBox!.x + entryBox!.width).toBeLessThanOrEqual(weknoraBox!.x + 1)
+
   await entry.click()
   const dialog = page.getByRole('dialog')
   await expect(dialog.getByRole('heading', { name: '事件路由' })).toBeVisible()
@@ -2582,19 +2596,21 @@ test('项目管理（Kaneo）：位于领域知识左侧，新标签打开原生
   }))
   await page.goto('/#/super-assistant')
 
-  // 入口钉在「会话纪要」与「领域知识（WeKnora）」之间：左邻右舍各量一次
+  // 入口钉在「领域知识（WeKnora）」紧左（事件路由右侧、会话纪要更左）：相邻各量一次
   const kaneoLink = page.getByRole('link', { name: '项目管理（Kaneo）' })
   const weknoraLink = page.getByRole('link', { name: '知识库（WeKnora）' })
   const summary = page.getByRole('button', { name: '查看会话纪要' })
+  const eventRouting = page.getByRole('button', { name: '事件路由', exact: true })
   await expect(kaneoLink).toBeVisible()
   await expect(kaneoLink).toHaveAttribute('href', 'https://kaneo.example.com:8445')
   await expect(kaneoLink).toHaveAttribute('target', '_blank')
   await expect(kaneoLink).toHaveAttribute('rel', 'noopener noreferrer')
   await expect(kaneoLink).toHaveAttribute('title', '项目管理')
-  const [summaryBox, kaneoBox, weknoraBox] = await Promise.all([
-    summary.boundingBox(), kaneoLink.boundingBox(), weknoraLink.boundingBox(),
+  const [summaryBox, eventRoutingBox, kaneoBox, weknoraBox] = await Promise.all([
+    summary.boundingBox(), eventRouting.boundingBox(), kaneoLink.boundingBox(), weknoraLink.boundingBox(),
   ])
-  expect(summaryBox!.x + summaryBox!.width).toBeLessThanOrEqual(kaneoBox!.x + 1)
+  expect(summaryBox!.x + summaryBox!.width).toBeLessThanOrEqual(eventRoutingBox!.x + 1)
+  expect(eventRoutingBox!.x + eventRoutingBox!.width).toBeLessThanOrEqual(kaneoBox!.x + 1)
   expect(kaneoBox!.x + kaneoBox!.width).toBeLessThanOrEqual(weknoraBox!.x + 1)
   await expect.poll(() => mocks.kaneoCalls.length).toBeGreaterThanOrEqual(1)
   expect(mocks.kaneoCalls[0]).toContain('/api/v2/super-assistant/kaneo')
@@ -2623,15 +2639,16 @@ test('项目管理（Kaneo）：回环下发保留后端 canonical origin，窄�
   await expect(kaneoLink).toBeVisible()
   await expect(kaneoLink).toHaveAttribute('href', 'https://127.0.0.1:8445')
 
-  // 窄屏溢出菜单顺序与头部一致：会话纪要 → 项目管理（Kaneo）→ 知识库（WeKnora）
+  // 窄屏溢出菜单顺序与头部一致：会话纪要 → 事件路由 → 项目管理（Kaneo）→ 知识库（WeKnora）
   await page.setViewportSize({ width: 375, height: 720 })
   await expect(page.getByRole('link', { name: '项目管理（Kaneo）' })).toBeHidden()
   await page.getByRole('button', { name: '更多操作' }).click()
   const menu = page.getByRole('dialog')
   const menuItems = menu.locator('a, button')
   await expect(menuItems.first()).toHaveText('会话纪要')
-  await expect(menuItems.nth(1)).toHaveAttribute('aria-label', '项目管理（Kaneo）')
-  await expect(menuItems.nth(2)).toHaveAttribute('aria-label', '知识库（WeKnora）')
+  await expect(menuItems.nth(1)).toHaveText('事件路由')
+  await expect(menuItems.nth(2)).toHaveAttribute('aria-label', '项目管理（Kaneo）')
+  await expect(menuItems.nth(3)).toHaveAttribute('aria-label', '知识库（WeKnora）')
   const menuKaneoLink = menu.getByRole('link', { name: '项目管理（Kaneo）' })
   await expect(menuKaneoLink).toBeVisible()
   await expect(menuKaneoLink).toHaveAttribute('href', 'https://127.0.0.1:8445')
@@ -3209,11 +3226,12 @@ test.describe('窄屏顶栏与会话操作（390px）', () => {
     await expect(page.getByRole('link', { name: '知识库（WeKnora）' })).toBeHidden()
     await page.getByRole('button', { name: '更多操作' }).click()
     const menu = page.getByRole('dialog')
-    // 溢出菜单顺序与头部一致：会话纪要 → 项目管理（Kaneo）→ 知识库（WeKnora）
+    // 溢出菜单顺序与头部一致：会话纪要 → 事件路由 → 项目管理（Kaneo）→ 知识库（WeKnora）
     const menuItems = menu.locator('a, button')
     await expect(menuItems.first()).toHaveText('会话纪要')
-    await expect(menuItems.nth(1)).toHaveAttribute('aria-label', '项目管理（Kaneo）')
-    await expect(menuItems.nth(2)).toHaveAttribute('aria-label', '知识库（WeKnora）')
+    await expect(menuItems.nth(1)).toHaveText('事件路由')
+    await expect(menuItems.nth(2)).toHaveAttribute('aria-label', '项目管理（Kaneo）')
+    await expect(menuItems.nth(3)).toHaveAttribute('aria-label', '知识库（WeKnora）')
     const link = menu.getByRole('link', { name: '知识库（WeKnora）' })
     await expect(link).toBeVisible()
     await expect(link).toHaveAttribute('href', 'https://weknora.example.com:8443')

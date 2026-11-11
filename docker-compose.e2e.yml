@@ -63,8 +63,71 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+  # 可选 Hindsight 长期记忆（opt-in：--profile hindsight）。宿主机 backend 经
+  # 127.0.0.1:18888 访问 API；固定测试凭据与本文件其它服务同风格。LLM 回调
+  # 宿主机 backend（host.docker.internal:8000 的内部 memory 代理），backend
+  # 未起不影响 Hindsight 自身启动。
+  hindsight-db:
+    image: pgvector/pgvector:pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
+    profiles: ["hindsight"]
+    environment:
+      POSTGRES_DB: hindsight
+      POSTGRES_USER: hindsight
+      POSTGRES_PASSWORD: e2e-hindsight-db-password
+    volumes: [hindsight_pg_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hindsight -d hindsight"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+  # 缓存卷属主修正（镜像 uid 1000，新命名卷默认 root 属主）。
+  hindsight-model-init:
+    image: alpine:3.20
+    profiles: ["hindsight"]
+    command: ["sh", "-c", "mkdir -p /cache/huggingface && chown -R 1000:1000 /cache"]
+    volumes: [hindsight_model_cache:/cache]
+    restart: "no"
+  hindsight:
+    image: ghcr.io/vectorize-io/hindsight:1.2.0@sha256:19d0c08f3df79acac29384826419a1ca158129e81ec527cdcbd8c97ff4ef76da
+    profiles: ["hindsight"]
+    stop_grace_period: 75s
+    environment:
+      HINDSIGHT_API_DATABASE_URL: postgresql://hindsight:e2e-hindsight-db-password@hindsight-db:5432/hindsight
+      HINDSIGHT_API_TENANT_EXTENSION: hindsight_api.extensions.builtin.tenant:ApiKeyTenantExtension
+      HINDSIGHT_API_TENANT_API_KEY: e2e-hindsight-api-key
+      HINDSIGHT_API_LLM_PROVIDER: openai
+      HINDSIGHT_API_LLM_BASE_URL: http://host.docker.internal:8000/api/v2/super-assistant/internal/memory/v1
+      HINDSIGHT_API_LLM_API_KEY: e2e-hindsight-service-token
+      HINDSIGHT_API_LLM_MODEL: oo-memory-default
+      HINDSIGHT_API_EMBEDDINGS_PROVIDER: onnx
+      HINDSIGHT_API_EMBEDDINGS_ONNX_MODEL_ID: intfloat/multilingual-e5-small
+      HINDSIGHT_API_EMBEDDINGS_ONNX_FILE: onnx/model.onnx
+      HINDSIGHT_API_EMBEDDINGS_ONNX_DIMENSIONS: "384"
+      HINDSIGHT_API_EMBEDDINGS_ONNX_QUERY_PREFIX: "query: "
+      HINDSIGHT_API_EMBEDDINGS_ONNX_PASSAGE_PREFIX: "passage: "
+      HF_HOME: /hindsight-model-cache
+      HF_HUB_OFFLINE: ${HINDSIGHT_HF_OFFLINE:-0}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - hindsight_model_cache:/hindsight-model-cache
+    depends_on:
+      hindsight-db:
+        condition: service_healthy
+      hindsight-model-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8888/health/ready', timeout=5).status == 200 else 1)"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 300s
+    ports: ["127.0.0.1:18888:8888"]
 volumes:
   pg_data:
   nats_data:
   neo4j_data:
   minio_data:
+  hindsight_pg_data:
+  hindsight_model_cache:

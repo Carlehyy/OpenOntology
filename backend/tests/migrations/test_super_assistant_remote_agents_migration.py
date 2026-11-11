@@ -71,4 +71,4 @@ def test_head_is_single(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     from alembic.script import ScriptDirectory
     heads = ScriptDirectory.from_config(cfg).get_heads()
-    assert heads == ["0143_operations_menu_keys"]
+    assert heads == ["0146_integrated_cdc"]

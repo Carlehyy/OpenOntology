@@ -59,7 +59,8 @@ x-weknora-app: &weknora-app-base
 # this block verbatim into every service that loads .env; the WeKnora stack
 # and the one-shot bootstrap keep reading the real values from compose
 # interpolation. Only secrets that still exist are masked; the platform never
-# needs the WeKnora administrator, database, cache or token-signing keys.
+# needs the WeKnora administrator, database, cache or token-signing keys. The
+# Hindsight DB password belongs to the hindsight stack only and is masked too.
 x-platform-runtime-weknora-secret-blocks: &platform-runtime-weknora-secret-blocks
   WEKNORA_ADMIN_PASSWORD: ""
   WEKNORA_DB_PASSWORD: ""
@@ -70,6 +71,7 @@ x-platform-runtime-weknora-secret-blocks: &platform-runtime-weknora-secret-block
   KANEO_ADMIN_PASSWORD: ""
   KANEO_DB_PASSWORD: ""
   KANEO_AUTH_SECRET: ""
+  HINDSIGHT_DB_PASSWORD: ""
 
 
 services:
@@ -477,6 +479,123 @@ services:
     networks:
       - dbx_bridge
 
+  # 可选 Hindsight 长期记忆栈（profile `hindsight`，由 deploy-prod.sh 按
+  # .env 的 HINDSIGHT_ENABLED 开关）。它不是 backend 的硬依赖：记忆调用失败
+  # 只降级记忆特性，聊天与全局 readiness 不受影响，backend 不得把它列为
+  # healthy 依赖（其 LLM 回调 backend，构成环）。生产镜像一律 @sha256 钉扎。
+  # HINDSIGHT_POSTGRES_IMAGE 默认 pgvector pg17 的多架构 index digest
+  # sha256:cf134a76…：amd64+arm64 平台清单已经公共镜像源（pull-through）的
+  # OCI index 元数据核验，且本机 arm64 从 Docker Hub 实拉成功；维护环境到
+  # registry-1.docker.io 直连不可达，amd64 服务器实拉与「当前 pg17 tag 头
+  # digest sha256:7d0a4146…」的官方重取仍是待办——拉取失败时重取并在 .env
+  # 覆盖，禁止退回浮动 tag。无宿主端口：API 与管理 UI（9999 控制面）都只在
+  # compose 内网。
+  hindsight-db:
+    image: ${HINDSIGHT_POSTGRES_IMAGE:-pgvector/pgvector:pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f}
+    profiles: [hindsight]
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - ': "$${POSTGRES_PASSWORD:?HINDSIGHT_DB_PASSWORD is required}"; exec docker-entrypoint.sh postgres'
+    environment:
+      POSTGRES_DB: ${HINDSIGHT_DB_NAME:-hindsight}
+      POSTGRES_USER: ${HINDSIGHT_DB_USER:-hindsight}
+      POSTGRES_PASSWORD: ${HINDSIGHT_DB_PASSWORD:-}
+    volumes:
+      - hindsight_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    networks:
+      - hindsight_internal
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 1m
+
+  # 一次性缓存卷属主修正：镜像以 uid 1000（hindsight 用户）运行，而新建命名
+  # 卷默认 root 属主；不先 chown 的话 embedding 模型下载会 EACCES。有 egress
+  # 时由 Hindsight 首启自行下载；无 egress 生产按 docs 预填同一卷后置
+  # HINDSIGHT_HF_OFFLINE=1。
+  hindsight-model-init:
+    image: ${ALPINE_IMAGE:-alpine:3.20}
+    profiles: [hindsight]
+    command: ["sh", "-c", "mkdir -p /cache/huggingface && chown -R 1000:1000 /cache"]
+    volumes:
+      - hindsight_model_cache:/cache
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+
+  hindsight:
+    image: ${HINDSIGHT_IMAGE:-ghcr.io/vectorize-io/hindsight:1.2.0@sha256:19d0c08f3df79acac29384826419a1ca158129e81ec527cdcbd8c97ff4ef76da}
+    profiles: [hindsight]
+    stop_grace_period: 75s
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - ': "$${HINDSIGHT_API_TENANT_API_KEY:?HINDSIGHT_API_KEY is required}"; : "$${HINDSIGHT_API_LLM_API_KEY:?HINDSIGHT_SERVICE_TOKEN is required}"; exec /app/start-all.sh'
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      HINDSIGHT_API_DATABASE_URL: postgresql://${HINDSIGHT_DB_USER:-hindsight}:${HINDSIGHT_DB_PASSWORD:-}@hindsight-db:5432/${HINDSIGHT_DB_NAME:-hindsight}
+      # 租户鉴权：backend 必须携带同一 HINDSIGHT_API_KEY（Bearer）；该 key
+      # 不是任何真实模型 key。
+      HINDSIGHT_API_TENANT_EXTENSION: hindsight_api.extensions.builtin.tenant:ApiKeyTenantExtension
+      HINDSIGHT_API_TENANT_API_KEY: ${HINDSIGHT_API_KEY:-}
+      # LLM 走平台内部 OpenAI 兼容代理（实际 POST {base}/chat/completions）；
+      # key 与 backend HINDSIGHT_SERVICE_TOKEN 同值（内部 service token）。
+      # LLM 懒加载：backend 滚动重启不影响 Hindsight 存活。
+      HINDSIGHT_API_LLM_PROVIDER: openai
+      HINDSIGHT_API_LLM_BASE_URL: http://backend:8000/api/v2/super-assistant/internal/memory/v1
+      HINDSIGHT_API_LLM_API_KEY: ${HINDSIGHT_SERVICE_TOKEN:-}
+      # Hindsight 1.2.0 禁止 bank 级 llm_model 覆盖；固定平台别名，真实模型由
+      # 平台记忆网关按用户 setting 解析（见 docs/operations/configuration.md）。
+      HINDSIGHT_API_LLM_MODEL: oo-memory-default
+      # embedding 固定字段：多语 intfloat/multilingual-e5-small（ONNX CPU，
+      # 384 维，E5 非对称前缀）。模型不在镜像内：首启经 HuggingFace egress
+      # 下载并持久化在 hindsight_model_cache 卷；离线环境需预填该卷。
+      HINDSIGHT_API_EMBEDDINGS_PROVIDER: onnx
+      HINDSIGHT_API_EMBEDDINGS_ONNX_MODEL_ID: intfloat/multilingual-e5-small
+      HINDSIGHT_API_EMBEDDINGS_ONNX_FILE: onnx/model.onnx
+      HINDSIGHT_API_EMBEDDINGS_ONNX_DIMENSIONS: "384"
+      HINDSIGHT_API_EMBEDDINGS_ONNX_QUERY_PREFIX: "query: "
+      HINDSIGHT_API_EMBEDDINGS_ONNX_PASSAGE_PREFIX: "passage: "
+      # rerank 保持镜像预载默认（hindsight-ai/hs-rerank-1）；中文效果未验证，
+      # 属于效果门禁，部署侧不盲目更换模型。
+      # 离线/无 egress 环境预填模型缓存后置 1（huggingface_hub 缓存优先）。
+      HF_HOME: /hindsight-model-cache
+      HF_HUB_OFFLINE: ${HINDSIGHT_HF_OFFLINE:-0}
+    volumes:
+      - hindsight_model_cache:/hindsight-model-cache
+    depends_on:
+      hindsight-db:
+        condition: service_healthy
+      hindsight-model-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8888/health/ready', timeout=5).status == 200 else 1)"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 300s
+    # app.* 日志与 backend 同口径轮转，避免长期运行吃满磁盘。
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    networks:
+      - hindsight_internal
+    mem_limit: 2g
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=512m,nosuid,nodev
+
   # Python 脚本流水线的执行网关（Jupyter Kernel Gateway）。用户脚本在其内核
   # 中执行，因此刻意不挂 env_file、不注入任何平台凭据环境变量，也不暴露
   # 宿主机端口——仅 backend 经 compose 内网访问。
@@ -544,6 +663,18 @@ services:
       # 通用平台内网 MCP 地址（CSV）。WeKnora 的 MCP 端点由原生 UI 手工登记，
       # 平台只读取 app 的 /mcp 前缀，不需要 WeKnora MCP token。
       SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS: http://weknora-app:8080/mcp
+      # 可选 Hindsight 长期记忆（profile `hindsight` + HINDSIGHT_ENABLED）。
+      # 默认 compose 内网地址；未启用时快速失败、记忆特性降级，聊天不受影响。
+      # 有意不加入 depends_on：Hindsight 的 LLM 回调 backend，属循环依赖。
+      HINDSIGHT_BASE_URL: ${HINDSIGHT_BASE_URL:-http://hindsight:8888}
+      HINDSIGHT_API_KEY: ${HINDSIGHT_API_KEY:-}
+      HINDSIGHT_TIMEOUT_SECONDS: ${HINDSIGHT_TIMEOUT_SECONDS:-2}
+      HINDSIGHT_NAMESPACE: ${HINDSIGHT_NAMESPACE:-openontology}
+      HINDSIGHT_SERVICE_TOKEN: ${HINDSIGHT_SERVICE_TOKEN:-}
+      # 可选：管理员专用的 Hindsight 原生 Web 入口（服务器 .env 值，空=未启用；
+      # 非密钥，其余 env_file 服务亦会继承但不使用）。仅 backend 显式映射并
+      # 使用；生产不发布任何 UI 端口。
+      HINDSIGHT_WEB_URL: ${HINDSIGHT_WEB_URL:-}
       UPLOADS_DIR: ${UPLOADS_DIR:-/uploads}
       API_HUB_DATA_DIR: /api-hub-data
       STEWARD_WORKSPACE_ROOT: /uploads/steward-sessions
@@ -614,6 +745,7 @@ services:
       - dbx_bridge
       - weknora_internal
       - kaneo_internal
+      - hindsight_internal
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     # Container hardening is defense in depth; user plugins still require the
     # dedicated rootless runner described in the commercial release gate.
@@ -681,6 +813,12 @@ services:
       # 通用平台内网 MCP 地址（CSV）。WeKnora 的 MCP 端点由原生 UI 手工登记，
       # 平台只读取 app 的 /mcp 前缀，不需要 WeKnora MCP token。
       SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS: http://weknora-app:8080/mcp
+      # 反思链路在 executor 进程内运行，与 backend 共享同一可选记忆配置。
+      HINDSIGHT_BASE_URL: ${HINDSIGHT_BASE_URL:-http://hindsight:8888}
+      HINDSIGHT_API_KEY: ${HINDSIGHT_API_KEY:-}
+      HINDSIGHT_TIMEOUT_SECONDS: ${HINDSIGHT_TIMEOUT_SECONDS:-2}
+      HINDSIGHT_NAMESPACE: ${HINDSIGHT_NAMESPACE:-openontology}
+      HINDSIGHT_SERVICE_TOKEN: ${HINDSIGHT_SERVICE_TOKEN:-}
       UPLOADS_DIR: ${UPLOADS_DIR:-/uploads}
       API_HUB_DATA_DIR: /api-hub-data
       STEWARD_WORKSPACE_ROOT: /uploads/steward-sessions
@@ -724,6 +862,7 @@ services:
       - default
       - weknora_internal
       - kaneo_internal
+      - hindsight_internal
     command: python -m app.data_channel.pipeline_tasks.nats_executor
     security_opt:
       - no-new-privileges:true
@@ -858,6 +997,10 @@ volumes:
   weknora_redis_data:
   weknora_data:
   weknora_docreader_tmp:
+  # Hindsight keeps its own database volume plus the HuggingFace model cache
+  # (embedding model downloads once, then survives redeploys).
+  hindsight_postgres_data:
+  hindsight_model_cache:
 
 networks:
   kaneo_internal:
@@ -871,4 +1014,9 @@ networks:
   # calls), but only the gateway publishes host ports; app, docreader, MCP,
   # ParadeDB and Redis have no host port.
   weknora_internal:
+    driver: bridge
+  # Isolated optional Hindsight stack. Normal bridge (first start downloads the
+  # embedding model from HuggingFace and the service calls back into backend);
+  # no service on it publishes any host port.
+  hindsight_internal:
     driver: bridge

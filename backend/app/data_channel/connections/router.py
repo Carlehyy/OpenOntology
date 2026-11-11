@@ -167,10 +167,18 @@ def rotate_connection_config(connection_id: str, body: ConnectionConfigUpdate,
             RestConnector._normalize_config(merged)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
+    from app.data_channel.integrated import cdc_control
+
+    # CDC 物理重定向守卫必须先于配置覆盖：旧端点的复制槽只能用旧配置清理，
+    # 一旦覆盖即无法回收（旧源 WAL 泄漏）。仅凭据轮换（端点身份不变）放行。
+    cdc_control.assert_repoint_allowed(db, conn, merged)
     from app.services import encryption_service
     conn.config = {"_encrypted": encryption_service.encrypt(json.dumps(merged))}
     # 配置已变，既有连通结论作废，必须重新测试才可能回到 active。
     conn.status = "inactive"
+    # CDC 源同事务收尾：仅凭据轮换 → 同代暂停（偏移保留）直到重测成功；
+    # 休眠源重定向 → 显式新代际并丢弃旧偏移。
+    cdc_control.note_connection_config_rotated(db, conn)
     db.commit()
     db.refresh(conn)
     # 数据源元数据/样例缓存按连接版本键失效：轮换可能指向不同库/账号，
@@ -199,6 +207,10 @@ def test_connection(connection_id: str, db: Session = Depends(get_db)):
         connector = get_connector(conn.kind, config)
         ok = connector.test_connection()
         conn.status = "active" if ok else "error"
+        # 重测成功才解除 CDC 轮换暂停（同代恢复、偏移保留）；失败保持暂停。
+        from app.data_channel.integrated import cdc_control
+
+        cdc_control.note_connection_retested(db, conn.id, success=bool(ok))
         db.commit()
         return {"success": ok, "status": conn.status}
     except Exception as e:
@@ -222,6 +234,15 @@ def delete_connection(connection_id: str, db: Session = Depends(get_db)):
     blockers = _connection_decommission_blockers(db, conn)
     if blockers is not None:
         raise HTTPException(status_code=409, detail=blockers)
+    # CDC 守卫：未观测到“停止 + 复制槽清理确认 + 订阅全部停流确认”即结构化
+    # 409——注销绝不留下无人清理的复制槽。放行时只回收 STOPPED 控制行
+    # （无任何源端 IO），且必须先于连接行删除（控制行 FK RESTRICT）。
+    from app.data_channel.integrated import cdc_control
+
+    cdc_blockers = cdc_control.connection_blockers(db, conn.id)
+    if cdc_blockers is not None:
+        raise HTTPException(status_code=409, detail=cdc_blockers)
+    cdc_control.connection_cleanup(db, conn.id)
     db.delete(conn)
     db.commit()
     # 数据源元数据/样例缓存随连接删除失效（best-effort，旧键靠 TTL 兜底）

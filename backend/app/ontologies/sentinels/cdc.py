@@ -61,6 +61,16 @@ RELEASE_ACTIVATION = "release_activation"
 SCHEDULED_SCAN = "scheduled_scan"
 DYNAMIC_ACTIVATION = "dynamic_activation"
 BUILTIN_ACTIVATION = "builtin_activation"
+# One remote (external CDC) source row event.  Written by the ingress adapter
+# together with its facts; evaluated by identity, never via the shared cursor.
+EXTERNAL_CHANGE = cep_contract.OUTBOX_EVENT_EXTERNAL_CHANGE
+
+# Event kinds whose ``result_json.control`` is identity that must survive
+# every finalization: a retry re-reads it, and it remains the audit evidence.
+_CONTROL_PAYLOAD_KINDS = (
+    RELEASE_ACTIVATION, SCHEDULED_SCAN, DYNAMIC_ACTIVATION,
+    BUILTIN_ACTIVATION, EXTERNAL_CHANGE,
+)
 
 # Protocol-v2 in-flight states fence newly-produced work from legacy workers
 # sharing the same database.  A new worker can adopt legacy rows, but every
@@ -961,6 +971,7 @@ def _execute_claimed_event(
     )
     from app.ontologies.sentinels.engine import (
         run_for_change,
+        run_for_external_change,
         run_for_link_change,
         run_builtin_initialization,
         run_dynamic_initialization,
@@ -1077,6 +1088,18 @@ def _execute_claimed_event(
                             checkpoint=checkpoint,
                             retry=int(event_row.attempts or 0) > 1,
                         )
+                elif event_kind == EXTERNAL_CHANGE:
+                    # Evaluated by the identity frozen with the facts, inside
+                    # the same release lease/guard as every other kind.
+                    from app.ontologies.sentinels.external_events import (
+                        external_identity_from_row,
+                    )
+                    external_event = external_identity_from_row(event_row)
+                    if external_event is None:
+                        raise _LogicalDispatchError(
+                            "远程行事件缺少来源身份（result_json.control）")
+                    result = run_for_external_change(
+                        db, event_row.ontology_id, external_event)
                 elif event_kind == LINK_CHANGE or event_row.link_change:
                     result = run_for_link_change(
                         db, event_row.ontology_id)
@@ -1206,10 +1229,7 @@ def _finalize_success(
     row.status = "completed"
     row.result_json = dict(result)
     if (
-        row.event_kind in (
-            RELEASE_ACTIVATION, SCHEDULED_SCAN, DYNAMIC_ACTIVATION,
-            BUILTIN_ACTIVATION,
-        )
+        row.event_kind in _CONTROL_PAYLOAD_KINDS
         and isinstance(prior_payload.get("control"), dict)
     ):
         row.result_json["control"] = prior_payload["control"]
@@ -1234,10 +1254,7 @@ def _finalize_failure(
         return "lost_claim"
     result = getattr(error, "result", None)
     if result is not None:
-        if row.event_kind in (
-            RELEASE_ACTIVATION, SCHEDULED_SCAN, DYNAMIC_ACTIVATION,
-            BUILTIN_ACTIVATION,
-        ):
+        if row.event_kind in _CONTROL_PAYLOAD_KINDS:
             payload = (
                 dict(row.result_json)
                 if isinstance(row.result_json, dict) else {}

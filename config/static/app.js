@@ -11,6 +11,7 @@
     "n8n",
     "weknora",
     "kaneo",
+    "hindsight",
   ];
 
   const SERVICE_LABELS = {
@@ -23,6 +24,7 @@
     n8n: "n8n",
     weknora: "WeKnora",
     kaneo: "Kaneo",
+    hindsight: "Hindsight",
   };
 
   const state = {

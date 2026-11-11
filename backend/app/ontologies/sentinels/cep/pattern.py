@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from app.models.ontology_formal import LinkInstance
@@ -190,20 +191,64 @@ class ChangeSet:
     overlay: dict = field(default_factory=dict)   # key -> new_value
     max_event_id: int = 0
     occurred_at: datetime | None = None
+    # 远程（external CDC）行事件的来源坐标与冻结后镜像；本地事实恒为 None。
+    source_event_id: str | None = None
+    event_group_id: str | None = None
+    external_asset_id: str | None = None
+    external_mapping_id: str | None = None
+    event_snapshot: dict | None = None
+    release_id: str | None = None
+    change_kind: str = "updated"
 
 
 def group_change_sets(events) -> list[ChangeSet]:
-    """每条键级行一个变更集。
+    """每条本地键级行一个变更集；远程行事件按来源事件身份折叠为一个。
 
-    刻意不做"连续同实例合并"：跨事务的相邻 id 无法区分同批与异批，
-    合并会吞掉中间态（如 submitted→approved 的两次独立提交被并为一个
-    终态变更集，stage0 永远失配）。单键 overlay 语义无损——filter 中
+    本地事实刻意不做"连续同实例合并"：跨事务的相邻 id 无法区分同批与
+    异批，合并会吞掉中间态（如 submitted→approved 的两次独立提交被并为
+    一个终态变更集，stage0 永远失配）。单键 overlay 语义无损——filter 中
     未变更的键本来就回读当前值（提交后的最新值），同事务多键变更的
     后续键事件也能看到前面键的新值。
+
+    远程事实没有可回读的本地实例，一次源行事件的多个字段必须作为一次
+    求值：折叠键是来源事件身份（source_event_id + 发布/资产/映射/类型），
+    绝不是时间戳或同一行共享的 event_group_id——同一时刻的不同源事件
+    必须各自独立求值。
     """
     sets: list[ChangeSet] = []
+    external: dict[tuple, ChangeSet] = {}
     for event in events:
         if int(event.cascade_depth or 0) > PATTERN_MAX_EVENT_CASCADE_DEPTH:
+            continue
+        if event.source_event_id:
+            identity = (
+                str(event.ontology_release_id or ""),
+                str(event.external_asset_id or ""),
+                str(event.external_mapping_id or ""),
+                str(event.object_type_id),
+                str(event.source_event_id),
+            )
+            change = external.get(identity)
+            if change is None:
+                change = ChangeSet(
+                    instance_id=str(event.instance_id),
+                    object_type_id=str(event.object_type_id),
+                    max_event_id=int(event.id),
+                    occurred_at=_aware(event.occurred_at),
+                    source_event_id=str(event.source_event_id),
+                    event_group_id=str(event.event_group_id or ""),
+                    external_asset_id=str(event.external_asset_id or ""),
+                    external_mapping_id=str(event.external_mapping_id or ""),
+                    event_snapshot=dict(event.event_snapshot or {}),
+                    release_id=(
+                        str(event.ontology_release_id)
+                        if event.ontology_release_id else None),
+                    change_kind=str(event.change_kind or "updated"),
+                )
+                external[identity] = change
+                sets.append(change)
+            change.overlay[str(event.key)] = event.new_value
+            change.max_event_id = max(change.max_event_id, int(event.id))
             continue
         sets.append(ChangeSet(
             instance_id=str(event.instance_id),
@@ -244,15 +289,20 @@ def _filter_holds(filter_expr: str | None, alias: str, values: dict,
 
 
 def _snapshot_of(instance) -> dict:
-    return {
+    snapshot = {
         "id": str(instance.id),
         "objectTypeId": getattr(instance, "object_type_id", None),
         "properties": dict(getattr(instance, "properties", None) or {}),
         "computed": dict(getattr(instance, "computed", None) or {}),
     }
+    external = getattr(instance, "external_event", None)
+    if external:
+        snapshot["externalEvent"] = dict(external)
+    return snapshot
 
 
 def _snapshot_instance(snapshot: dict, ontology_id: str) -> SimpleNamespace:
+    external = snapshot.get("externalEvent")
     return SimpleNamespace(
         id=snapshot["id"],
         ontology_id=ontology_id,
@@ -261,7 +311,69 @@ def _snapshot_instance(snapshot: dict, ontology_id: str) -> SimpleNamespace:
         computed=dict(snapshot.get("computed") or {}),
         external_id=None,
         ontology_release_id=None,
+        external_event=dict(external) if isinstance(external, dict) else None,
     )
+
+
+def _external_instance(change: ChangeSet, ontology_id: str) -> SimpleNamespace:
+    """远程行事件的冻结后镜像；没有（也不创建）本地 ObjectInstance。"""
+    snapshot = change.event_snapshot or {}
+    return SimpleNamespace(
+        id=change.instance_id,
+        ontology_id=ontology_id,
+        object_type_id=change.object_type_id,
+        properties=dict(snapshot.get("properties") or {}),
+        # 派生值需要本地投影才能计算，远程行一律没有。
+        computed={},
+        external_id=None,
+        ontology_release_id=change.release_id,
+        external_event={
+            "sourceEventId": change.source_event_id,
+            "eventGroupId": change.event_group_id,
+            "assetId": change.external_asset_id,
+            "mappingId": change.external_mapping_id,
+            "changeKind": change.change_kind,
+        },
+    )
+
+
+def _calls_temporal_function(expression: str | None) -> bool:
+    raw = str(expression or "").strip().rstrip(";").strip()
+    if not raw:
+        return False
+    try:
+        tree = ast.parse(raw, mode="eval")
+    except SyntaxError:
+        return False
+    return any(
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id in cep_contract.TEMPORAL_FUNCTIONS
+        for node in ast.walk(tree))
+
+
+def external_definition_violation(definition: dict, sentinel) -> str | None:
+    """远程单行哨兵的结构限制；合规返回 None，否则返回违规说明。
+
+    远程行只有"这一次行事件的冻结后镜像"可用：没有历史投影、没有关系、
+    没有派生值。因此只支持单绑定、单 stage、同一行求值；聚合、缺失
+    分支、跨对象关联与时间算子都无从成立。校验门禁与执行期防御共用。
+    """
+    bindings = getattr(sentinel, "bindings", None) or []
+    if len(bindings) != 1:
+        return "远程哨兵只支持单个对象绑定"
+    if len(definition["stages"]) != 1:
+        return "远程哨兵只支持单 stage"
+    if definition.get("aggregate"):
+        return "远程哨兵不支持聚合"
+    if definition.get("absence", {}).get("enabled"):
+        return "远程哨兵不支持缺失分支"
+    if getattr(sentinel, "links", None):
+        return "远程哨兵不支持跨对象关联"
+    stage = definition["stages"][0]
+    if (_calls_temporal_function(stage.get("filter"))
+            or _calls_temporal_function(definition.get("condition"))):
+        return "远程哨兵不支持时间算子"
+    return None
 
 
 def _aggregate_metric(function: str, values: list, errors: list[str]):
@@ -334,6 +446,11 @@ def process_change_set(
                     "edge": "enter", "correlation_key": str(instance.id),
                     "snapshots": {alias: _snapshot_of(instance)},
                     "started_at": change.occurred_at or now,
+                    "source_event_id": change.source_event_id,
+                    "event_group_id": change.event_group_id,
+                    "external_asset_id": change.external_asset_id,
+                    "external_mapping_id": change.external_mapping_id,
+                    "change_kind": change.change_kind,
                 })
                 continue
             occurred = change.occurred_at or now
@@ -572,11 +689,130 @@ def _sync_states(db: Session, states: dict[str, dict], sentinel,
             db.delete(row)
 
 
+def _fire_completions(
+        db: Session, ontology_id: str, sentinel, completions: list[dict],
+        now: datetime, release_id: str | None, hooks: PatternHooks, *,
+        skip_completed: bool = False):
+    """对完成事件走既有 claim → 动作链；返回 (matches, keys, results, outcomes)。
+
+    ``skip_completed`` 供远程行事件使用：已 completed 的命中行是该来源
+    事件的持久回执（独立于事件日志/outbox 的保留期），重放不得把它重新
+    认领回 processing 再执行一次。
+    """
+    action_results: list[dict] = []
+    edge_outcomes: list[str] = []
+    fired_keys: list[str] = []
+    matches: list[dict[str, str]] = []
+    if sentinel.muted or not completions:
+        return matches, fired_keys, action_results, edge_outcomes
+    from app.ontologies.sentinels.cep.contract import in_sentinel_run
+    token = in_sentinel_run.set(True)
+    try:
+        for completion in completions:
+            key = _match_key(completion)
+            if skip_completed and db.query(SentinelMatchState.id).filter(
+                    SentinelMatchState.sentinel_id == sentinel.id,
+                    SentinelMatchState.match_key == key,
+                    SentinelMatchState.runtime_status == "completed",
+            ).first() is not None:
+                continue
+            fired_keys.append(key)
+            tup = {
+                alias: _snapshot_instance(snapshot, ontology_id)
+                for alias, snapshot in (
+                    completion["snapshots"] or {}).items()
+            }
+            if not tup:
+                continue
+            matches.append({
+                alias: instance.id for alias, instance in tup.items()})
+            overrides = (
+                {"edge": "absence"}
+                if completion["edge"] == "absence" else None)
+            state = hooks.claim_match_state(
+                db, ontology_id, sentinel, key, tup, now,
+                expected_release_id=release_id,
+                event_overrides=overrides)
+            if state is None:
+                continue
+            _ok, outcome = hooks.run_actions(
+                db, ontology_id, sentinel, tup,
+                sentinel.primary_alias, "enter",
+                key, state, action_results,
+                expected_release_id=release_id,
+                event_overrides=overrides,
+            )
+            edge_outcomes.append(outcome)
+            hooks.record_edge_outcome(db, state, "enter", outcome)
+    finally:
+        in_sentinel_run.reset(token)
+    return matches, fired_keys, action_results, edge_outcomes
+
+
+def _evaluate_external_event(
+        db: Session, ontology_id: str, sentinel, source: str,
+        definition: dict, external_event: dict, *,
+        release_id: str | None, release_version: str | None,
+        start_time: float, hooks: PatternHooks) -> SentinelFiring:
+    """对恰好一次远程源行事件求值（单 stage、同一行、仅凭冻结快照）。
+
+    处理单元是与事实同事务提交的 outbox 行，事实按来源身份查询——不读也
+    不推进共享水位，因此与事件日志 id 的提交顺序无关。事实按当前发布
+    精确过滤：已被取代的发布留下的事实直接不可见。
+    """
+    errors: list[str] = []
+    now = _now()
+    completions: list[dict] = []
+    violation = external_definition_violation(definition, sentinel)
+    event_release_id = str(external_event.get("release_id") or "")
+    if violation is not None:
+        # 门禁本应拒绝；执行期不抛错（否则 outbox 无限重试），只是不命中。
+        logger.error(
+            "远程哨兵定义不满足单行限制，跳过求值: sentinel=%s reason=%s",
+            sentinel.id, violation)
+    elif release_id is not None and event_release_id == str(release_id):
+        rows = event_store.external_source_event_rows(
+            db, ontology_id=ontology_id, release_id=event_release_id,
+            asset_id=str(external_event.get("asset_id") or ""),
+            mapping_id=str(external_event.get("mapping_id") or ""),
+            object_type_id=str(external_event.get("object_type_id") or ""),
+            source_event_id=str(external_event.get("source_event_id") or ""))
+        for change in group_change_sets(rows):
+            if change.change_kind == cep_contract.EVENT_KIND_DELETED:
+                # 删除没有后镜像可供求值（与本地"实例已删除"同语义）。
+                continue
+            completions.extend(process_change_set(
+                definition, change, _external_instance(change, ontology_id),
+                {}, now=now, errors=errors))
+    if errors:
+        return _error_firing(
+            db, ontology_id, sentinel, source, errors, release_id,
+            release_version, start_time)
+    completions = _filter_completions_by_condition(
+        db, ontology_id, definition, completions, now, errors)
+    if errors:
+        return _error_firing(
+            db, ontology_id, sentinel, source, errors, release_id,
+            release_version, start_time)
+    matches, fired_keys, action_results, edge_outcomes = _fire_completions(
+        db, ontology_id, sentinel, completions, now, release_id, hooks,
+        skip_completed=True)
+    return _final_firing(
+        db, ontology_id, sentinel, source, matches, fired_keys,
+        action_results, edge_outcomes, errors, release_id, release_version,
+        start_time, muted=bool(sentinel.muted))
+
+
 def evaluate_pattern(
         db: Session, ontology_id: str, sentinel, source: str, *,
         release_id: str | None, release_version: str | None,
-        start_time: float, hooks: PatternHooks) -> SentinelFiring:
-    """模式哨兵评估入口（由 evaluator 在执行锁内分派）。"""
+        start_time: float, hooks: PatternHooks,
+        external_event: dict | None = None) -> SentinelFiring:
+    """模式哨兵评估入口（由 evaluator 在执行锁内分派）。
+
+    ``external_event`` 给定时只对该远程源行事件求值（见
+    ``_evaluate_external_event``）；缺省为本地事实的水位驱动评估。
+    """
     definition = normalize_pattern(getattr(sentinel, "pattern", None))
     errors: list[str] = []
     if definition is None:
@@ -584,6 +820,11 @@ def evaluate_pattern(
         return _error_firing(
             db, ontology_id, sentinel, source, errors, release_id,
             release_version, start_time)
+    if external_event is not None:
+        return _evaluate_external_event(
+            db, ontology_id, sentinel, source, definition, external_event,
+            release_id=release_id, release_version=release_version,
+            start_time=start_time, hooks=hooks)
     now = _now()
 
     cursor = _ensure_cursor(db, sentinel)
@@ -650,46 +891,8 @@ def evaluate_pattern(
     _sync_states(db, states, sentinel, release_id, definition_revision,
                  enable_generation, now)
 
-    action_results: list[dict] = []
-    edge_outcomes: list[str] = []
-    fired_keys: list[str] = []
-    matches: list[dict[str, str]] = []
-    if not sentinel.muted and completions:
-        from app.ontologies.sentinels.cep.contract import in_sentinel_run
-        token = in_sentinel_run.set(True)
-        try:
-            for completion in completions:
-                key = _match_key(completion)
-                fired_keys.append(key)
-                tup = {
-                    alias: _snapshot_instance(snapshot, ontology_id)
-                    for alias, snapshot in (
-                        completion["snapshots"] or {}).items()
-                }
-                if not tup:
-                    continue
-                matches.append({
-                    alias: instance.id for alias, instance in tup.items()})
-                overrides = (
-                    {"edge": "absence"}
-                    if completion["edge"] == "absence" else None)
-                state = hooks.claim_match_state(
-                    db, ontology_id, sentinel, key, tup, now,
-                    expected_release_id=release_id,
-                    event_overrides=overrides)
-                if state is None:
-                    continue
-                _ok, outcome = hooks.run_actions(
-                    db, ontology_id, sentinel, tup,
-                    sentinel.primary_alias, "enter",
-                    key, state, action_results,
-                    expected_release_id=release_id,
-                    event_overrides=overrides,
-                )
-                edge_outcomes.append(outcome)
-                hooks.record_edge_outcome(db, state, "enter", outcome)
-        finally:
-            in_sentinel_run.reset(token)
+    matches, fired_keys, action_results, edge_outcomes = _fire_completions(
+        db, ontology_id, sentinel, completions, now, release_id, hooks)
     _drop_aggregate_match_states(db, sentinel, states)
 
     # 水位推进覆盖本轮拉取的全部事件（被级联防护跳过的也推进，
@@ -705,6 +908,11 @@ def evaluate_pattern(
 
 
 def _match_key(completion: dict) -> str:
+    source_event_id = completion.get("source_event_id")
+    if source_event_id:
+        # 远程行事件：时间戳不能充当去重身份（同一行同一时刻可以有多个
+        # 源事件），来源事件 id 才是；重放同一事件得到同一个键。
+        return f"pattern:{completion['correlation_key']}:src:{source_event_id}"
     started = completion.get("started_at")
     anchor = (
         started.isoformat() if hasattr(started, "isoformat")
@@ -878,9 +1086,17 @@ def preview_pattern(db: Session, ontology_id: str, sentinel,
     window = replay_window_seconds(definition)
     replay_start = now - timedelta(seconds=window)
     type_ids = {stage["objectTypeId"] for stage in definition["stages"]}
+    # 本地事实 + 本发布的远程行事实（远程行不在别的发布下可见）。
+    replayable = or_(
+        SentinelEventLog.source == cep_contract.EVENT_SOURCE_ORGANIC,
+        and_(
+            SentinelEventLog.source == cep_contract.EVENT_SOURCE_EXTERNAL,
+            SentinelEventLog.ontology_release_id == str(release_id),
+        ),
+    )
     events = db.query(SentinelEventLog).filter(
         SentinelEventLog.ontology_id == str(ontology_id),
-        SentinelEventLog.source == cep_contract.EVENT_SOURCE_ORGANIC,
+        replayable,
         SentinelEventLog.object_type_id.in_(type_ids),
         SentinelEventLog.occurred_at >= replay_start,
     ).order_by(SentinelEventLog.id.asc()).limit(
@@ -888,7 +1104,7 @@ def preview_pattern(db: Session, ontology_id: str, sentinel,
 
     earliest = db.query(SentinelEventLog.occurred_at).filter(
         SentinelEventLog.ontology_id == str(ontology_id),
-        SentinelEventLog.source == cep_contract.EVENT_SOURCE_ORGANIC,
+        replayable,
     ).order_by(SentinelEventLog.id.asc()).first()
     if earliest is None or earliest[0] is None:
         coverage = "empty"
@@ -907,8 +1123,18 @@ def preview_pattern(db: Session, ontology_id: str, sentinel,
             db, ontology_id,
             [link for link in (getattr(sentinel, "links", None) or [])
              if isinstance(link, dict)])
+    external_violation = external_definition_violation(definition, sentinel)
     instance_cache: dict[str, object] = {}
     for change in changes:
+        if change.source_event_id:
+            # 与线上同构：远程行只凭冻结后镜像求值，定义违规或删除不命中。
+            if (external_violation is not None
+                    or change.change_kind == cep_contract.EVENT_KIND_DELETED):
+                continue
+            completions.extend(process_change_set(
+                definition, change, _external_instance(change, ontology_id),
+                states, now=now, errors=errors))
+            continue
         instance = instance_cache.get(change.instance_id)
         if instance is None:
             instance = db.query(ObjectInstance).filter(

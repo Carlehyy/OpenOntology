@@ -124,6 +124,7 @@ Hub SQLite 完整备份、停写、全量解密校验和可恢复迁移机制就
 | 集成数据集 dbx | 集成源登记、schema 发现与刷新；生产 metadata 只走固定版本 dbx，不回退 native | 生产部署自动启动仅内网可达的官方 digest dbx，或使用显式外部端点；缺失/不可达/认证失败/版本不符使部署 preflight 与生产 readiness fail closed，非生产不要求 dbx |
 | WeKnora v0.9.0 | 原生知识库 Web 与超级助手标准 MCP 知识来源 | 服务或管理员初始化失败时阻断启动；未配置模型、知识库或 MCP 不影响基础服务启动 |
 | Kaneo 2.49.0 | 单用户项目管理原生 Web（独立账号与独立 PostgreSQL） | 服务、管理员初始化或实例状态探针失败时启动/readiness fail-closed；平台不降级、不用 mock 冒充 |
+| Hindsight 1.2.0（可选） | 超级助手长期记忆（profile `hindsight`，默认关闭） | 可选特性：不可达/未启用时记忆特性降级，聊天与全局 readiness 不受影响；不回退旧记忆实现 |
 
 ### WeKnora 共享知识库（v0.9.0）
 
@@ -226,6 +227,60 @@ Kaneo 是随平台 Compose 同启的单用户项目管理看板：官方
 （`/var/lib/kaneo`）只是运行时资源。Kaneo 附件上传官方仅支持 S3 存储，首版
 未配置 S3/SMTP，因此附件上传与邮件找回密码不可用——不得把 `kaneo_data`
 当作附件持久化，也不得以本地卷 workaround 冒充附件能力。
+
+### Hindsight 长期记忆（可选，默认关闭）
+
+Hindsight 1.2.0 以独立 Compose profile `hindsight` 提供超级助手长期记忆，
+含专用 pgvector 数据库与模型缓存卷，不共用平台 PostgreSQL。本地启用
+`docker compose -f docker-compose.local.yml --profile hindsight up -d`；
+生产在服务器 `.env` 写 `HINDSIGHT_ENABLED=true` 后由 `deploy-prod.sh` 启停
+（未启用时自动停掉历史容器，不删卷）。API 与管理 UI（9999 控制面）仅
+Compose 内网/loopback（本地 `18888`/`19999`），不暴露公网；生产无宿主端口。
+
+平台侧设置：`HINDSIGHT_BASE_URL`（容器内网固定 `http://hindsight:8888`）、
+`HINDSIGHT_API_KEY`（backend → Hindsight Bearer，镜像内 ApiKeyTenantExtension
+强校验）、`HINDSIGHT_TIMEOUT_SECONDS`（默认 2）、`HINDSIGHT_NAMESPACE`、
+`HINDSIGHT_SERVICE_TOKEN`（Hindsight → 平台内部记忆 LLM 代理
+`/api/v2/super-assistant/internal/memory/v1` 的 service token，与容器
+`HINDSIGHT_API_LLM_API_KEY` 同值；不是真实模型 key）。
+三把密钥只进 backend/pipeline_executor 与 Hindsight 服务环境，生产由
+deploy-prod.sh 幂等生成，可选经 GitHub `PROD_HINDSIGHT_DB_PASSWORD`/
+`PROD_HINDSIGHT_API_KEY`/`PROD_HINDSIGHT_SERVICE_TOKEN` secrets 物化；缺失不
+阻断平台部署。注意 `PROD_HINDSIGHT_DB_PASSWORD` 只在专用 DB 卷首次初始化时
+生效：DB 角色密码落库后再改该 secret 不会轮换存量库，反而会让 Hindsight 连
+不上自己的数据库（仅记忆特性降级）；要么在首次启用前配置，要么与服务器
+`.env` 现值保持一致。镜像与专用 DB 一律 `@sha256` 钉扎（`HINDSIGHT_IMAGE`、
+`HINDSIGHT_POSTGRES_IMAGE`，可选经同名 `PROD_HINDSIGHT_*` repository
+variables 覆盖）。
+
+`HINDSIGHT_WEB_URL`（可选，默认空）是管理员专用的 Hindsight 原生 Web 入口：
+完整的 http(s) 根地址，非密钥，服务器 `.env` 原样保存，仅 backend 显式映射并
+使用（其余 env_file 服务可能继承该值但不使用；不经 GitHub secrets 物化）。
+本地即 loopback 管理页 `http://127.0.0.1:19999`（写 `localhost` 也按原样保留，
+不做 WeKnora 式主机名改写）；生产 UI 无宿主端口，受外部防护的访问地址须另行
+开通后再填写。该链接不新增任何鉴权、代理或 SSO，URL 内不得携带 tenant 或
+API key；留空只表示不配置入口。
+
+记忆 LLM 的模型选择是服务级的、每用户只有一个"当前模型"：Compose 三文件
+把 Hindsight 的 `HINDSIGHT_API_LLM_MODEL` 固定为平台别名
+`oo-memory-default`（Hindsight 1.2.0 禁止 bank 级 `llm_model` 覆盖，部署不
+提供也不接受自定义别名变量）。平台记忆网关收到该别名的请求后，从该用户的
+记忆设置中取「唯一一条 `enabled` 且 `model_config_id` 非空」的记录解析真实
+模型（复用平台模型配置，不向 Hindsight 存任何模型密钥）：0 条或多条满足
+条件时返回 503，管理员需把该用户的记忆设置收敛为恰好一条启用的模型。
+
+embedding 固定为 ONNX `intfloat/multilingual-e5-small`（384 维，E5 非对称
+前缀），模型不在镜像内：首启需 HuggingFace egress 下载。缓存走
+`HF_HOME=/hindsight-model-cache`（`hindsight_model_cache` 卷；镜像以 uid 1000
+运行，`hindsight-model-init` 负责卷属主）。离线（`HINDSIGHT_HF_OFFLINE=1`）
+要求 Hindsight 运行时经 HuggingFace 缓存解析的每一个模型都在该卷内：不只
+embedding，还包括默认 reranker（`hindsight-ai/hs-rerank-1`）——`HF_HOME` 已
+指向该卷，镜像内预载副本不在离线解析路径上；除非实测确认 reranker 走镜像内
+独立路径，否则必须与 embedding 一并入卷。可靠的预填方式是让同一钉扎镜像挂
+同一 `hindsight_model_cache` 卷、在有空闲 egress 的环境完整首启一次，由服务
+自身写入所需模型，再整卷复用；不要按猜测的目录布局手工拼装，也不要只
+`snapshot_download` embedding 一个 repo 就宣称离线可用——离线行为必须在
+staging 实测。rerank 中文效果未验证，属效果门禁。
 
 ### 集成数据集 dbx（生产）
 

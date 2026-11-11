@@ -14,6 +14,7 @@ from .models import (
     AdvancedConfig,
     BrowserConfig,
     ConfigProfile,
+    HindsightConfig,
     KaneoConfig,
     MinioConfig,
     N8nConfig,
@@ -250,6 +251,19 @@ class LocalEnvStore:
                     values,
                     "KANEO_TIMEOUT_SECONDS",
                     defaults.kaneo.timeout_seconds,
+                ),
+            ),
+            hindsight=HindsightConfig(
+                base_url=values.get(
+                    "HINDSIGHT_BASE_URL", defaults.hindsight.base_url
+                ),
+                web_url=values.get(
+                    "HINDSIGHT_WEB_URL", defaults.hindsight.web_url
+                ),
+                timeout_seconds=_float_value(
+                    values,
+                    "HINDSIGHT_TIMEOUT_SECONDS",
+                    defaults.hindsight.timeout_seconds,
                 ),
             ),
             advanced=AdvancedConfig(
@@ -539,6 +553,15 @@ def render_env(profile: ConfigProfile, project_root: Path | None = None) -> str:
             ],
         ),
         (
+            "Hindsight 长期记忆（可选 compose profile hindsight）。"
+            "密钥由部署环境注入，不写入本文件",
+            [
+                ("HINDSIGHT_BASE_URL", profile.hindsight.base_url),
+                ("HINDSIGHT_WEB_URL", profile.hindsight.web_url),
+                ("HINDSIGHT_TIMEOUT_SECONDS", profile.hindsight.timeout_seconds),
+            ],
+        ),
+        (
             "API Hub 本地数据与独立权限令牌",
             [
                 ("API_HUB_DATA_DIR", profile.advanced.api_hub_data_dir),
@@ -651,6 +674,13 @@ def _parse_nats_url(value: str) -> dict[str, object]:
 def _int_value(values: dict[str, str], key: str, default: int) -> int:
     try:
         return int(values.get(key, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _float_value(values: dict[str, str], key: str, default: float) -> float:
+    try:
+        return float(values.get(key, str(default)))
     except (TypeError, ValueError):
         return default
 

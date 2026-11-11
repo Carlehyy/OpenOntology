@@ -41,6 +41,26 @@ uv run python scripts/ontology_action_confirmation_postgres_e2e.py \
 数据库迁移、前端真实后端旅程和外部连接器验收仍需分别执行，不能用这些脚本
 替代完整门禁。
 
+### 运营报告 PostgreSQL 与浏览器验收
+
+运营报告的 SQL 由服务端执行。隔离 PostgreSQL 上运行以下命令，角色须有
+`CREATEDB` 权限与有效的 `temp_file_limit` 预算；脚本只创建并清理自有 UUID
+数据库，不修改传入库的表或数据：
+
+```bash
+cd backend
+OPENONTOLOGY_OPERATIONS_REPORTS_E2E=1 ENVIRONMENT=test \
+  DATABASE_URL=<隔离-PostgreSQL-URL> \
+  uv run python scripts/operations_reports_postgres_e2e.py \
+  --report ../.artifacts/operations-reports/query-postgres.json
+```
+
+该脚本验证三类单数据集来源、聚合值、作用域隔离、参数绑定、版本快照、资源
+预算和连接池临时表清理；PR 和自动部署 CI 均执行并上传脱敏报告。另在已启动的
+隔离 API 上运行 `operations_reports_stack.spec.ts`，验证实际登录、报告与文章
+编辑、SQL 试跑、筛选后的表格值及 Hash 深链。沿用下文的隔离栈启动方式，通过
+`PLAYWRIGHT_API_URL` 和 `VITE_API_PROXY_TARGET` 指向隔离 API。
+
 ## 本地配置中心
 
 ```bash
@@ -125,6 +145,14 @@ cd ../frontend && npx playwright test --config=playwright.stack.config.ts src/te
 `docker compose -f docker-compose.e2e.yml down -v` 连卷销毁数据。首次在新库
 上启动时 `dev_server` 会自动执行 `alembic upgrade head` 并 seed 管理员
 （admin / 上述 FIRST_ADMIN_PASSWORD）。
+
+隔离栈另有可选 Hindsight 记忆服务（同样错端口、profile 门控）：
+`docker compose -f docker-compose.e2e.yml --profile hindsight up -d` 起
+`hindsight`/`hindsight-db`，API 在 `127.0.0.1:18888`；宿主机 backend 以
+`HINDSIGHT_BASE_URL=http://127.0.0.1:18888`、`HINDSIGHT_API_KEY=e2e-hindsight-api-key`、
+`HINDSIGHT_SERVICE_TOKEN=e2e-hindsight-service-token` 接入。首启同样需要
+HuggingFace egress 或预填 `hindsight_model_cache` 卷（见 setup.md 的
+Hindsight 节）。
 
 当前没有引入 Vitest/React Testing Library。需要 DOM 的组件行为继续进入
 Playwright；这不是跳过纯逻辑单元测试的理由。

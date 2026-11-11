@@ -697,8 +697,8 @@ def test_super_assistant_router_and_services_stay_bounded():
         "router.py": 1000,
         # 死流回收（_reap_stale_streaming 读取兜底）与启动恢复
         # （recover_interrupted_streams 跳过进行中的定时任务会话）落地：360 → 380
-        # 会话审计导出 export_conversation（完整审计 JSON，不截断消息）→ 437
-        "conversation_service.py": 460,
+        # 会话审计导出与用户消息同事务登记记忆来源；记忆实现位于独立模块。
+        "conversation_service.py": 480,
         "skill_service.py": 380,
         "mcp_server_service.py": 480,
     }
@@ -715,10 +715,22 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     from app.main import app
 
     prefix = "/api/v2/super-assistant"
+    memory_operations = {
+        f"{prefix}/memory/settings": {"get", "patch"},
+        f"{prefix}/memory/status": {"get"},
+        f"{prefix}/memory/sources": {"get", "post"},
+        f"{prefix}/memory/search": {"post"},
+        f"{prefix}/memory/sources/{{source_id}}": {"delete"},
+        f"{prefix}/memory/sources/{{source_id}}/retry": {"post"},
+        f"{prefix}/internal/memory/v1/chat/completions": {"post"},
+    }
+    all_paths = app.openapi()["paths"]
+    for path, methods in memory_operations.items():
+        assert set(all_paths[path]) == methods
     paths = {
         path: value
-        for path, value in app.openapi()["paths"].items()
-        if path.startswith(prefix)
+        for path, value in all_paths.items()
+        if path.startswith(prefix) and path not in memory_operations
     }
     payload = json.dumps(
         paths,

@@ -198,7 +198,7 @@ export interface SuperMcpServer {
 export type StreamEventName =
   | 'meta' | 'thinking' | 'text_delta' | 'tool_start'
   | 'tool_confirmation_required' | 'tool_result' | 'message_end'
-  | 'cancelled' | 'error' | 'done'
+  | 'cancelled' | 'error' | 'done' | 'memory_status'
 
 export interface StreamEvent {
   event: StreamEventName
@@ -568,21 +568,70 @@ export interface MulticaWorkspacesResult {
   workspaces: MulticaTestResult['workspaces']
 }
 
-export interface SuperMemory {
+/** Hindsight 长期记忆（用户级，跨全部 SA 会话共享；删除会话不影响记忆）。
+ *  旧 SuperMemory/分区/蒸馏体系已随本迭代退役。 */
+export interface MemorySettings {
+  enabled: boolean
+  model_config_id: string | null
+  /** 原生控制台地址仅向管理员提供；空值表示未配置。 */
+  web_url?: string | null
+}
+
+export type MemoryRuntimeState = 'ready' | 'unconfigured' | 'unavailable' | 'syncing' | 'error'
+
+export interface MemoryStatus {
+  state: MemoryRuntimeState
+  message: string | null
+  pending_count: number
+  failed_count: number
+  last_synced_at: string | null
+}
+
+/** 记忆来源状态机：终态 synced/forgotten；中间态按 string 宽容（后端新增不破坏前端） */
+export type MemorySourceStatus =
+  | 'synced' | 'pending' | 'submitted' | 'processing' | 'retry_wait'
+  | 'failed' | 'forgetting' | 'forgotten' | string
+
+/** 记忆来源（SourceOut）：对话自动沉淀的已提交用户消息/助手完整 final，或手动记住/更正 */
+export interface MemorySource {
   id: string
+  /** 来源角色：user / assistant；手动记住与更正由 explicit 标记 */
+  role: string
   content: string
-  zone: string
-  pinned: boolean
-  confidence: string
-  source: string
-  tags: string[]
-  supersedes: string[]
-  superseded: boolean
-  match_count: number
-  reference_count: number
-  last_accessed_at: string | null
+  occurred_at: string | null
+  conversation_id: string | null
+  message_id: string | null
+  explicit: boolean
+  /** 追加更正所针对的来源 id；非更正为 null */
+  correction_of: string | null
+  status: MemorySourceStatus
+  error: string | null
   created_at: string
   updated_at: string
+}
+
+export interface MemorySourcePage {
+  items: MemorySource[]
+  total: number
+}
+
+/** Hindsight 召回命中（召回展示用，非来源本体） */
+export interface MemoryRecallItem {
+  id: string
+  text: string
+  type: string
+  document_id: string | null
+  occurred_start: string | null
+  occurred_end: string | null
+  source_ids: string[]
+}
+
+/** POST /memory/search 响应：除命中外还携带召回链路状态；state 非 ready 时
+ *  前端须呈现失败信息，不得把空 items 当作成功空结果 */
+export interface MemorySearchResult {
+  items: MemoryRecallItem[]
+  state?: MemoryRuntimeState | string
+  message?: string | null
 }
 
 export interface ReflectionCandidate {
@@ -599,11 +648,7 @@ export interface ReflectionCandidate {
 }
 
 export interface ReflectionSettings {
-  auto_accept_enabled: boolean
-  /** 长期记忆索引（沿用后端历史字段名 palace_index，与已退役的知识图谱无关） */
-  palace_index: string | null
-  profile: string | null
-  memory_count: number
+  /** 待审批技能候选数（面板徽标）；旧 auto-accept/palace/memory_count 字段随旧记忆体系退役 */
   pending_count: number
 }
 
@@ -639,32 +684,6 @@ export interface SummarySettings {
 export interface AssistantWidgetConfig {
   hidden_menu_keys: string[]
   updated_at: string | null
-}
-
-export interface MemoryConflictError {
-  detail: string
-  existing?: { id: string; content: string; similarity: number }
-}
-
-export interface DistillMember {
-  id: string
-  content: string
-  zone: string
-  pinned: boolean
-  match_count: number
-  reference_count: number
-  created_at: string
-}
-
-export interface DistillCluster {
-  cluster_key: string
-  members: DistillMember[]
-  survivor_id: string
-  protected: boolean
-}
-
-export interface DistillReport {
-  clusters: DistillCluster[]
 }
 
 export const superAssistantApi = {
@@ -825,21 +844,24 @@ export const superAssistantApi = {
   reorderQuickInputs: (ids: string[]) =>
     apiClientV2.put<QuickInput[]>('/super-assistant/quick-inputs/reorder', { ids }),
 
-  memories: (params: { zone?: string; include_superseded?: boolean } = {}) => {
-    const search = new URLSearchParams()
-    if (params.zone) search.set('zone', params.zone)
-    if (params.include_superseded) search.set('include_superseded', 'true')
-    const suffix = search.size ? `?${search.toString()}` : ''
-    return apiClientV2.get<SuperMemory[]>(`/super-assistant/memories${suffix}`)
-  },
-  createMemory: (body: { content: string; zone?: string; pinned?: boolean; tags?: string[] }) =>
-    apiClientV2.post<SuperMemory>('/super-assistant/memories', body),
-  updateMemory: (id: string, body: Partial<Pick<SuperMemory, 'content' | 'zone' | 'pinned' | 'tags'>>) =>
-    apiClientV2.patch<SuperMemory>(`/super-assistant/memories/${id}`, body),
-  deleteMemory: (id: string) => apiClientV2.delete(`/super-assistant/memories/${id}`),
-  distillReport: () => apiClientV2.get<DistillReport>('/super-assistant/memories/distill-report'),
-  applyDistill: (body: { member_ids: string[]; merged_content?: string; use_llm?: boolean }) =>
-    apiClientV2.post<SuperMemory>('/super-assistant/memories/distill', body),
+  // Hindsight 长期记忆：设置 / 状态 / 来源 / 召回（详见 backend super_assistant memory 路由）
+  memorySettings: () => apiClientV2.get<MemorySettings>('/super-assistant/memory/settings'),
+  /** 保存即交给后端能力校验（模型可用性由后端验证，前端不冒充 test） */
+  updateMemorySettings: (body: { enabled: boolean; model_config_id?: string | null }) =>
+    apiClientV2.patch<MemorySettings>('/super-assistant/memory/settings', body),
+  memoryStatus: () => apiClientV2.get<MemoryStatus>('/super-assistant/memory/status'),
+  memorySources: (params: { limit?: number; offset?: number; query?: string } = {}) =>
+    apiClientV2.get<MemorySourcePage>('/super-assistant/memory/sources', { params }),
+  searchMemory: (query: string) =>
+    apiClientV2.post<MemorySearchResult>('/super-assistant/memory/search', { query }),
+  /** 手动记住（explicit）或对既有来源追加更正（correction_of） */
+  createMemorySource: (body: { content: string; correction_of?: string }) =>
+    apiClientV2.post<MemorySource>('/super-assistant/memory/sources', body),
+  /** 按来源忘记：异步进入 forgetting/forgotten，返回的是携带最新状态的 SourceOut */
+  deleteMemorySource: (id: string) =>
+    apiClientV2.delete<MemorySource>(`/super-assistant/memory/sources/${id}`),
+  retryMemorySource: (id: string) =>
+    apiClientV2.post<MemorySource>(`/super-assistant/memory/sources/${id}/retry`),
 
   reflectionCandidates: (status: 'pending' | 'accepted' | 'rejected' | 'all' = 'pending') =>
     apiClientV2.get<ReflectionCandidate[]>(`/super-assistant/reflection/candidates?status=${status}`),
@@ -848,8 +870,6 @@ export const superAssistantApi = {
   runFullReflection: (conversationId: string) =>
     apiClientV2.post<{ dispatched: boolean; runId?: string | null }>('/super-assistant/reflection/full', { conversation_id: conversationId }),
   reflectionSettings: () => apiClientV2.get<ReflectionSettings>('/super-assistant/reflection/settings'),
-  updateReflectionSettings: (body: { auto_accept_enabled: boolean }) =>
-    apiClientV2.put<ReflectionSettings>('/super-assistant/reflection/settings', body),
 
   // 会话纪要：读取每会话最新一份；generate 由页面在「发送后 ~1s」与
   // 「完全响应结束后 ~1s」触发（失败静默，不打扰对话主流程）

@@ -94,6 +94,10 @@
             <span>Kaneo 任务看板</span>
             <span class="nav-status status-idle">待测试</span>
           </a>
+          <a href="#hindsight-section" data-nav-section="hindsight">
+            <span>Hindsight 记忆</span>
+            <span class="nav-status status-idle">可选</span>
+          </a>
           <a href="#advanced-section" data-nav-section="advanced">
             <span>安全与目录</span>
             <span class="nav-status status-idle">待确认</span>
@@ -576,6 +580,45 @@
               <button class="primary-button test-button" type="button" data-test-service="kaneo">测试 Kaneo</button>
             </div>
             <div class="test-message" data-test-message="kaneo" aria-live="polite"></div>
+          </section>
+
+          <section id="hindsight-section" class="config-section" data-section="hindsight" aria-labelledby="hindsight-title">
+            <div class="section-heading">
+              <div>
+                <p class="section-purpose">可选的超级助手长期记忆</p>
+                <h2 id="hindsight-title">Hindsight 长期记忆（可选）</h2>
+                <p>Hindsight 默认不启动（本地 Compose profile hindsight）。它不可用时只降级记忆特性，聊天与平台启动不受影响。本节只配置探活地址；密钥由部署环境注入，不在此填写。</p>
+              </div>
+              <span class="section-state status-idle" data-section-status="hindsight">
+                <span class="status-indicator" aria-hidden="true"></span>
+                <span>可选</span>
+              </span>
+            </div>
+            <div class="field-grid">
+              <div class="field">
+                <label for="hindsight-base-url">服务地址</label>
+                <input id="hindsight-base-url" data-path="hindsight.base_url" name="hindsight.base_url" type="url" value="http://127.0.0.1:18888" required autocomplete="url">
+                <p class="field-help">源码 backend 直连本地 profile 的 loopback 端口 18888；容器内部署使用 http://hindsight:8888。</p>
+                <p class="field-error" data-error-for="hindsight.base_url"></p>
+              </div>
+              <div class="field">
+                <label for="hindsight-web-url">Hindsight Web 地址</label>
+                <input id="hindsight-web-url" data-path="hindsight.web_url" name="hindsight.web_url" type="url" value="" autocomplete="url">
+                <p class="field-help">可选。浏览器可访问且已受保护的管理地址；本地 UI 为 http://127.0.0.1:19999，生产 UI 未单独防护前保持私网并留空。</p>
+                <p class="field-error" data-error-for="hindsight.web_url"></p>
+              </div>
+              <div class="field">
+                <label for="hindsight-timeout">连接超时，秒</label>
+                <input id="hindsight-timeout" data-path="hindsight.timeout_seconds" name="hindsight.timeout_seconds" type="number" min="0.1" max="60" step="0.1" value="2" required inputmode="decimal">
+                <p class="field-help">默认 2 秒；失败快速降级，不拖慢聊天。</p>
+                <p class="field-error" data-error-for="hindsight.timeout_seconds"></p>
+              </div>
+            </div>
+            <div class="section-actions">
+              <button class="secondary-button help-button" type="button" data-guide="hindsight">启用说明</button>
+              <button class="primary-button test-button" type="button" data-test-service="hindsight">测试 Hindsight</button>
+            </div>
+            <div class="test-message" data-test-message="hindsight" aria-live="polite"></div>
           </section>
 
           <section id="advanced-section" class="config-section" data-section="advanced" aria-labelledby="advanced-title">

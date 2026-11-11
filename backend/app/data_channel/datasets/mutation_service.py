@@ -699,8 +699,8 @@ def delete_dataset(
     logger_obj: Any,
 ):
     """删除原始数据集及其版本（仅管理员，与成品数据集删除权限对齐）。
-    被流水线 / 本体映射引用时始终返回 409；force 已禁用，避免数据库外键与页面
-    “强删成功”语义不一致。
+    被流水线 / 本体映射 / 运营报告文章引用时始终返回 409；force 已禁用，避免数据库
+    外键与页面“强删成功”语义不一致。
     若数据集由旧版同步任务（DataSyncTask）驱动，自动禁用该任务防止重建。"""
     from app.data_channel.datasets.models import Dataset, DatasetVersion, MediaItem
     from app.data_channel.file_assets.models import PipelineFileAsset
@@ -721,12 +721,16 @@ def delete_dataset(
     consumers = dataset_consumers_fn(db, dataset_id)
     from app.ontologies.mappings.consumers import dataset_mapping_bindings
     mappings = dataset_mapping_bindings(db, dataset_id)
-    if consumers or mappings:
+    from app.operations.consumers import dataset_report_article_references
+    report_articles = dataset_report_article_references(db, dataset_id)
+    if consumers or mappings or report_articles:
         raise HTTPException(409, detail={
-            "message": f"数据集被 {len(consumers)} 条流水线、{len(mappings)} 个本体映射引用，"
-                       f"删除后这些流水线将无法运行、本体投影将断源",
+            "message": f"数据集被 {len(consumers)} 条流水线、{len(mappings)} 个本体映射、"
+                       f"{len(report_articles)} 篇运营报告文章引用，"
+                       f"删除后这些流水线将无法运行、本体投影将断源、报告文章将无法查询",
             "consumers": consumers,
             "mappings": mappings,
+            "report_articles": report_articles,
         })
 
     # ── 联动禁用关联的 DataSyncTask（防止 _get_or_create_dataset 重建）──

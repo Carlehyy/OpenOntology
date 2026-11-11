@@ -10,6 +10,17 @@ import { existsSync, lstatSync, readFileSync } from 'node:fs'
 const suspiciousProcessPath = (
   /(^|\/)(dist|build|coverage|screenshots?|reports?|results?|artifacts?|test-results?|playwright-report|\.cache)(\/|$)/i
 )
+
+// `operations/reports` is a production page domain, not a generated report
+// directory. Keep the general `reports` artifact guard for every other path.
+function isSuspiciousProcessPath(path) {
+  const productionReports = 'frontend/src/pages/operations/reports/'
+  if (path.startsWith(productionReports)) {
+    return suspiciousProcessPath.test(path.slice(productionReports.length))
+  }
+  return suspiciousProcessPath.test(path)
+}
+
 const suspiciousProcessFile = (
   /(^|\/)(debug|tmp|temp|output|final)[^/]*\.(png|jpe?g|html|json|log|csv)$/i
 )
@@ -34,7 +45,7 @@ function inspectRecords(records) {
     duplicateGroups.set(duplicateKey, duplicates)
 
     if (
-      suspiciousProcessPath.test(path)
+      isSuspiciousProcessPath(path)
       || suspiciousProcessFile.test(path)
       || disposableExtension.test(path)
     ) {
@@ -55,6 +66,10 @@ if (process.argv.includes('--self-test')) {
     inspectRecords([
       { path: 'src/package/__init__.py', content: Buffer.alloc(0) },
       { path: 'src/clean.ts', content: Buffer.from('export const clean = true\n') },
+      {
+        path: 'frontend/src/pages/operations/reports/OperationsReportBookPage.tsx',
+        content: Buffer.from('export const productionPage = true\n'),
+      },
     ]),
     [],
   )

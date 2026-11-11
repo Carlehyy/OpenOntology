@@ -4,7 +4,10 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import (
+    Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, JSON, String, Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -81,3 +84,101 @@ class IntegratedMutation(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class IntegratedCdcSource(Base):
+    """Desired/observed CDC runtime for one managed database connection.
+
+    Control-plane only: reconcile writes the desired side (``starting`` /
+    ``paused`` / new ``generation`` epochs), the runtime reports the observed
+    side (``active`` / ``error`` / ``gap`` / ``stopped`` + ``heartbeat_at``).
+    ``identity_fingerprint`` is a one-way digest of the *physical* endpoint
+    identity (host/port/database, credentials excluded) — never plaintext or
+    ciphertext of the connection config. ``last_position`` is the runtime's
+    last applied stream coordinate, updated atomically in the same transaction
+    as the capture facts/outbox (dedupe survives event-log/outbox pruning);
+    retained across restarts and credential-only rotation, reset only on
+    explicit generation boundaries. ``cleanup_completed_at`` is the runtime's
+    observed proof that the replication slot was dropped; a stopped source
+    without it must block connection decommission/repoint.
+    """
+    __tablename__ = "v2_integrated_cdc_sources"
+    __table_args__ = (
+        # Frozen lifecycle vocabulary: no writer may invent a state.
+        CheckConstraint(
+            "status IN ('starting', 'active', 'paused', 'error', 'gap', 'stopped')",
+            name="ck_integrated_cdc_source_status"),
+        CheckConstraint("generation >= 0", name="ck_integrated_cdc_source_generation"),
+    )
+
+    connection_id: Mapped[str] = mapped_column(
+        String, ForeignKey("v2_connections.id", ondelete="RESTRICT"), primary_key=True)
+    generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0")
+    # starting | active | paused | error | gap | stopped
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="stopped", server_default="stopped")
+    identity_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_position: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cleanup_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    last_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+
+class IntegratedCdcSubscription(Base):
+    """A released remote object mapping that authorizes one table/field stream.
+
+    ``field_map`` maps PHYSICAL source column names to ontology property names;
+    ``primary_key_columns`` are PHYSICAL columns. ``contract`` freezes the
+    published column/property contract the stream was authorized under.
+    ``activation_position`` is the runtime-anchored coverage frontier (None =
+    anchor at the next activation, i.e. explicit no-data coverage start) and
+    ``activated_at`` the wall-clock moment that anchor was taken (the real
+    coverage start; None while unanchored). Both are retained across restarts
+    and table include-set changes, and only ever cleared together through an
+    explicit new-coverage transition. Statuses:
+    ``starting`` (desired, awaiting runtime activation), ``active`` (runtime
+    streaming), ``superseded`` (desired removed, awaiting runtime stop ack),
+    ``stopped`` (runtime acknowledged stop; safe to clean control rows).
+    """
+    __tablename__ = "v2_integrated_cdc_subscriptions"
+    __table_args__ = (
+        UniqueConstraint(
+            "ontology_id", "release_id", "mapping_id",
+            name="uq_integrated_cdc_subscription_release_mapping"),
+        CheckConstraint(
+            "status IN ('starting', 'active', 'superseded', 'stopped')",
+            name="ck_integrated_cdc_subscription_status"),
+        Index("ix_integrated_cdc_subscriptions_connection", "connection_id", "status"),
+        Index("ix_integrated_cdc_subscriptions_asset", "asset_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    connection_id: Mapped[str] = mapped_column(
+        String, ForeignKey("v2_connections.id", ondelete="RESTRICT"), nullable=False)
+    asset_id: Mapped[str] = mapped_column(
+        String, ForeignKey("v2_integrated_assets.id", ondelete="RESTRICT"), nullable=False)
+    ontology_id: Mapped[str] = mapped_column(
+        String, ForeignKey("ontology_projects.id", ondelete="CASCADE"), nullable=False)
+    release_id: Mapped[str] = mapped_column(String, nullable=False)
+    mapping_id: Mapped[str] = mapped_column(String, nullable=False)
+    object_type_id: Mapped[str] = mapped_column(String, nullable=False)
+    field_map: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    primary_key_columns: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    contract: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    schema_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    table_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    schema_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    logical_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    activation_position: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    source_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0")
+    # starting | active | superseded | stopped
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="starting", server_default="starting")
+    last_error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)

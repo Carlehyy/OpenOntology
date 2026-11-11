@@ -27,6 +27,7 @@ from app.data_channel.curated.review_row_identity import (  # noqa: F401
     version_review,
 )
 from app.data_channel.curated.row_edit_overlay import (  # noqa: F401
+    has_approved_edits,
     _apply_edit_map,
     _edits_map_for_version,
     apply_all_row_edits,

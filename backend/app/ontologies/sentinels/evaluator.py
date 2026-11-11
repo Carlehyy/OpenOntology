@@ -191,6 +191,8 @@ def _released_builtin_for_execution(
         description=raw.get("description"),
         bindings=deepcopy(raw.get("bindings") or []),
         links=deepcopy(raw.get("links") or []),
+        # CEP 模式定义（on_pattern 哨兵）随发布快照冻结执行。
+        pattern=deepcopy(raw.get("pattern")),
         condition=raw.get("condition"),
         condition_rows=deepcopy(raw.get("conditionRows") or []),
         condition_logic=raw.get("conditionLogic") or "and",
@@ -1208,6 +1210,8 @@ def _run_actions(db: Session, ontology_id: str, sentinel: Sentinel,
         return False, "failed"
     target = _binding_instance(tup, primary, primary)
     target_id = target.id if target is not None else None
+    # 远程（external CDC）行没有本地 ObjectInstance：目标只存在于冻结快照里。
+    external_target = bool(getattr(target, "external_event", None))
     stored_event = (
         state.match_detail.get(_MATCH_EVENT_KEY, {})
         if isinstance(state.match_detail, dict) else {}
@@ -1278,6 +1282,21 @@ def _run_actions(db: Session, ontology_id: str, sentinel: Sentinel,
                 "validationErrors": ["missing_action"],
             })
             return False, "failed"
+        if external_target:
+            # 执行期防御：发布/试跑/动态门禁本应已拒绝。远程行只允许站内
+            # 通知；在任何动作执行之前整体拒绝，绝不产生部分副作用。
+            violation = cep_contract.external_action_rule_violation(
+                getattr(action, "rules", None))
+            if violation is not None:
+                results.append({
+                    "actionId": aid, "targetInstanceId": target_id,
+                    "edge": edge, "matchKey": match_key, "status": "failed",
+                    "errorMessage": (
+                        f"远程行事件只允许站内通知动作: {violation}"),
+                    "effects": [],
+                    "validationErrors": ["external_action_not_supported"],
+                })
+                return False, "failed"
         params, binding_errors = _configured_action_parameters(
             sentinel, aid, tup, primary, action=action, event=event)
         from app.services.formal.action_engine import prepare_action_parameters
@@ -1300,6 +1319,8 @@ def _run_actions(db: Session, ontology_id: str, sentinel: Sentinel,
         body = SimpleNamespace(
             action_id=aid, parameters=params,
             target_instance_id=target_id, dry_run=False,
+            # leave：目标可能已删除；远程行：目标从不存在于本地。两者都只能
+            # 凭命中时冻结的快照执行（含审批通过后的续跑）。
             target_snapshot=({
                 "id": target.id,
                 "objectTypeId": target.object_type_id,
@@ -1307,7 +1328,8 @@ def _run_actions(db: Session, ontology_id: str, sentinel: Sentinel,
                     getattr(target, "properties", None) or {}),
                 "computed": deepcopy(
                     getattr(target, "computed", None) or {}),
-            } if edge == "leave" and target is not None else None),
+            } if (edge == "leave" or external_target)
+                and target is not None else None),
             idempotency_key=_action_idempotency_key(
                 sentinel, state, match_key, edge, aid),
             sentinel_match_state_id=state.id,
@@ -1446,8 +1468,9 @@ def _snapshot_match_detail(tup: dict, *, edge: str,
                            sentinel: Sentinel | None = None,
                            event_overrides: dict | None = None) -> dict:
     detail: dict = {alias: instance.id for alias, instance in tup.items()}
-    detail[_MATCH_SNAPSHOTS_KEY] = {
-        alias: {
+    snapshots: dict = {}
+    for alias, instance in tup.items():
+        snapshot = {
             "id": instance.id,
             "objectTypeId": getattr(instance, "object_type_id", None),
             "properties": deepcopy(getattr(instance, "properties", None) or {}),
@@ -1456,8 +1479,13 @@ def _snapshot_match_detail(tup: dict, *, edge: str,
             "ontologyReleaseId": getattr(
                 instance, "ontology_release_id", None),
         }
-        for alias, instance in tup.items()
-    }
+        external_event = getattr(instance, "external_event", None)
+        if external_event:
+            # 远程行标记必须随命中行持久化：审批通过后的续跑同样没有本地
+            # 实例可读，只能继续凭这份冻结快照执行。
+            snapshot["externalEvent"] = deepcopy(external_event)
+        snapshots[alias] = snapshot
+    detail[_MATCH_SNAPSHOTS_KEY] = snapshots
     event = dict(previous_event or {})
     stable_occurred_at = (
         event.get("occurredAt")
@@ -1494,6 +1522,7 @@ def _tuple_from_detail(db: Session, ontology_id: str, detail: dict) -> dict:
         for alias, raw in snapshots.items():
             if not isinstance(raw, dict) or not raw.get("id"):
                 continue
+            external_event = raw.get("externalEvent")
             restored[alias] = SimpleNamespace(
                 id=raw["id"],
                 ontology_id=ontology_id,
@@ -1502,6 +1531,9 @@ def _tuple_from_detail(db: Session, ontology_id: str, detail: dict) -> dict:
                 computed=deepcopy(raw.get("computed") or {}),
                 external_id=raw.get("externalId"),
                 ontology_release_id=raw.get("ontologyReleaseId"),
+                external_event=(
+                    deepcopy(external_event)
+                    if isinstance(external_event, dict) else None),
             )
         if restored:
             return restored
@@ -1894,10 +1926,14 @@ def _resume_sentinel_match_claim_locked(
 
 def evaluate_sentinel(db: Session, ontology_id: str, sentinel: Sentinel,
                       source: str,
-                      expected_release_id: str | None = None
+                      expected_release_id: str | None = None,
+                      *, external_event: dict | None = None,
                       ) -> SentinelFiring:
     """边沿触发评估(参考 Foundry Automate):算当前命中集 → 与上次做差 →
     仅对"进入"(可选"离开")执行动作 → 更新命中状态。source ∈ manual|change|schedule
+
+    ``external_event`` 给定时只对该远程（external CDC）源行事件求值：没有
+    本地 ObjectInstance，单 stage 模式哨兵凭事件的冻结行快照判定。
 
     整体异常防护：单个哨兵怎么坏（配置损坏/表达式炸/动作抛错）都不能让
     手动触发 500、扫描 tick 崩溃或 CDC 线程静默吞错——统一落 status=error 日志。"""
@@ -1931,7 +1967,8 @@ def evaluate_sentinel(db: Session, ontology_id: str, sentinel: Sentinel,
                     db, ontology_id, sentinel, captured_release_id)
                 return _evaluate_inner(
                     db, ontology_id, execution_sentinel, source, start,
-                    release_version, captured_release_id)
+                    release_version, captured_release_id,
+                    external_event=external_event)
     except Exception as e:  # noqa: BLE001
         db.rollback()
         if isinstance(e, ReleaseContextChanged):
@@ -1995,7 +2032,8 @@ def _match_tuples_with_temporal(
 def _evaluate_inner(db: Session, ontology_id: str, sentinel: Sentinel,
                     source: str, start: float,
                     release_version: str | None,
-                    release_id: str | None) -> SentinelFiring:
+                    release_id: str | None,
+                    *, external_event: dict | None = None) -> SentinelFiring:
     # 模式哨兵（CEP）硬隔离：不进入快照差分路径，由水位驱动的
     # pattern 匹配器处理；命中合成普通 match_state 复用动作 claim 链。
     if cep_pattern.is_pattern_sentinel(sentinel):
@@ -2006,7 +2044,11 @@ def _evaluate_inner(db: Session, ontology_id: str, sentinel: Sentinel,
             hooks=cep_pattern.PatternHooks(
                 run_actions=_run_actions,
                 claim_match_state=_claim_match_state,
-                record_edge_outcome=_record_edge_outcome))
+                record_edge_outcome=_record_edge_outcome),
+            external_event=external_event)
+    if external_event is not None:
+        # 远程行没有本地投影：快照差分路径无行可比，绝不能退化成它。
+        raise ValueError("远程行事件只能由 on_pattern 哨兵求值")
     primary = sentinel.primary_alias or (sentinel.bindings[0]["alias"]
                                          if sentinel.bindings else None)
     mode = sentinel.trigger_mode or "on_enter"

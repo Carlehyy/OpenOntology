@@ -83,6 +83,14 @@ def decommission_asset(asset_id: str, db: Session = Depends(get_db), user=Depend
     service.decommission_asset(db, user, asset_id)
 
 
+# CDC 运行状态：只读控制面契约（enabled/status/healthy/subscriptions/...），
+# 无源端 IO、无原始事件值、无凭据；读授权与资产详情一致（get_asset）。
+@router.get("/{asset_id}/cdc")
+def asset_cdc_status(asset_id: str, db: Session = Depends(get_db),
+                     user=Depends(get_current_user)):
+    return service.cdc_status(db, user, asset_id)
+
+
 @router.get("/{asset_id}/rows")
 def rows(asset_id: str, limit: int = Query(100, ge=1, le=1000),
          db: Session = Depends(get_db), user=Depends(get_current_user)):

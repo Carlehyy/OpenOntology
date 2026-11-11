@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     String, DateTime, ForeignKey, Text, JSON, Boolean, Integer, UniqueConstraint,
-    CheckConstraint, Index, BigInteger,
+    CheckConstraint, Index, BigInteger, text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -348,6 +348,25 @@ class SentinelEventLog(Base):
             "ix_sentinel_event_log_occurred",
             "occurred_at", "id",
         ),
+        CheckConstraint(
+            "source_event_id IS NULL OR (ontology_release_id IS NOT NULL "
+            "AND external_asset_id IS NOT NULL "
+            "AND external_mapping_id IS NOT NULL)",
+            name="ck_sentinel_event_log_external_identity_scope",
+        ),
+        Index(
+            "uq_sentinel_event_log_external",
+            "ontology_id", "ontology_release_id", "external_asset_id",
+            "external_mapping_id", "object_type_id", "source_event_id", "key",
+            unique=True,
+            postgresql_where=text("source_event_id IS NOT NULL"),
+            sqlite_where=text("source_event_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_sentinel_event_log_external_group", "event_group_id", "id",
+            postgresql_where=text("event_group_id IS NOT NULL"),
+            sqlite_where=text("event_group_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(
@@ -361,6 +380,13 @@ class SentinelEventLog(Base):
         String, nullable=True)
     object_type_id: Mapped[str] = mapped_column(String, nullable=False)
     instance_id: Mapped[str] = mapped_column(String, nullable=False)
+    # Stable source coordinates and a frozen post-image support remote events
+    # without creating a local ObjectInstance mirror.
+    source_event_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    event_group_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    external_asset_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    external_mapping_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    event_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # created | updated | deleted
     change_kind: Mapped[str] = mapped_column(
         String(12), nullable=False, default="updated",

@@ -69,6 +69,16 @@ def test_kaneo_is_a_required_blocking_service() -> None:
     assert "kaneo" not in OPTIONAL_SERVICES
 
 
+def test_hindsight_is_advisory_and_never_gates_generation() -> None:
+    assert "hindsight" in AVAILABLE_SERVICES
+    assert "hindsight" in OPTIONAL_SERVICES
+    assert "hindsight" not in REQUIRED_SERVICES
+    assert not set(REQUIRED_SERVICES) & set(OPTIONAL_SERVICES)
+    assert set(AVAILABLE_SERVICES) == set(REQUIRED_SERVICES) | set(
+        OPTIONAL_SERVICES
+    )
+
+
 def test_run_starts_config_center_on_default_port(
     monkeypatch,
 ) -> None:

@@ -47,6 +47,11 @@ Kaneo 项目管理（官方 2.49.0，独立单用户账号）随同一套 Compos
 与邮件验证登录全程关闭。首版未接 S3/SMTP，附件上传与邮件找回密码不可用。
 细节见 [Kaneo 本地初始化](./docs/development/setup.md#kaneo-本地初始化)。
 
+超级助手长期记忆是可选服务：本地 `docker compose --profile hindsight up -d`
+启用（loopback `http://127.0.0.1:18888`），不启用或故障时仅记忆特性降级，
+聊天不受影响。细节见
+[Hindsight 长期记忆](./docs/development/setup.md#hindsight-长期记忆可选)。
+
 三个编排文件分工如下：`docker-compose.local.yml` 是单机一键完整栈（即上文
 流程，`up --build` 会自动执行 Alembic 迁移并按 `.env` 播种首个管理员）；
 `docker-compose.e2e.yml` 仅为真实后端 E2E 提供端口错开的基础设施，不含应用

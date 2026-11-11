@@ -33,6 +33,10 @@ Kaneo 是平台 fail-closed 强依赖：回滚目标是带 Kaneo 的版本时，
 时 Kaneo 公网网关保持关闭，完成回滚并确认私网 bootstrap 验证通过后再随
 Compose 重新开放。
 
+Hindsight 记忆 profile 是可选特性：回滚包含它的新版本时，把服务器 `.env`
+的 `HINDSIGHT_ENABLED` 置回 false 并重跑部署即可停用（卷保留）；回滚目标
+版本不含该 profile 时无需任何额外步骤，平台其余回滚流程不变。
+
 ## 目录治理期间
 
 每个迁移 PR 必须保留旧 import/facade 或提供可逆提交。目录移动和删除兼容层
