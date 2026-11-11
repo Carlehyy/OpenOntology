@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowRight, Bell, BookOpen, Clock, Layers3, ListChecks, Network, Plug, ShieldCheck, Sparkles, type LucideIcon } from 'lucide-react'
+import { ArrowDown, ArrowRight, Bell, BookOpen, Clock, Layers3, ListChecks, Network, Plug, Sparkles, type LucideIcon } from 'lucide-react'
 
 import { Badge } from '@/components/ui/Badge'
 import { DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -22,33 +22,6 @@ function CapabilityCard({ icon: Icon, title, status, children }: {
   )
 }
 
-function Scenario({ title, steps, connected, children }: {
-  title: string
-  steps: string[]
-  connected?: boolean
-  children: React.ReactNode
-}) {
-  return (
-    <article className="min-w-0 rounded-xl border border-border bg-card p-3" data-capability-scenario={title}>
-      <div className="flex flex-wrap items-center gap-2">
-        <h3 className="text-sm font-medium">{title}</h3>
-        <Badge variant={connected ? 'success' : 'outline'} className="ml-auto shrink-0 px-2 text-[11px]">
-          {connected ? '按配置接入' : '待打通'}
-        </Badge>
-      </div>
-      <ol className="mt-3 flex flex-wrap items-center gap-x-1.5 gap-y-2 text-xs" aria-label={`${title}流程`}>
-        {steps.map((step, index) => (
-          <li key={step} className="flex items-center gap-1.5">
-            {index > 0 && <ArrowRight size={12} aria-hidden="true" className={connected ? 'text-brand-ink' : 'text-muted-foreground'} />}
-            <span className={`rounded-md border px-2 py-1 ${step === '超级助手' ? 'border-brand-line bg-brand-soft text-brand-ink' : 'border-border bg-background'}`}>{step}</span>
-          </li>
-        ))}
-      </ol>
-      <p className="mt-3 text-xs leading-5 text-muted-foreground">{children}</p>
-    </article>
-  )
-}
-
 export default function CapabilityMapDialog() {
   return (
     <DialogContent className="flex max-h-[90dvh] w-[min(96vw,64rem)] flex-col overflow-hidden p-0" data-capability-map>
@@ -57,10 +30,6 @@ export default function CapabilityMapDialog() {
         <DialogDescription>从业务信息到执行协作，了解超级助手的能力与连接边界。</DialogDescription>
       </DialogHeader>
       <div className="min-h-0 overflow-y-auto p-4 sm:p-5" data-capability-map-body>
-        <p className="mb-4 text-xs leading-5 text-muted-foreground">
-          以工作台导航为业务能力入口。已接入表示已有助手调用链路；独立可用表示模块已上线；待打通表示跨模块联动的建设方向。实际使用受账号权限、配置与授权约束。
-        </p>
-
         <div className="grid gap-3 md:grid-cols-[1fr_1.05fr_1fr]" aria-label="能力分层">
           <section className="min-w-0 rounded-xl border border-border bg-background p-3" aria-labelledby="capability-input">
             <h2 id="capability-input" className="mb-1 text-sm font-semibold">01 · 信息与业务背景</h2>
@@ -92,26 +61,6 @@ export default function CapabilityMapDialog() {
               <CapabilityCard icon={Plug} title="能力拓展" status="按配置接入">连接外部工作台与远程助手，查询、委派或协作；需先完成配置与授权。</CapabilityCard>
             </div>
           </section>
-        </div>
-
-        <section className="mt-5" aria-labelledby="capability-scenarios">
-          <h2 id="capability-scenarios" className="mb-3 text-sm font-semibold">典型场景与连接进度</h2>
-          <div className="grid gap-3 sm:grid-cols-3">
-            <Scenario title="从消息到任务" steps={['消息通知', '超级助手', '解读消息', '任务模板', '生成实例']}>
-              消息接收与模板手动激活已可用。消息自动触发助手、再由助手生成任务实例，尚待接通。
-            </Scenario>
-            <Scenario title="从知识到业务操作" steps={['知识库（WeKnora） + 本体治理', '超级助手', '执行操作']}>
-              WeKnora 的模型、知识库与只读工具需管理员手工配置、测试并登记后才会被助手使用；本体助手委派已可用，操作建议需在本体界面确认。
-            </Scenario>
-            <Scenario title="从助手到外部协作" steps={['超级助手', '能力拓展', '查询 / 委派 / 协作']} connected>
-              已有外部协作链路，启用范围取决于集成配置、目标系统与当前账号授权。
-            </Scenario>
-          </div>
-        </section>
-
-        <div className="mt-4 flex items-start gap-2 rounded-lg border border-border bg-background p-3 text-xs leading-5 text-muted-foreground">
-          <ShieldCheck size={15} className="mt-0.5 shrink-0" aria-hidden="true" />
-          <p>地图展示业务能力与建设方向，不代表所有连接已启用。全局搜索用于查找入口与历史内容；待打通的链路暂不能由助手自动完成。</p>
         </div>
       </div>
     </DialogContent>

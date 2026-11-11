@@ -4364,7 +4364,7 @@ test('对话问题导航竖条：输入框多行撑高时竖条位置保持不�
 })
 
 // 能力地图是业务说明入口，不读取新的后台数据，也不触发业务操作。
-test('能力地图：上下文左侧入口、分层与连接边界、关闭后聊天可用', async ({ page }) => {
+test('能力地图：上下文左侧入口、能力分层、关闭后聊天可用', async ({ page }) => {
   await seedAuth(page)
   const api = await mockApis(page)
   await page.goto('/#/super-assistant?conversation=c-today')
@@ -4388,9 +4388,10 @@ test('能力地图：上下文左侧入口、分层与连接边界、关闭后�
   for (const title of ['消息通知', '知识库（WeKnora）', '本体治理', '定时任务', '任务实例', '能力拓展']) {
     await expect(dialog.getByRole('heading', { name: title, exact: true })).toBeVisible()
   }
-  await expect(dialog.locator('[data-capability-scenario="从消息到任务"]')).toContainText('待打通')
-  await expect(dialog.locator('[data-capability-scenario="从知识到业务操作"]')).toContainText('待打通')
-  await expect(dialog.locator('[data-capability-scenario="从助手到外部协作"]')).toContainText('按配置接入')
+  // 场景卡片与两段边界说明已按需求精简，弹窗只保留能力分层图。
+  await expect(dialog).not.toContainText('典型场景与连接进度')
+  await expect(dialog).not.toContainText('以工作台导航为业务能力入口')
+  await expect(dialog).not.toContainText('不代表所有连接已启用')
   await expect(dialog).not.toContainText(/Skill|MCP|记忆/)
   await page.keyboard.press('Escape')
   await expect(dialog).toHaveCount(0)
@@ -4444,7 +4445,7 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 1024, height: 768 
     const body = dialog.locator('[data-capability-map-body]')
     expect(await body.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true)
     await body.evaluate(el => { el.scrollTop = el.scrollHeight })
-    await expect(dialog.getByRole('heading', { name: '典型场景与连接进度' })).toBeVisible()
+    await expect(dialog.getByRole('heading', { name: '03 · 执行与协作' })).toBeVisible()
     const close = dialog.getByRole('button', { name: '关闭', exact: true })
     expect(await close.evaluate(el => {
       const r = el.getBoundingClientRect()
@@ -4470,7 +4471,7 @@ test('能力地图：暗色令牌、无导航授权账号可读说明且不增�
   await page.getByRole('button', { name: '查看能力地图' }).click()
   const dialog = page.getByRole('dialog', { name: '超级助手能力地图' })
   await expect(dialog).toBeVisible()
-  await expect(dialog).toContainText('账号权限、配置与授权约束')
+  await expect(dialog).toContainText('了解超级助手的能力与连接边界')
   await expect(dialog.getByRole('button')).toHaveCount(1)
   await expect(dialog.getByRole('link')).toHaveCount(0)
   expect(await dialog.evaluate(el => {
