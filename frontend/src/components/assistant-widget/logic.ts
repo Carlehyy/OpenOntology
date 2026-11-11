@@ -5,7 +5,7 @@
 
 import { parsePendingConfirmation } from '../ontologyConfirmationModel.ts'
 import type { PendingToolConfirmation } from '../ontologyConfirmationModel'
-import type { StreamEvent, SuperMessage, ToolStep } from '../../api/superAssistant'
+import type { MemoryRuntimeState, MemoryStatus, StreamEvent, SuperMessage, ToolStep } from '../../api/superAssistant'
 
 export type PendingConfirmation = PendingToolConfirmation
 
@@ -51,6 +51,60 @@ export interface StreamReduceResult {
   clearPendingFor?: string
   /** error 事件的可读文案（供全局提示使用） */
   errorText?: string
+}
+
+/**
+ * 聊天流内 memory_status 事件的轻量快照（主聊天与悬浮助手共用展示形态）。
+ * 与 GET /memory/status 同形，但轮询/SSE 未必携带全部字段，计数允许为 null。
+ * 记忆状态是用户级运行时状态：与消息本体、工具步骤、生成终态完全独立，
+ * 记忆故障绝不作为聊天 error 呈现。
+ */
+export interface MemoryStatusSnapshot {
+  state: MemoryRuntimeState
+  message: string | null
+  pendingCount: number | null
+  failedCount: number | null
+  lastSyncedAt: string | null
+}
+
+const MEMORY_RUNTIME_STATES: readonly MemoryRuntimeState[] = [
+  'ready', 'unconfigured', 'unavailable', 'syncing', 'error',
+]
+
+/** 解析 SSE memory_status 事件载荷；state 缺失/非法时返回 null（事件整体忽略） */
+export function parseMemoryStatusEvent(data: Record<string, any> | undefined): MemoryStatusSnapshot | null {
+  const payload = data ?? {}
+  const state = payload.state
+  if (typeof state !== 'string' || !MEMORY_RUNTIME_STATES.includes(state as MemoryRuntimeState)) return null
+  return {
+    state: state as MemoryRuntimeState,
+    message: typeof payload.message === 'string' && payload.message ? payload.message : null,
+    pendingCount: typeof payload.pending_count === 'number' ? payload.pending_count : null,
+    failedCount: typeof payload.failed_count === 'number' ? payload.failed_count : null,
+    lastSyncedAt: typeof payload.last_synced_at === 'string' ? payload.last_synced_at : null,
+  }
+}
+
+/** GET /memory/status 响应转聊天区快照（面板轮询与 SSE 同源展示） */
+export function memoryStatusSnapshot(status: MemoryStatus): MemoryStatusSnapshot {
+  return {
+    state: status.state,
+    message: status.message,
+    pendingCount: typeof status.pending_count === 'number' ? status.pending_count : null,
+    failedCount: typeof status.failed_count === 'number' ? status.failed_count : null,
+    lastSyncedAt: status.last_synced_at ?? null,
+  }
+}
+
+export type MemoryStatusTone = 'ok' | 'busy' | 'idle' | 'warn'
+
+/** 记忆运行时状态的展示文案与色调（所有状态都可见，unconfigured 也给轻量提示） */
+export function memoryStatusPresentation(state: MemoryRuntimeState): { label: string; tone: MemoryStatusTone } {
+  if (state === 'ready') return { label: '记忆已同步', tone: 'ok' }
+  if (state === 'syncing') return { label: '记忆同步中…', tone: 'busy' }
+  if (state === 'unconfigured') return { label: '记忆未配置', tone: 'idle' }
+  if (state === 'unavailable') return { label: '记忆服务不可用', tone: 'warn' }
+  return { label: '记忆同步失败', tone: 'warn' }
 }
 
 /**

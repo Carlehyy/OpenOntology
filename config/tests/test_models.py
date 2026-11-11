@@ -7,6 +7,7 @@ from app.models import (
     AdvancedConfig,
     BrowserConfig,
     ConfigProfile,
+    HindsightConfig,
     MinioConfig,
     NatsConfig,
     PlatformConfig,
@@ -34,6 +35,26 @@ def test_default_profile_generates_stable_security_material() -> None:
     assert profile.neo4j.uri == "neo4j://localhost:7687"
     assert profile.minio.endpoint == "localhost:9000"
     assert profile.minio.access_key == "admin"
+    assert profile.hindsight.base_url == "http://127.0.0.1:18888"
+    assert profile.hindsight.timeout_seconds == 2.0
+
+
+def test_hindsight_config_validates_origin_and_timeout_bounds() -> None:
+    config = HindsightConfig()
+    assert config.base_url == "http://127.0.0.1:18888"
+    assert config.timeout_seconds == 2.0
+
+    with pytest.raises(ValidationError):
+        HindsightConfig(base_url="http://127.0.0.1:18888/memory")
+    with pytest.raises(ValidationError):
+        HindsightConfig(base_url="hindsight:8888")
+    with pytest.raises(ValidationError):
+        HindsightConfig(timeout_seconds=0)
+    with pytest.raises(ValidationError):
+        HindsightConfig(timeout_seconds=61)
+    assert HindsightConfig(base_url="http://hindsight:8888").base_url == (
+        "http://hindsight:8888"
+    )
 
 
 def test_nats_config_validates_port_and_token_bounds() -> None:

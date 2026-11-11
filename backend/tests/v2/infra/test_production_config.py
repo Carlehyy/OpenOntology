@@ -273,7 +273,15 @@ def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
     # WeKnora is a separate product on a private network: only the backend
     # joins it, and no internal WeKnora service publishes a host port.
     assert compose["networks"]["weknora_internal"] == {"driver": "bridge"}
-    assert backend["networks"] == ["default", "dbx_bridge", "weknora_internal"]
+    assert backend["networks"] == [
+        "default", "dbx_bridge", "weknora_internal", "hindsight_internal",
+    ]
+    assert compose["networks"]["hindsight_internal"] == {"driver": "bridge"}
+    assert "hindsight" not in backend["depends_on"]
+    assert "hindsight-db" not in backend["depends_on"]
+    for service in ("hindsight", "hindsight-db"):
+        assert compose["services"][service]["profiles"] == ["hindsight"]
+        assert "ports" not in compose["services"][service]
     assert backend["depends_on"]["weknora-app"]["condition"] == "service_healthy"
     for service in (
         "weknora-app",

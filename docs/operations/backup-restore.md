@@ -10,6 +10,9 @@
 - 共享 uploads；
 - WeKnora 独立 `weknora_postgres_data`、`weknora_redis_data`、`weknora_data`
   与 `weknora_docreader_tmp`；
+- 启用 Hindsight 记忆 profile 时，其 `hindsight_postgres_data` 卷与 `.env` 中
+  的 `HINDSIGHT_API_KEY`/`HINDSIGHT_SERVICE_TOKEN` 同恢复点保存
+  （`hindsight_model_cache` 仅是模型缓存，可重新下载/预填，不属于恢复权威）；
 - 服务器 `.env` 与部署所需非秘密配置；
 - 当前镜像 digest/版本和 Compose 配置。
 

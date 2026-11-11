@@ -1,4 +1,9 @@
-"""超级助手反思 HTTP 端点：候选列表/审批/full 触发/设置测试。"""
+"""超级助手反思 HTTP 端点：候选列表/审批/full 触发/设置测试。
+
+行为基线（2026-11 Hindsight 迁移后）：候选列表可查询历史（含旧记忆
+候选）；技能候选 accept 全链路保留；旧记忆/冲突候选 accept/new_supersedes
+经现有 ValueError 映射返回 400，reject/keep_old/skip 可清理历史。
+"""
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -194,7 +199,9 @@ def test_candidates_list_filters_status_and_owner(tmp_path, monkeypatch):
         engine.dispose()
 
 
-def test_decision_accept_memory_full_flow(tmp_path, monkeypatch):
+def test_decision_memory_accept_rejected_legacy_and_reject_cleans(tmp_path, monkeypatch):
+    """旧记忆候选：accept 经现有 ValueError 映射返回 400 且不写旧库；
+    reject 可清理历史候选（409 幂等语义保持）。"""
     engine, TestingSession, client = _make_app(tmp_path, monkeypatch)
     with TestingSession() as db:
         _seed_candidate(
@@ -209,27 +216,68 @@ def test_decision_accept_memory_full_flow(tmp_path, monkeypatch):
             },
         )
     try:
-        response = client.post(
+        accept = client.post(
             f"{_PREFIX}/reflection/candidates/c-1/decision",
             json={"decision": "accept"},
         )
-        assert response.status_code == 200, response.text
-        body = response.json()
-        assert body["status"] == "accepted"
-        assert body["decision"] == "accept"
-        assert body["decided_at"] is not None
+        assert accept.status_code == 400, accept.text
+        assert "旧记忆链路已停用" in accept.json()["detail"]
 
-        edited = client.post(
+        with TestingSession() as db:
+            assert db.query(SuperAssistantMemory).count() == 0
+            candidate = db.get(SuperAssistantReflectionCandidate, "c-1")
+            assert candidate.status == "pending"
+
+        rejected = client.post(
             f"{_PREFIX}/reflection/candidates/c-1/decision",
             json={"decision": "reject"},
         )
-        assert edited.status_code == 409
-        assert edited.json()["detail"] == "候选已处理"
+        assert rejected.status_code == 200, rejected.text
+        assert rejected.json()["status"] == "rejected"
+
+        again = client.post(
+            f"{_PREFIX}/reflection/candidates/c-1/decision",
+            json={"decision": "reject"},
+        )
+        assert again.status_code == 409
+        assert again.json()["detail"] == "候选已处理"
 
         with TestingSession() as db:
-            memory = db.query(SuperAssistantMemory).one()
-            assert memory.content == "用户喜欢黑咖啡"
-            assert memory.source == "reflection"
+            assert db.query(SuperAssistantMemory).count() == 0
+    finally:
+        engine.dispose()
+
+
+def test_decision_conflict_new_supersedes_rejected_legacy(tmp_path, monkeypatch):
+    engine, TestingSession, client = _make_app(tmp_path, monkeypatch)
+    with TestingSession() as db:
+        _seed_candidate(
+            db, candidate_id="c-conflict", kind="conflict",
+            payload={
+                "memory_id": "mem-old",
+                "conflict_kind": "contradiction",
+                "explain": "偏好变化",
+                "options": ["new_supersedes", "keep_old"],
+                "candidate_content": "用户偏好中文报告",
+            },
+        )
+    try:
+        supersede = client.post(
+            f"{_PREFIX}/reflection/candidates/c-conflict/decision",
+            json={"decision": "new_supersedes"},
+        )
+        assert supersede.status_code == 400, supersede.text
+        assert "旧记忆链路已停用" in supersede.json()["detail"]
+
+        keep = client.post(
+            f"{_PREFIX}/reflection/candidates/c-conflict/decision",
+            json={"decision": "keep_old"},
+        )
+        assert keep.status_code == 200, keep.text
+        assert keep.json()["status"] == "rejected"
+
+        with TestingSession() as db:
+            assert db.query(SuperAssistantMemory).count() == 0
     finally:
         engine.dispose()
 
@@ -245,6 +293,9 @@ def test_decision_owner_isolation_and_bad_decision(tmp_path, monkeypatch):
             db, candidate_id="c-mine",
             payload={"content": "用户喜欢黑咖啡", "zone": "general"},
         )
+        _seed_candidate(
+            db, candidate_id="c-skill", kind="skill", payload=_skill_payload(),
+        )
     try:
         missing = client.post(
             f"{_PREFIX}/reflection/candidates/c-other/decision",
@@ -253,12 +304,21 @@ def test_decision_owner_isolation_and_bad_decision(tmp_path, monkeypatch):
         assert missing.status_code == 404
         assert missing.json()["detail"] == "候选不存在"
 
-        bad = client.post(
+        # 旧记忆候选的未知操作同样落入停用拒绝（400）
+        legacy = client.post(
             f"{_PREFIX}/reflection/candidates/c-mine/decision",
             json={"decision": "bogus"},
         )
+        assert legacy.status_code == 400
+        assert "旧记忆链路已停用" in legacy.json()["detail"]
+
+        # 技能候选保留独立的未知操作校验
+        bad = client.post(
+            f"{_PREFIX}/reflection/candidates/c-skill/decision",
+            json={"decision": "bogus"},
+        )
         assert bad.status_code == 400
-        assert "不支持的记忆候选操作" in bad.json()["detail"]
+        assert "不支持的技能候选操作" in bad.json()["detail"]
     finally:
         engine.dispose()
 

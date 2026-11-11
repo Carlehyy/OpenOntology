@@ -1,4 +1,4 @@
-"""Focused guards for the partial CDC schema/migration (0144).
+"""Focused guards for the partial CDC schema/migration (0146).
 
 Frozen migration DDL / model shape guards on SQLite; PostgreSQL replay is
 separate E2E (same convention as test_integrated_migrations.py).
@@ -83,14 +83,14 @@ def test_partial_cdc_schema_create_all_builds_partial_unique_indexes_on_sqlite()
 
 
 def test_cdc_migration_accepts_the_model_created_schema_without_drift():
-    """A fresh DB reaches 0144 after 0003 create_all built the model tables.
+    """A fresh DB reaches 0146 after 0003 create_all built the model tables.
 
     Migration 0003 materializes every registered model (including both CDC
-    tables and the new sentinel_event_log columns/indexes) before 0144 runs
-    on a fresh chain, so 0144 must verify — never re-create or reject — that
+    tables and the new sentinel_event_log columns/indexes) before 0146 runs
+    on a fresh chain, so 0146 must verify — never re-create or reject — that
     exact shape.
     """
-    cdc = _migration("2026_11_10_0144_integrated_cdc.py")
+    cdc = _migration("2026_11_10_0146_integrated_cdc.py")
     engine = sa.create_engine("sqlite://")
     try:
         with engine.begin() as connection:
@@ -115,13 +115,13 @@ def test_cdc_migration_accepts_the_model_created_schema_without_drift():
 
 
 def test_cdc_migration_downgrade_reupgrade_from_minimal_parents():
-    """0144 must upgrade a pre-0144 database, then reverse and replay.
+    """0146 must upgrade a pre-0146 database, then reverse and replay.
 
     The unique-index column list below pins the MIGRATION side exactly (it
     includes external_mapping_id); the model-side twin assertion lives in
     the create_all guard, so any model↔migration drift fails one of the two.
     """
-    cdc = _migration("2026_11_10_0144_integrated_cdc.py")
+    cdc = _migration("2026_11_10_0146_integrated_cdc.py")
     engine = sa.create_engine("sqlite://")
     try:
         with engine.begin() as connection:
@@ -336,8 +336,8 @@ def test_cdc_control_tables_shape_and_status_vocabulary_on_create_all():
     "fk_cascade",
 ])
 def test_cdc_migration_rejects_drifted_control_table(drift):
-    """0144 verifies — never silently accepts — a drifted sources table."""
-    cdc = _migration("2026_11_10_0144_integrated_cdc.py")
+    """0146 verifies — never silently accepts — a drifted sources table."""
+    cdc = _migration("2026_11_10_0146_integrated_cdc.py")
     engine = sa.create_engine("sqlite://")
     vocabulary = "('starting', 'active', 'paused', 'error', 'gap', 'stopped')"
     kwargs = {
@@ -367,7 +367,7 @@ def test_cdc_migration_rejects_drifted_control_table(drift):
 
 def test_cdc_migration_accepts_exact_control_shape_from_minimal_parents():
     """Sanity counterpart: the exact frozen shape passes verification."""
-    cdc = _migration("2026_11_10_0144_integrated_cdc.py")
+    cdc = _migration("2026_11_10_0146_integrated_cdc.py")
     engine = sa.create_engine("sqlite://")
     try:
         with engine.begin() as connection:
@@ -391,9 +391,9 @@ def test_check_shape_is_structural_across_dialect_spellings():
     The PostgreSQL strings below are hand-written in the form its deparser
     emits for a varchar IN-list (``= ANY (ARRAY[...])`` with per-literal
     casts); they exercise the normalizer without a live server. A real
-    PostgreSQL replay of 0144 remains a separate environment check.
+    PostgreSQL replay of 0146 remains a separate environment check.
     """
-    shape = _migration("2026_11_10_0144_integrated_cdc.py")._check_shape
+    shape = _migration("2026_11_10_0146_integrated_cdc.py")._check_shape
     model = "status IN ('starting', 'active', 'superseded', 'stopped')"
     postgres = ("((status)::text = ANY ((ARRAY['starting'::character varying, "
                 "'active'::character varying, 'superseded'::character varying, "

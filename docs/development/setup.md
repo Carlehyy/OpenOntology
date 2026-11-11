@@ -128,6 +128,23 @@ docker compose -f docker-compose.local.yml stop weknora-app-init
 重置知识库或删除 `weknora_*` 数据卷会丢失文件、索引和凭据，须单独确认；普通
 重新部署不会清空这些数据。
 
+## Hindsight 长期记忆（可选）
+
+Hindsight 默认不启动。启用本地记忆栈（含专用 pgvector DB 与模型缓存卷）：
+
+```bash
+docker compose -f docker-compose.local.yml --profile hindsight up -d
+curl http://127.0.0.1:18888/health/ready   # API + DB 就绪探针
+```
+
+首次启动需 HuggingFace egress 下载 embedding 模型
+（`intfloat/multilingual-e5-small`，缓存在 `hindsight_model_cache` 卷）；无
+egress 环境先在有网机器预下载同一 repo 并填入该卷，再在 `.env` 设
+`HINDSIGHT_HF_OFFLINE=1`（方法见
+[operations/configuration.md](../operations/configuration.md#hindsight-长期记忆可选默认关闭)）。
+API 仅 loopback `18888`，管理 UI 仅 loopback `19999`，都不对外。服务不可用时
+仅记忆特性降级，聊天不受影响；配置中心 `Hindsight` 节为可选测试，不阻塞生成本地配置。
+
 ## 最小验证
 
 改动后先跑受影响范围，再执行 [AGENTS.md](../../AGENTS.md) 第 5 节完整门禁：

@@ -758,3 +758,14 @@ class SuperAssistantScheduledRun(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+
+
+# ---------------------------------------------------------------------------
+# 跨会话持久记忆（Hindsight 集成）——新链路模型注册。
+# 定义在 memory_models.py（快照+同步任务一体行与每用户设置）；此处仅
+# import 以进入共享 Base metadata（model_registry / Alembic / create_all）。
+# ---------------------------------------------------------------------------
+from app.super_assistant.memory_models import (  # noqa: E402,F401
+    SuperAssistantMemorySetting,
+    SuperAssistantMemorySource,
+)

@@ -89,6 +89,25 @@ WeKnora v0.9.0 的公开入口与平台 Nginx 独立：它只暴露原生 Web �
 通过超级助手现有 MCP 管理手工接入，详见
 [配置流程](./configuration.md#weknora-共享知识库v090)。
 
+Hindsight 1.2.0 长期记忆是可选 profile，默认不部署：服务器 `.env` 写
+`HINDSIGHT_ENABLED=true` 后，`deploy-prod.sh` 幂等生成
+`HINDSIGHT_DB_PASSWORD`/`HINDSIGHT_API_KEY`/`HINDSIGHT_SERVICE_TOKEN`（可选经
+`PROD_HINDSIGHT_DB_PASSWORD`/`PROD_HINDSIGHT_API_KEY`/`PROD_HINDSIGHT_SERVICE_TOKEN`
+secrets 与 `PROD_HINDSIGHT_IMAGE`/`PROD_HINDSIGHT_POSTGRES_IMAGE` variables
+物化，全部可缺省，缺省时由服务器端生成/钉扎），并校验镜像 `@sha256` 钉扎。
+核心 compose 调用一律不携带 hindsight profile：可选栈只在核心部署成功之后
+（readiness、源码 attestation 与 `deployment succeeded` 已判定，backend 已
+就绪，Hindsight 的 LLM 回调目标存在）才由单独的有时间上界的
+`--profile hindsight up -d hindsight` 启动（`HINDSIGHT_START_TIMEOUT`，默认
+300 秒；本地已有钉扎镜像时不访问 registry，缺镜像时随该调用自拉）。镜像
+拉取、缓存卷属主 init、专用 DB 健康、应用启动或超时的任何失败都只降级记忆
+特性：停掉本次起了一半的可选容器（`hindsight`/`hindsight-db`/
+`hindsight-model-init`，卷保留，下次部署自动重试），绝不停止核心服务或改写
+部署结论；启动成功但未在观察窗内健康（首启可能在下载 embedding 模型）则
+保持运行并仅记录告警。未启用时自动停掉历史容器（保留卷）。它不参与平台
+readiness 与部署成败判定，部署日志仅记录功能健康状态。详见
+[配置流程](./configuration.md#hindsight-长期记忆可选默认关闭)。
+
 ## 数据库迁移停机边界
 
 生产迁移是一次有意的短暂停机。依赖连接预检通过后，`deploy/deploy-prod.sh`

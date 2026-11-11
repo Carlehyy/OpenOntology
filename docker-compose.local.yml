@@ -58,7 +58,8 @@ x-weknora-app: &weknora-app-base
 # that live in the shared .env out of long-running platform containers. Merge
 # this block verbatim into every service that loads .env; the bootstrap, verify
 # and WeKnora stack keep reading the real values. Only the administrator,
-# database, cache and token-signing secrets are masked.
+# database, cache and token-signing secrets are masked. The Hindsight DB
+# password belongs to the hindsight stack only and is masked the same way.
 x-platform-runtime-weknora-secret-blocks: &platform-runtime-weknora-secret-blocks
   WEKNORA_ADMIN_PASSWORD: ""
   WEKNORA_DB_PASSWORD: ""
@@ -66,6 +67,7 @@ x-platform-runtime-weknora-secret-blocks: &platform-runtime-weknora-secret-block
   WEKNORA_JWT_SECRET: ""
   WEKNORA_SYSTEM_AES_KEY: ""
   WEKNORA_SYSTEM_SIGNING_KEY: ""
+  HINDSIGHT_DB_PASSWORD: ""
 
 services:
   db:
@@ -344,6 +346,101 @@ services:
       - weknora_internal
     restart: unless-stopped
 
+  # Hindsight 长期记忆栈（opt-in：docker compose --profile hindsight up -d，
+  # 或在 .env 写 COMPOSE_PROFILES=hindsight）。它是可选特性，不是 backend 的
+  # depends_on 依赖：LLM 代理懒加载、记忆调用失败只降级记忆特性，聊天与全局
+  # readiness 不受影响。backend 也绝不能把它列为 healthy 依赖（Hindsight 的
+  # LLM 指回 backend，构成环）。管理 UI（9999 控制面）与 API 都仅 loopback。
+  hindsight-db:
+    image: ${HINDSIGHT_POSTGRES_IMAGE:-pgvector/pgvector:pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f}
+    profiles: ["hindsight"]
+    environment:
+      POSTGRES_DB: ${HINDSIGHT_DB_NAME:-hindsight}
+      POSTGRES_USER: ${HINDSIGHT_DB_USER:-hindsight}
+      POSTGRES_PASSWORD: ${HINDSIGHT_DB_PASSWORD:-hindsight-local-password}
+    volumes:
+      - hindsight_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    networks:
+      - hindsight_internal
+    restart: unless-stopped
+
+  # 一次性缓存卷属主修正：镜像以 uid 1000（hindsight 用户）运行，而新建命名
+  # 卷默认 root 属主；不先 chown 的话 embedding 模型下载会 EACCES。有 egress
+  # 时由 Hindsight 首启自行下载；无 egress 环境按 docs 预填同一卷后置
+  # HINDSIGHT_HF_OFFLINE=1。
+  hindsight-model-init:
+    image: ${ALPINE_IMAGE:-alpine:3.20}
+    profiles: ["hindsight"]
+    command: ["sh", "-c", "mkdir -p /cache/huggingface && chown -R 1000:1000 /cache"]
+    volumes:
+      - hindsight_model_cache:/cache
+    restart: "no"
+
+  hindsight:
+    image: ${HINDSIGHT_IMAGE:-ghcr.io/vectorize-io/hindsight:1.2.0@sha256:19d0c08f3df79acac29384826419a1ca158129e81ec527cdcbd8c97ff4ef76da}
+    profiles: ["hindsight"]
+    stop_grace_period: 75s
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      HINDSIGHT_API_DATABASE_URL: postgresql://${HINDSIGHT_DB_USER:-hindsight}:${HINDSIGHT_DB_PASSWORD:-hindsight-local-password}@hindsight-db:5432/${HINDSIGHT_DB_NAME:-hindsight}
+      # 租户鉴权：backend 必须携带同一 HINDSIGHT_API_KEY（Bearer）才可调用，
+      # 匿名/错误 key 会被拒；该 key 不是任何真实模型 key。
+      HINDSIGHT_API_TENANT_EXTENSION: hindsight_api.extensions.builtin.tenant:ApiKeyTenantExtension
+      HINDSIGHT_API_TENANT_API_KEY: ${HINDSIGHT_API_KEY:-hindsight-local-api-key}
+      # LLM 走平台内部 OpenAI 兼容代理（实际 POST {base}/chat/completions）。
+      # key 是平台内部 service token（与 backend HINDSIGHT_SERVICE_TOKEN 同值），
+      # 不是真实模型 key；LLM 懒加载，backend 未就绪不影响 Hindsight 启动。
+      HINDSIGHT_API_LLM_PROVIDER: openai
+      HINDSIGHT_API_LLM_BASE_URL: http://backend:8000/api/v2/super-assistant/internal/memory/v1
+      HINDSIGHT_API_LLM_API_KEY: ${HINDSIGHT_SERVICE_TOKEN:-hindsight-local-service-token}
+      # Hindsight 1.2.0 禁止 bank 级 llm_model 覆盖；固定平台别名，真实模型由
+      # 平台记忆网关按用户 setting 解析（见 docs/operations/configuration.md）。
+      HINDSIGHT_API_LLM_MODEL: oo-memory-default
+      # embedding 固定字段：多语 intfloat/multilingual-e5-small（ONNX CPU）。
+      # 模型不在镜像内，首启经 HuggingFace egress 下载，缓存在
+      # hindsight_model_cache 卷；离线环境需预先填充该卷。
+      HINDSIGHT_API_EMBEDDINGS_PROVIDER: onnx
+      HINDSIGHT_API_EMBEDDINGS_ONNX_MODEL_ID: intfloat/multilingual-e5-small
+      HINDSIGHT_API_EMBEDDINGS_ONNX_FILE: onnx/model.onnx
+      HINDSIGHT_API_EMBEDDINGS_ONNX_DIMENSIONS: "384"
+      HINDSIGHT_API_EMBEDDINGS_ONNX_QUERY_PREFIX: "query: "
+      HINDSIGHT_API_EMBEDDINGS_ONNX_PASSAGE_PREFIX: "passage: "
+      # rerank 保持镜像预载默认（hindsight-ai/hs-rerank-1）；其中文效果未验证，
+      # 属于效果门禁，部署侧不盲目更换模型。
+      # 离线/无 egress 环境预填模型缓存后置 1（huggingface_hub 缓存优先）。
+      HF_HOME: /hindsight-model-cache
+      HF_HUB_OFFLINE: ${HINDSIGHT_HF_OFFLINE:-0}
+    volumes:
+      - hindsight_model_cache:/hindsight-model-cache
+    depends_on:
+      hindsight-db:
+        condition: service_healthy
+      hindsight-model-init:
+        condition: service_completed_successfully
+    healthcheck:
+      # /health/ready 含数据库就绪；首启可能下载 embedding 模型，放宽启动期。
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8888/health/ready', timeout=5).status == 200 else 1)"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 300s
+    ports:
+      # loopback-only：宿主机源码 backend 与本地配置中心直连 API；9999 是
+      # 管理 UI，同样仅 loopback，两者都不进公网。
+      - "127.0.0.1:${HINDSIGHT_LOOPBACK_PORT:-18888}:8888"
+      - "127.0.0.1:${HINDSIGHT_UI_LOOPBACK_PORT:-19999}:9999"
+    networks:
+      - hindsight_internal
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
   browser:
     image: openontology-browser:local
     build:
@@ -415,6 +512,14 @@ services:
       # 本地默认也不在 backend 内直接执行用户插件；协议 fixture 可在
       # 源码测试中显式选择 direct_dev。
       SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE: ${SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE:-disabled}
+      # 可选 Hindsight 长期记忆（profile `hindsight`）。默认指向 compose 内网
+      # 地址；profile 未启用时连接快速失败、记忆特性自动降级，聊天不受影响。
+      # 有意不加入 depends_on：Hindsight 的 LLM 回调 backend，属循环依赖。
+      HINDSIGHT_BASE_URL: ${HINDSIGHT_BASE_URL:-http://hindsight:8888}
+      HINDSIGHT_API_KEY: ${HINDSIGHT_API_KEY:-hindsight-local-api-key}
+      HINDSIGHT_TIMEOUT_SECONDS: ${HINDSIGHT_TIMEOUT_SECONDS:-2}
+      HINDSIGHT_NAMESPACE: ${HINDSIGHT_NAMESPACE:-openontology}
+      HINDSIGHT_SERVICE_TOKEN: ${HINDSIGHT_SERVICE_TOKEN:-hindsight-local-service-token}
     depends_on:
       db:
         condition: service_healthy
@@ -442,6 +547,7 @@ services:
     networks:
       - default
       - weknora_internal
+      - hindsight_internal
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 
@@ -464,6 +570,12 @@ services:
       WEKNORA_TIMEOUT_SECONDS: ${WEKNORA_TIMEOUT_SECONDS:-15}
       SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS: http://weknora-app:8080/mcp
       SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE: ${SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE:-disabled}
+      # 反思链路在 executor 进程内运行，与 backend 共享同一可选记忆配置。
+      HINDSIGHT_BASE_URL: ${HINDSIGHT_BASE_URL:-http://hindsight:8888}
+      HINDSIGHT_API_KEY: ${HINDSIGHT_API_KEY:-hindsight-local-api-key}
+      HINDSIGHT_TIMEOUT_SECONDS: ${HINDSIGHT_TIMEOUT_SECONDS:-2}
+      HINDSIGHT_NAMESPACE: ${HINDSIGHT_NAMESPACE:-openontology}
+      HINDSIGHT_SERVICE_TOKEN: ${HINDSIGHT_SERVICE_TOKEN:-hindsight-local-service-token}
       # 启用 task-agent profile（task_worker 独占消费任务实例控制面）时置 1，
       # 避免同一 durable 在无 docker.sock 的本进程间负载均衡。
       TASK_INSTANCES_CONTROL_EXCLUDE: ${TASK_INSTANCES_CONTROL_EXCLUDE:-0}
@@ -483,6 +595,7 @@ services:
     networks:
       - default
       - weknora_internal
+      - hindsight_internal
     command: python -m app.data_channel.pipeline_tasks.nats_executor
     healthcheck:
       # executor 没有进程内 ping 接口；主循环每 5 秒刷新心跳文件 mtime。
@@ -542,7 +655,14 @@ volumes:
   weknora_data:
   weknora_docreader_tmp:
   weknora_ssl_certs:
+  hindsight_postgres_data:
+  hindsight_model_cache:
 
 networks:
   weknora_internal:
+    driver: bridge
+  # 独立 Hindsight 栈（普通 bridge：首启需 HuggingFace egress 下载 embedding
+  # 模型，运行期需回调 backend 内部 LLM 代理）。不发布公网端口；仅 backend
+  # 与 pipeline_executor 以成员身份访问。
+  hindsight_internal:
     driver: bridge

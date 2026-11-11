@@ -65,6 +65,26 @@ def test_config_center_renders_weknora_connection_without_model_credentials(tmp_
     assert not any(key.startswith(("WEKNORA_STATE_", "WEKNORA_CHAT_", "WEKNORA_EMBEDDING_")) for key in parsed)
 
 
+def test_config_center_renders_hindsight_without_secrets(tmp_path: Path) -> None:
+    env_path = tmp_path / "config" / "generated" / "local" / ".env"
+    store = LocalEnvStore(env_path, project_root=tmp_path)
+    profile = complete_profile()
+    payload = profile.model_dump()
+    payload["hindsight"]["base_url"] = "http://hindsight:8888"
+    payload["hindsight"]["timeout_seconds"] = 2.5
+    store.write(ConfigProfile.model_validate(payload))
+    parsed = dotenv_values(env_path, interpolate=False)
+    assert parsed["HINDSIGHT_BASE_URL"] == "http://hindsight:8888"
+    assert parsed["HINDSIGHT_TIMEOUT_SECONDS"] == "2.5"
+    assert not any(
+        key in {"HINDSIGHT_API_KEY", "HINDSIGHT_SERVICE_TOKEN", "HINDSIGHT_DB_PASSWORD"}
+        for key in parsed
+    )
+    reloaded = store.load_profile()
+    assert reloaded.hindsight.base_url == "http://hindsight:8888"
+    assert reloaded.hindsight.timeout_seconds == 2.5
+
+
 def test_public_profile_masks_saved_secrets_and_blank_preserves_them(
     tmp_path: Path,
 ) -> None:

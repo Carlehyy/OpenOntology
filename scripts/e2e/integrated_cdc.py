@@ -22,7 +22,7 @@ Subcommands:
     up/down/status  start/stop/inspect the phase's own services
     seed-sources    deterministic synthetic inventory tables in both sources
     migrate-probe   real PG migration checks (fresh head, prior 0143 -> head,
-                    0144 down/up with seeded facts, CDC-owned model drift)
+                    0146 down/up with seeded facts, CDC-owned model drift)
     build-executor  build the peer CDC executor image with the pinned inputs
     scenarios       list the acceptance scenario registry with honest status
 """
@@ -113,7 +113,7 @@ EVENT_GROUP_RULE = (
     "group distinct row events")
 
 MIGRATION_PRIOR_REVISION = "0143_operations_menu_keys"
-CDC_REVISION = "0144_integrated_cdc"
+CDC_REVISION = "0146_integrated_cdc"
 PLATFORM_DSN = ("postgresql+psycopg2://cdc_e2e:cdc_e2e_fixture"
                 "@127.0.0.1:45532/cdc_platform")
 FIXTURE_SECRET = "cdc_canary_public_fixture_secret_not_production"
@@ -143,8 +143,8 @@ INVENTORY_ROWS = (
 SCENARIOS = (
     # (id, description, needs)
     ("migrate_fresh_head", "alembic upgrade head on an empty physical PG", "migration phase"),
-    ("migrate_prior_0143_to_head", "prior 0143 database upgrades through 0144 (and any follow-ups) with seeded local facts preserved", "migration phase"),
-    ("migrate_0144_down_up", "0144 downgrade removes exactly external rows, organic facts survive, upgrade re-applies", "migration phase"),
+    ("migrate_prior_0143_to_head", "prior 0143 database upgrades through 0146 (hindsight/operations intermediates included) with seeded local facts preserved", "migration phase"),
+    ("migrate_0146_down_up", "0146 downgrade removes exactly external rows, organic facts survive, upgrade re-applies", "migration phase"),
     ("migrate_no_model_drift", "CDC-owned tables/columns/FKs/partial indexes match the current models exactly", "migration phase"),
     ("separate_commits_same_timestamp", "two committed 100->0->100 changes with an identical business timestamp stay two events; the transient zero still notifies", "acceptance phase"),
     ("multi_field_one_row_one_notification", "one row update touching several mapped fields yields exactly one notification", "acceptance phase"),
@@ -689,7 +689,7 @@ def cmd_migrate_probe() -> dict[str, Any]:
         report["cases"]["prior_0143_upgrade_head"] = True
         report["cases"]["seeded_organic_facts_preserved"] = True
 
-        # Case 3: external facts at head; 0144 downgrade deletes exactly the
+        # Case 3: external facts at head; 0146 downgrade deletes exactly the
         # external rows; upgrade re-applies and the surviving organic rows stay.
         with prior_engine.begin() as conn:
             _minimal_insert(conn, "sentinel_event_log", {
@@ -711,7 +711,7 @@ def cmd_migrate_probe() -> dict[str, Any]:
             rows = conn.execute(sa.text(
                 "SELECT count(*) FROM sentinel_event_log")).scalar_one()
             assert rows == 3, f"downgrade must leave exactly the 3 organic rows: {rows}"
-        report["cases"]["downgrade_0144_removes_exactly_external_rows"] = True
+        report["cases"]["downgrade_0146_removes_exactly_external_rows"] = True
         command.upgrade(config, "head")
         with prior_engine.connect() as conn:
             rows = conn.execute(sa.text(

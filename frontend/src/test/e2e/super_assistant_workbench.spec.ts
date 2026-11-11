@@ -1013,9 +1013,10 @@ test('工作台骨架：功能入口齐备，近期会话单列表，归档折�
   await expect(page.getByRole('link', { name: '知识库（WeKnora）' })).toBeVisible()
   await expect(page.locator('[data-workbench-palace]')).toHaveCount(0)
 
-  // 功能项顺序契约：全局搜索 → 消息通知 → 事件路由 → 定时任务 → 任务实例 → 能力拓展 → 本体治理
+  // 功能项顺序契约：全局搜索 → 消息通知 → 定时任务 → 任务实例 → 能力拓展 → 本体治理
+  // （事件路由入口已迁至聊天头部，位于会话纪要与领域知识之间）
   const navEntries = page.locator('nav[aria-label="工作台功能"] > *')
-  const expectedOrder = ['全局搜索', '消息通知', '事件路由', '定时任务', '任务实例', '能力拓展', '本体治理']
+  const expectedOrder = ['全局搜索', '消息通知', '定时任务', '任务实例', '能力拓展', '本体治理']
   await expect(navEntries).toHaveCount(expectedOrder.length)
   for (let index = 0; index < expectedOrder.length; index += 1) {
     await expect(navEntries.nth(index)).toContainText(expectedOrder[index])
@@ -1034,13 +1035,26 @@ test('工作台骨架：功能入口齐备，近期会话单列表，归档折�
   await expect(page.getByTestId('super-assistant-composer')).toBeVisible()
 })
 
-test('事件路由：位于消息通知与定时任务之间，点击打开占位弹窗，Esc 关闭', async ({ page }) => {
+test('事件路由：位于会话纪要与领域知识之间，点击打开占位弹窗，Esc 关闭', async ({ page }) => {
   await seedAuth(page)
   await mockApis(page)
   await page.goto('/#/super-assistant')
 
+  // 左侧工作台不再保留事件路由入口，仅聊天头部一处
+  const nav = page.locator('nav[aria-label="工作台功能"]')
+  await expect(nav.getByRole('button', { name: '事件路由' })).toHaveCount(0)
+
+  // 位置契约：位于「会话纪要」右侧、「领域知识」（WeKnora）左侧
   const entry = page.getByRole('button', { name: '事件路由' })
   await expect(entry).toBeVisible()
+  const summary = page.getByRole('button', { name: '查看会话纪要' })
+  const weknora = page.getByRole('link', { name: '知识库（WeKnora）' })
+  const [summaryBox, entryBox, weknoraBox] = await Promise.all([
+    summary.boundingBox(), entry.boundingBox(), weknora.boundingBox(),
+  ])
+  expect(summaryBox!.x + summaryBox!.width).toBeLessThanOrEqual(entryBox!.x + 1)
+  expect(entryBox!.x + entryBox!.width).toBeLessThanOrEqual(weknoraBox!.x + 1)
+
   await entry.click()
   const dialog = page.getByRole('dialog')
   await expect(dialog.getByRole('heading', { name: '事件路由' })).toBeVisible()
@@ -1125,17 +1139,29 @@ test('消息通知：徽章弹窗、tab 顺序与筛选、Markdown 详情与附�
   await page.locator('[data-notifications-star]').hover()
   await expect(page.getByRole('tooltip')).toContainText('标记为重要')
 
-  // 标记（星标）与归档触发状态 PATCH
+  // 标记（星标）触发状态 PATCH
   await page.locator('[data-notifications-star]').click()
   await expect.poll(() => mocks.notifStatePatches.length).toBe(1)
   await expect.poll(() => mocks.notifStatePatches[0] ?? '').toContain('isStarred')
+
+  // 全部已读（须在归档前：下文归档推进选中会自动查阅下一条，未读清零后按钮禁用）
+  await page.locator('[data-notifications-read-all]').click()
+  await expect.poll(() => mocks.notifReadAllCalls.length).toBe(1)
+
+  // 归档推进选中：n-1 离开「全部消息」后详情自动切到下一条 n-2，
+  // 左侧高亮同步跟随（active → bg-brand-soft），被归档项从列表消失
   await page.locator('[data-notifications-archive]').click()
   await expect.poll(() => mocks.notifStatePatches.length).toBe(2)
   await expect.poll(() => mocks.notifStatePatches[1] ?? '').toContain('isArchived')
+  await expect(page.locator('[data-notifications-item="n-1"]')).toHaveCount(0)
+  await expect(page.locator('[data-notifications-detail]')).toContainText('账单系统异常告警')
+  await expect(page.locator('[data-notifications-item="n-2"]')).toHaveClass(/bg-brand-soft/)
 
-  // 全部已读
-  await page.locator('[data-notifications-read-all]').click()
-  await expect.poll(() => mocks.notifReadAllCalls.length).toBe(1)
+  // 归档列表仅剩的 n-2：无下一条可推进，选中清空回详情空态
+  await page.locator('[data-notifications-archive]').click()
+  await expect.poll(() => mocks.notifStatePatches.length).toBe(3)
+  await expect(page.locator('[data-notifications-item="n-2"]')).toHaveCount(0)
+  await expect(page.locator('[data-notifications-detail]')).toContainText('选择左侧消息查看详情')
 
   // 发送消息（独立分区）：转发渠道为下拉多选（触发器常显已选去向），默认全选，取消其一后定向转发
   await page.locator('[data-notifications-nav="compose"]').click()
@@ -1229,6 +1255,24 @@ test('消息通知：徽章弹窗、tab 顺序与筛选、Markdown 详情与附�
   await keyTestConfirm.getByRole('button', { name: '开始测试' }).click()
   await expect.poll(() => mocks.notifKeyTests.length).toBe(1)
   await expect(page.getByText('出口即时投递：成功 1 条')).toBeVisible()
+})
+
+test('消息通知：归档列表末条后选中回退到第一条并高亮', async ({ page }) => {
+  await seedAuth(page)
+  const mocks = await mockApis(page)
+  await page.goto('/#/super-assistant')
+
+  await page.getByRole('button', { name: /消息通知/ }).click()
+  await expect(page.getByRole('dialog')).toBeVisible()
+
+  // 「全部消息」末条 n-2：打开详情后归档，无下一条可推进 → 选中回退到第一条 n-1
+  await page.locator('[data-notifications-item="n-2"]').click()
+  await expect(page.locator('[data-notifications-detail]')).toContainText('账单系统异常告警')
+  await page.locator('[data-notifications-archive]').click()
+  await expect.poll(() => mocks.notifStatePatches.length).toBe(1)
+  await expect(page.locator('[data-notifications-item="n-2"]')).toHaveCount(0)
+  await expect(page.locator('[data-notifications-detail]')).toContainText('数据任务失败报告')
+  await expect(page.locator('[data-notifications-item="n-1"]')).toHaveClass(/bg-brand-soft/)
 })
 
 test('消息通知：标为未读后重新查阅即时回已读（staleTime 不吞查阅动作）', async ({ page }) => {
@@ -3052,10 +3096,11 @@ test.describe('窄屏顶栏与会话操作（390px）', () => {
     await expect(page.getByRole('link', { name: '知识库（WeKnora）' })).toBeHidden()
     await page.getByRole('button', { name: '更多操作' }).click()
     const menu = page.getByRole('dialog')
-    // 溢出菜单顺序与头部一致：会话纪要在知识库（WeKnora）之前
+    // 溢出菜单顺序与头部一致：会话纪要 → 事件路由 → 知识库（WeKnora）
     const menuItems = menu.locator('a, button')
     await expect(menuItems.first()).toHaveText('会话纪要')
-    await expect(menuItems.nth(1)).toHaveAttribute('aria-label', '知识库（WeKnora）')
+    await expect(menuItems.nth(1)).toHaveText('事件路由')
+    await expect(menuItems.nth(2)).toHaveAttribute('aria-label', '知识库（WeKnora）')
     const link = menu.getByRole('link', { name: '知识库（WeKnora）' })
     await expect(link).toBeVisible()
     await expect(link).toHaveAttribute('href', 'https://weknora.example.com:8443')

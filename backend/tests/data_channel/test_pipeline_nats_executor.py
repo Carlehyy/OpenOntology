@@ -403,6 +403,7 @@ def test_handler_registry_covers_all_stream_subjects():
         "task-instances-control",
         "integrated-sync-executor",
         "ontology-assistant-run-executor",
+        "sa-memory-sync",
     }
     assert nats_executor._CONSUMER_DURABLE == "pipeline-executor"
 
@@ -441,6 +442,36 @@ def test_ontology_assistant_consumer_is_single_and_dedicated(monkeypatch):
         assert len({durable for _s, durable, _h in registry}) == len(registry)
 
 
+def test_memory_sync_consumer_excludes_task_worker(monkeypatch):
+    from app.data_channel.pipeline_tasks.dispatch import (
+        SUPER_ASSISTANT_MEMORY_SYNC_SUBJECT,
+    )
+
+    for executor_mode, exclude_control, expected in (
+        ("fake", "0", True),
+        ("fake", "1", True),
+        ("docker", "0", False),
+        ("docker", None, False),
+        ("docker", "1", True),
+    ):
+        monkeypatch.setenv("TASK_INSTANCES_EXECUTOR", executor_mode)
+        if exclude_control is None:
+            monkeypatch.delenv("TASK_INSTANCES_CONTROL_EXCLUDE", raising=False)
+        else:
+            monkeypatch.setenv("TASK_INSTANCES_CONTROL_EXCLUDE", exclude_control)
+        matches = [
+            entry for entry in nats_executor._handler_registry()
+            if entry[0] == SUPER_ASSISTANT_MEMORY_SYNC_SUBJECT
+        ]
+        assert matches == ([
+            (
+                SUPER_ASSISTANT_MEMORY_SYNC_SUBJECT,
+                "sa-memory-sync",
+                nats_executor._run_super_assistant_memory_message,
+            )
+        ] if expected else [])
+
+
 @pytest.mark.asyncio
 async def test_ontology_assistant_handler_calls_execute_run(executor, monkeypatch):
     """handler 只把 run_id 交给 run_service，重复/终态语义由服务持有。"""
@@ -462,7 +493,8 @@ async def test_ontology_assistant_handler_calls_execute_run(executor, monkeypatc
     msg = _FakeMsg(json.dumps({"run_id": "run-1"}).encode())
     await executor._process_message(
         msg,
-        nats_executor._handler_registry()[-1][2],
+        next(handler for subject, _durable, handler in nats_executor._handler_registry()
+             if subject == "ontology.assistant.run"),
         "ontology.assistant.run",
     )
 
@@ -477,7 +509,8 @@ async def test_ontology_assistant_handler_discards_malformed_payload(executor):
 
     await executor._process_message(
         msg,
-        nats_executor._handler_registry()[-1][2],
+        next(handler for subject, _durable, handler in nats_executor._handler_registry()
+             if subject == "ontology.assistant.run"),
         "ontology.assistant.run",
     )
 
@@ -714,7 +747,7 @@ async def test_run_subscribes_each_subject_with_own_durable(
 
     run_task = asyncio.ensure_future(executor.run())
     deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and len(subscriptions) < 19:
+    while time.monotonic() < deadline and len(subscriptions) < 20:
         await asyncio.sleep(0.02)
     executor.request_shutdown()
     await asyncio.wait_for(run_task, timeout=5)
@@ -735,14 +768,15 @@ async def test_run_subscribes_each_subject_with_own_durable(
         ("task_instances.control", "task-instances-control"),
         ("integrated.sync", "integrated-sync-executor"),
         ("ontology.assistant.run", "ontology-assistant-run-executor"),
+        ("super_assistant.memory.sync", "sa-memory-sync"),
         ("sa.execution.run.*", "sa-kernel-v1"),
         ("sa.execution.call.*", "sa-call-v1"),
         ("sa.execution.reconcile", "sa-reconciler-v1"),
         ("sa.plugin.reply.*", "sa-plugin-reply-v1"),
         ]
-    assert all(stream == "PIPELINE_TASKS" for _s, _d, stream, _c in subscriptions[:15])
-    assert all(stream == "SA_EXECUTION_V1" for _s, _d, stream, _c in subscriptions[15:18])
-    assert subscriptions[18][2] == "SA_PLUGIN_RUNNER_V1"
+    assert all(stream == "PIPELINE_TASKS" for _s, _d, stream, _c in subscriptions[:16])
+    assert all(stream == "SA_EXECUTION_V1" for _s, _d, stream, _c in subscriptions[16:19])
+    assert subscriptions[19][2] == "SA_PLUGIN_RUNNER_V1"
     # ack_wait=60s 与 20s 续约间隔配套；max_deliver 不设上限（-1）——
     # 丢一条 kernel 派发消息等于 Run 挂死到 deadline，瞬时故障靠 nak
     # delay=5s 退避而不是丢弃兜底。

@@ -366,6 +366,15 @@ def chat(
             body.message.strip().replace("\n", " ")[:40]
         )
     conversation.updated_at = datetime.now(timezone.utc)
+    db.flush()
+    from app.super_assistant.hindsight_memory import enqueue_message, get_settings
+
+    if user_message.content and get_settings(db, current_user.id).enabled:
+        enqueue_message(
+            db, owner_id=current_user.id, conversation_id=conversation.id,
+            message_id=user_message.id, role="user", content=user_message.content,
+            occurred_at=user_message.created_at,
+        )
     db.commit()
     db.refresh(assistant_message)
 

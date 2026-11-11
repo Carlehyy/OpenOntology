@@ -8,7 +8,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertTriangle, ArrowLeftRight, BellRing, Bot, FileText, History, List, Loader2,
-  Network, Scale, Send, Shield, Square, Workflow, X,
+  Network, PlugZap, Scale, Send, Shield, Square, Workflow, X,
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { LoadingState } from '@/components/ui/LoadingState'
@@ -29,6 +29,7 @@ import {
 } from './components/AgentWorkbenchPresentation'
 import { OntologyNetworkView } from './components/OntologyNetworkView'
 import { OntologyCardCarousel } from './components/OntologyCardCarousel'
+import { McpConnectionDialog } from './components/McpConnectionDialog'
 import { useAgentCatalog } from './hooks/useAgentCatalog'
 import { useAgentConversationState } from './hooks/useAgentConversationState'
 
@@ -41,6 +42,7 @@ type WorkspaceView = 'ontology' | 'data' | 'decision' | 'trace'
 
 export default function AgentWorkbenchPage() {
   const isAdmin = useAuthStore(state => state.user?.role === 'admin')
+  const accountUsername = useAuthStore(state => state.user?.username || '')
   const navigate = useNavigate()
   const { containerRef, sizes, startResize } = useAssistantLayout()
   const catalog = useAgentCatalog()
@@ -49,6 +51,7 @@ export default function AgentWorkbenchPage() {
   const [sentinelDrawerOpen, setSentinelDrawerOpen] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
   const [showJump, setShowJump] = useState(false)
+  const [mcpDialogOpen, setMcpDialogOpen] = useState(false)
   const [input, setInput] = useState('')
   const [exportingConversationId, setExportingConversationId] = useState<string | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
@@ -173,6 +176,17 @@ export default function AgentWorkbenchPage() {
                 </div>
               </div>
               <div className="flex shrink-0 items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setMcpDialogOpen(true)}
+                  disabled={!catalog.oid || !catalog.caps || !catalog.caps.enabled}
+                  aria-label="MCP 接入"
+                  title="MCP 接入"
+                  data-testid="agent-mcp-button"
+                  className="flex h-8 w-8 items-center justify-center rounded-md border border-brand-line bg-brand-soft text-brand-ink transition-colors hover:border-brand-line hover:bg-brand-soft hover:text-brand-ink disabled:cursor-not-allowed disabled:opacity-30"
+                >
+                  <PlugZap size={14} />
+                </button>
                 <select
                   value={catalog.oid}
                   onChange={event => catalog.selectOntology(event.target.value)}
@@ -494,6 +508,14 @@ export default function AgentWorkbenchPage() {
       </div>
 
       <BoundaryDrawer oid={catalog.oid} open={drawerOpen} onClose={() => setDrawerOpen(false)} />
+      <McpConnectionDialog
+        open={mcpDialogOpen}
+        onClose={() => setMcpDialogOpen(false)}
+        oid={catalog.oid}
+        ontologyName={catalog.selectedOntology?.name || '当前本体'}
+        releaseVersion={catalog.selectedOntology?.current_release_version || catalog.selectedOntology?.version || ''}
+        username={accountUsername}
+      />
       <DynamicSentinelDrawer
         oid={catalog.oid}
         releaseId={catalog.releaseId}

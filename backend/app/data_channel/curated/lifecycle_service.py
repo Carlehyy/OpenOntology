@@ -43,19 +43,24 @@ def delete_curated(
             "force 强制删除已禁用；请先解除流水线和本体映射依赖",
         )
 
+    from app.operations.consumers import dataset_report_article_references
+
     pipelines = dataset_consumers(db, dataset_id)
     mappings = dataset_mapping_bindings(db, dataset_id)
-    if pipelines or mappings:
+    report_articles = dataset_report_article_references(db, dataset_id)
+    if pipelines or mappings or report_articles:
         raise HTTPException(
             409,
             detail={
                 "code": "in_use",
                 "message": (
                     f"该数据集被 {len(pipelines)} 条流水线、"
-                    f"{len(mappings)} 个本体映射引用，请先解除依赖后再删除。"
+                    f"{len(mappings)} 个本体映射、"
+                    f"{len(report_articles)} 篇运营报告文章引用，请先解除依赖后再删除。"
                 ),
                 "pipelines": pipelines,
                 "mappings": mappings,
+                "report_articles": report_articles,
             },
         )
 

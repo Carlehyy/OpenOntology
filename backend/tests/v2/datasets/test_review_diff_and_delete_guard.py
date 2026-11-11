@@ -807,6 +807,78 @@ def test_manual_delete_blocked_by_mapping(api, auth_headers, db):
     assert "本体映射" in r.text
 
 
+# ── 依赖检查：被运营报告文章引用时拦截 ─────────────────────────
+def _make_report_article(db, dataset_id: str, *, report_id: str, article_id: str,
+                         title: str, report_name: str):
+    from app.operations import models as operations_models
+    report = operations_models.OperationsReport(id=report_id, name=report_name)
+    article = operations_models.OperationsReportArticle(
+        id=article_id, report_id=report_id, dataset_id=dataset_id,
+        title=title, markdown="", sort_order=0)
+    db.add_all([report, article])
+    db.commit()
+    return article
+
+
+def test_curated_delete_blocked_by_report_article(api, auth_headers, db):
+    from app.operations import models as operations_models
+    ds_id = _make_curated_with_versions(db, [[{"id": "1", "name": "a"}]])
+    article = _make_report_article(
+        db, ds_id, report_id="report-curated", article_id="article-curated",
+        title="销售看板", report_name="运营周报")
+
+    r = api.delete(f"/api/v2/curated/{ds_id}", headers=auth_headers)
+    assert r.status_code == 409, r.text
+    detail = r.json()["detail"]
+    assert detail["code"] == "in_use"
+    assert "运营报告文章" in detail["message"]
+    assert detail["report_articles"] == [{
+        "article_id": "article-curated", "title": "销售看板",
+        "report_id": "report-curated", "report_name": "运营周报",
+    }]
+    # 既有字段保留，且 SQLite 外键未开启：数据保留证明是显式预检拦截
+    assert detail["pipelines"] == []
+    assert detail["mappings"] == []
+    assert db.get(Dataset, ds_id) is not None
+    assert db.get(operations_models.OperationsReportArticle, "article-curated") is not None
+
+    # 解除引用（删除文章）后可完整删除
+    db.delete(article)
+    db.commit()
+    r = api.delete(f"/api/v2/curated/{ds_id}", headers=auth_headers)
+    assert r.status_code == 204, r.text
+    assert db.query(Dataset).filter(Dataset.id == ds_id).count() == 0
+
+
+def test_manual_delete_blocked_by_report_article(api, auth_headers, db):
+    from app.operations import models as operations_models
+    ds_id = _upload_manual(api, auth_headers)
+    article = _make_report_article(
+        db, ds_id, report_id="report-manual", article_id="article-manual",
+        title="库存明细", report_name="库存报告")
+
+    r = api.delete(f"/api/v2/datasets/{ds_id}", headers=auth_headers)
+    assert r.status_code == 409, r.text
+    detail = r.json()["detail"]
+    assert "运营报告文章" in detail["message"]
+    assert detail["report_articles"] == [{
+        "article_id": "article-manual", "title": "库存明细",
+        "report_id": "report-manual", "report_name": "库存报告",
+    }]
+    # 既有字段保留，且 SQLite 外键未开启：数据保留证明是显式预检拦截
+    assert detail["consumers"] == []
+    assert detail["mappings"] == []
+    assert db.get(Dataset, ds_id) is not None
+    assert db.get(operations_models.OperationsReportArticle, "article-manual") is not None
+
+    # 解除引用（删除文章）后可删除
+    db.delete(article)
+    db.commit()
+    r = api.delete(f"/api/v2/datasets/{ds_id}", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    assert db.query(Dataset).filter(Dataset.id == ds_id).count() == 0
+
+
 # ── 审批决定人：决定时写入 reviewer_id ────────────────────────────
 
 def test_one_step_review_records_decider_admin_id(api, auth_headers, db, admin_user):

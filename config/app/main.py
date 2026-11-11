@@ -46,8 +46,10 @@ REQUIRED_SERVICES = tuple(
 # Chromium configuration is mandatory in the profile, but reachability is an
 # advisory pre-start check: an operator must still be able to start the API and
 # inspect diagnostics while the CDP sidecar is unhealthy. Deep readiness stays
-# red until the browser becomes reachable.
-OPTIONAL_SERVICES: tuple[str, ...] = ("browser",)
+# red until the browser becomes reachable. Hindsight long-term memory is an
+# opt-in compose profile: it must never gate local start or the core service
+# receipts, so its probe stays optional in the same way.
+OPTIONAL_SERVICES: tuple[str, ...] = ("browser", "hindsight")
 
 
 class ConfigCenterState:
@@ -491,6 +493,30 @@ def service_guides() -> dict[str, dict[str, Any]]:
                 "docker compose -f docker-compose.local.yml up -d",
                 "docker compose -f docker-compose.local.yml logs weknora-bootstrap",
                 "docker compose -f docker-compose.local.yml up --force-recreate weknora-bootstrap",
+            ],
+        },
+        "hindsight": {
+            "title": "Hindsight 长期记忆（可选）",
+            "summary": (
+                "Hindsight 是可选的长期记忆服务，默认不启动；它故障时只降级"
+                "记忆特性，聊天与平台启动不受影响。本页只提供探活地址与超时，"
+                "不托管任何密钥。"
+            ),
+            "steps": [
+                "本地启用：docker compose -f docker-compose.local.yml --profile hindsight up -d。",
+                "首次启动需 HuggingFace egress 下载 embedding 模型（多语 e5-small），"
+                "缓存在 hindsight_model_cache 卷；无 egress 环境先预填该卷并设置"
+                "HINDSIGHT_HF_OFFLINE=1。",
+                "源码后端探活地址默认 http://127.0.0.1:18888（loopback 端口）；"
+                "容器内是 http://hindsight:8888。",
+                "HINDSIGHT_API_KEY / HINDSIGHT_SERVICE_TOKEN 由部署环境注入，"
+                "不在本页填写或保存。",
+                "本测试只验证 API 与专用数据库就绪，不代表记忆写入/检索链路验收。",
+            ],
+            "commands": [
+                "docker compose -f docker-compose.local.yml --profile hindsight up -d hindsight",
+                "docker compose -f docker-compose.local.yml --profile hindsight logs hindsight",
+                "curl http://127.0.0.1:18888/health/ready",
             ],
         },
     }

@@ -69,6 +69,7 @@ dependencies = [
   # 约束与 py-openjudge 0.2.1 声明一致（>=9.1,<10）。
   "tenacity==9.1.2",
   "apprise==2.0.1",
+  "sqlglot==30.30.0",
 ]
 
 [dependency-groups]

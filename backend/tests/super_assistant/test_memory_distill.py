@@ -505,20 +505,23 @@ def test_distill_endpoints_full_flow_and_owner_isolation(client_setup):
 
 
 # ---------------------------------------------------------------------------
-# 运行时只读工具 memory_distill
+# 运行时旧工具 memory_distill 已随 Hindsight 迁移退役
+# （REST /memory/distill 服务端报告与合并仍由 memory_service 提供，
+#  这里只覆盖 runtime 工具面的退役事实）
 # ---------------------------------------------------------------------------
 
 
-def test_memory_distill_tool_in_catalog_and_read_only_set():
+def test_memory_distill_tool_retired_from_catalog_and_read_only_set():
+    """runtime 工具目录不再暴露 memory_distill，也不在只读白名单。"""
     tools = runtime._builtin_tools()
     names = [tool["name"] for tool in tools]
-    assert "memory_distill" in names
-    schema = tools[names.index("memory_distill")]
-    assert schema["parameters"]["properties"] == {}
-    assert "memory_distill" in runtime._READ_ONLY_BUILTIN_TOOLS
+    assert "memory_distill" not in names
+    assert "memory_distill" not in runtime._READ_ONLY_BUILTIN_TOOLS
+    assert "memory_distill" not in runtime._CONFIRMATION_REQUIRED_BUILTIN_TOOLS
 
 
-def test_memory_distill_tool_returns_read_only_report(db):
+def test_memory_distill_tool_dispatch_reports_unknown_tool(db):
+    """残留调用 memory_distill 只得到未知工具错误，不再产出旧库报告。"""
     _seed(db, "owner-1", "用户喜欢喝黑咖啡")
     _seed(db, "owner-1", "用户喜欢喝黑咖啡。")
     _seed(db, "owner-1", "今天天气不错适合出门散步")
@@ -533,11 +536,6 @@ def test_memory_distill_tool_returns_read_only_report(db):
         arguments={},
     )
     payload = json.loads(output)
-    assert payload["cluster_count"] == 1
-    (cluster,) = payload["clusters"]
-    assert cluster["member_count"] == 2
-    assert cluster["protected"] is False
-    assert cluster["preview"] == ["用户喜欢喝黑咖啡", "用户喜欢喝黑咖啡。"]
-
-    # 只读：不执行合并、不产生取代
+    assert payload == {"error": "未知工具 memory_distill"}
+    # 旧库数据不被任何"退役后重放"路径改动
     assert len(memory_service.list_memories(db, "owner-1")) == 3

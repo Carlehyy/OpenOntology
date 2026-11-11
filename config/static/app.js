@@ -10,6 +10,7 @@
     "browser",
     "n8n",
     "weknora",
+    "hindsight",
   ];
 
   const SERVICE_LABELS = {
@@ -21,6 +22,7 @@
     browser: "Chromium CDP",
     n8n: "n8n",
     weknora: "WeKnora",
+    hindsight: "Hindsight",
   };
 
   const state = {

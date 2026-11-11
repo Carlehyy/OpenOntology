@@ -13,6 +13,10 @@ from app.model_configs.models import ModelConfig
 from app.shared.config import settings
 from app.shared.database import Base
 from app.super_assistant import runtime, skill_service
+from app.super_assistant.memory_models import (
+    SuperAssistantMemorySetting,
+    SuperAssistantMemorySource,
+)
 from app.super_assistant.models import (
     SuperAssistantConversation,
     SuperAssistantMcpServer,
@@ -38,6 +42,9 @@ _TABLES = [
     SuperAssistantMulticaConfig.__table__,
     SuperAssistantMemoryProfile.__table__, SuperAssistantReflectionRun.__table__,
     SuperAssistantReflectionCandidate.__table__,
+    # Hindsight 跨会话记忆主链：召回读 settings，逐轮入队写 sources
+    SuperAssistantMemorySource.__table__,
+    SuperAssistantMemorySetting.__table__,
 ]
 
 

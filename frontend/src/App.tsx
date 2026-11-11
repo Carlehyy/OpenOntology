@@ -26,7 +26,8 @@ import CuratedTab from '@/pages/pipelines/curated/CuratedTab'
 import SyncTasksTab from '@/pages/pipelines/sync-tasks/SyncTasksTab'
 import StructuredDataPage from '@/pages/data-management/structured/StructuredDataPage'
 import MonitoringDashboardPage from '@/pages/operations/MonitoringDashboardPage'
-import OperationsReportPage from '@/pages/operations/OperationsReportPage'
+import OperationsReportListPage from '@/pages/operations/reports/OperationsReportListPage'
+import OperationsReportBookPage from '@/pages/operations/reports/OperationsReportBookPage'
 import AgentWorkbenchPage from '@/pages/agent/AgentWorkbenchPage'
 import ReportStudioPage from '@/pages/agent/ReportStudioPage'
 import EventRegistryPage from '@/pages/events/EventRegistryPage'
@@ -192,10 +193,11 @@ export default function App() {
           <Route path="/pipelines" element={<Navigate to="/data/pipelines" replace />} />
           <Route path="/pipelines/*" element={<Navigate to="/data/pipelines" replace />} />
 
-          {/* ── 智能运营（一级导航域）— 监控看板/运营报告当前为待开发占位页 ── */}
+          {/* ── 智能运营（一级导航域）— 监控看板为待开发占位页；运营报告为报告册 ── */}
           <Route path="/operations" element={<Navigate to="/operations/dashboard" replace />} />
           <Route path="/operations/dashboard" element={<ProtectedRoute><MonitoringDashboardPage /></ProtectedRoute>} />
-          <Route path="/operations/reports" element={<ProtectedRoute><OperationsReportPage /></ProtectedRoute>} />
+          <Route path="/operations/reports" element={<ProtectedRoute><OperationsReportListPage /></ProtectedRoute>} />
+          <Route path="/operations/reports/:reportId" element={<ProtectedRoute><OperationsReportBookPage /></ProtectedRoute>} />
 
           {/* ── 业务澄清（草稿版本在线配置工作台；入口在本体详情页版本演进，导航中隐藏） ── */}
           <Route path="/explore" element={<ProtectedRoute><ExplorationPage /></ProtectedRoute>} />

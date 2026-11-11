@@ -282,6 +282,19 @@ class Settings(BaseSettings):
     weknora_base_url: str = "http://weknora-app:8080"
     weknora_web_url: str = "http://localhost:8089"
     weknora_timeout_seconds: int = Field(default=15, ge=3, le=60)
+    # Hindsight 长期记忆服务（可选，Compose profile `hindsight`）。空地址 =
+    # 功能关闭；部署 wiring 默认注入容器内网地址 http://hindsight:8888。
+    # 服务不可达只降级记忆特性，不得影响聊天与全局 readiness。
+    hindsight_base_url: str = ""
+    # backend → Hindsight 的 Bearer 凭据（默认镜像无租户鉴权时仅作请求上下文）。
+    hindsight_api_key: str = Field(default="", repr=False)
+    hindsight_timeout_seconds: float = Field(default=2.0, gt=0, le=60)
+    # 记忆库命名空间前缀：bank id = <namespace>-<owner_id 哈希>；模型别名固定
+    # oo-memory-default（Hindsight 1.2.0 禁止 bank 级 llm_model 覆盖）。
+    hindsight_namespace: str = "openontology"
+    # Hindsight → 平台内部记忆 LLM 代理（/api/v2/super-assistant/internal/memory/v1）
+    # 的共享 service token；与 HINDSIGHT_API_LLM_API_KEY 同值，不承载真实模型 key。
+    hindsight_service_token: str = Field(default="", repr=False)
     steward_browser_cdp_url: str = "http://localhost:9222"
     steward_browser_timeout_seconds: int = 30
     steward_browser_max_captures: int = 300

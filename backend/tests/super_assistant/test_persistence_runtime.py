@@ -15,6 +15,10 @@ from app.auth.models import RoleMenuPermission, User
 from app.model_configs.models import ModelConfig
 from app.shared.database import Base
 from app.super_assistant import runtime
+from app.super_assistant.memory_models import (
+    SuperAssistantMemorySetting,
+    SuperAssistantMemorySource,
+)
 from app.super_assistant.models import (
     SuperAssistantConversation,
     SuperAssistantMcpServer,
@@ -39,6 +43,9 @@ _TABLES = [
     SuperAssistantMemoryProfile.__table__, SuperAssistantMulticaConfig.__table__,
     SuperAssistantReflectionRun.__table__,
     SuperAssistantReflectionCandidate.__table__,
+    # Hindsight 跨会话记忆主链：召回读 settings，逐轮入队写 sources
+    SuperAssistantMemorySource.__table__,
+    SuperAssistantMemorySetting.__table__,
 ]
 
 _SECRET = "SO-1001"

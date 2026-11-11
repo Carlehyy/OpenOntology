@@ -24,6 +24,16 @@ from app.data_channel.curated.review_row_identity import (
 from app.data_channel.curated.models import CuratedReview, CuratedRowEdit
 
 
+def has_approved_edits(db: Session, dataset_id: str, version) -> bool:
+    """该版本是否存在已批准的行级审核编辑（公开只读探针）。
+
+    SQL 消费方（如报告 SQL）用它判断「物理湖表当前态」是否等于该版本的
+    已批准内容：有编辑时物理表不再是权威内容，读取必须走 iter_rows_with_edits
+    的叠加语义，不能直接对物理表执行 SQL。
+    """
+    return bool(_edits_map_for_version(db, dataset_id, version))
+
+
 def _edits_map_for_version(
     db: Session,
     dataset_id: str,

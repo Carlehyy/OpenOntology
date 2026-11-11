@@ -11,9 +11,13 @@ ARCHIVE_PATH="${1:?usage: create-deployment-archive.sh ARCHIVE_PATH}"
 required_paths=(
   ".env.example"
   "docker-compose.prod.yml"
+  # opt-in CDC 执行器覆盖层：文件随归档上服务器，启动仍需显式
+  # -f docker-compose.cdc.yml（见 docs/operations/deployment.md）。
+  "docker-compose.cdc.yml"
   "deploy/production.dependencies.env"
   "backend/.dockerignore"
   "backend/Dockerfile"
+  "backend/Dockerfile.cdc"
   "backend/alembic.ini"
   "backend/alembic"
   "backend/app"

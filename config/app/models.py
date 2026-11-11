@@ -201,6 +201,29 @@ class WeKnoraConfig(StrictModel):
         return self
 
 
+class HindsightConfig(StrictModel):
+    """Optional Hindsight long-term memory service (compose profile).
+
+    The local config center only manages the probe address and timeout. Keys
+    (``HINDSIGHT_API_KEY`` / ``HINDSIGHT_SERVICE_TOKEN``) stay in the
+    deployment-provided environment and are never stored here. The service is
+    optional: an unreachable Hindsight degrades the memory feature only and
+    never blocks local start gates.
+    """
+
+    # Source-run backend probes the loopback port published by the local
+    # compose profile; Docker deployments use http://hindsight:8888.
+    base_url: str = Field(
+        default="http://127.0.0.1:18888", min_length=1, max_length=500
+    )
+    timeout_seconds: float = Field(default=2.0, gt=0, le=60)
+
+    @model_validator(mode="after")
+    def validate_hindsight(self) -> "HindsightConfig":
+        _validate_http_origin(self.base_url, "Hindsight 服务地址")
+        return self
+
+
 class AdvancedConfig(StrictModel):
     uploads_dir: str = "./runtime/uploads"
     storage_local_dir: str = "./runtime/object-storage"
@@ -233,6 +256,7 @@ class ConfigProfile(StrictModel):
     browser: BrowserConfig = Field(default_factory=BrowserConfig)
     n8n: N8nConfig = Field(default_factory=N8nConfig)
     weknora: WeKnoraConfig = Field(default_factory=WeKnoraConfig)
+    hindsight: HindsightConfig = Field(default_factory=HindsightConfig)
     advanced: AdvancedConfig = Field(default_factory=AdvancedConfig)
 
     @model_validator(mode="after")
@@ -287,6 +311,7 @@ def default_profile() -> ConfigProfile:
         ),
         n8n=N8nConfig(api_key=""),
         weknora=WeKnoraConfig(),
+        hindsight=HindsightConfig(),
         advanced=AdvancedConfig(
             api_hub_system_mcp_token=_random_token(),
             api_hub_internal_proxy_token=_random_token(),

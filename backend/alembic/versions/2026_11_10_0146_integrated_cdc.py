@@ -1,7 +1,7 @@
 """integrated database CDC runtime and external Sentinel facts
 
-Revision ID: 0144_integrated_cdc
-Revises: 0143_operations_menu_keys
+Revision ID: 0146_integrated_cdc
+Revises: 0145_operations_reports
 Create Date: 2026-11-10
 
 Two CDC control-plane tables (per-connection source lifecycle, per released
@@ -19,8 +19,8 @@ import re
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0144_integrated_cdc"
-down_revision = "0143_operations_menu_keys"
+revision = "0146_integrated_cdc"
+down_revision = "0145_operations_reports"
 branch_labels = None
 depends_on = None
 

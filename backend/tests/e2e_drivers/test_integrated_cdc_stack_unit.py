@@ -228,7 +228,7 @@ def test_scenario_registry_covers_required_matrix(cdc):
     assert len(ids) == len(set(ids))
     for required in (
             "migrate_fresh_head", "migrate_prior_0143_to_head",
-            "migrate_0144_down_up", "migrate_no_model_drift",
+            "migrate_0146_down_up", "migrate_no_model_drift",
             "separate_commits_same_timestamp",
             "multi_field_one_row_one_notification", "rollback_no_event",
             "one_transaction_intermediate_honest",
@@ -258,7 +258,7 @@ def test_frozen_runtime_contract_vocabulary(cdc):
     assert "never timestamp or content" in cdc.REPLAY_IDENTITY_RULE
     assert "txn/gtid never" in cdc.EVENT_GROUP_RULE
     assert cdc.MIGRATION_PRIOR_REVISION == "0143_operations_menu_keys"
-    assert cdc.CDC_REVISION == "0144_integrated_cdc"
+    assert cdc.CDC_REVISION == "0146_integrated_cdc"
 
 
 def test_migration_probe_stays_isolated_and_honest(cdc):

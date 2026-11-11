@@ -23,6 +23,8 @@ from app.super_assistant import (
 from app.super_assistant.models import (
     SuperAssistantConversation,
     SuperAssistantMcpServer,
+    SuperAssistantMemorySetting,
+    SuperAssistantMemorySource,
     SuperAssistantMessage,
     SuperAssistantScheduledRun,
     SuperAssistantScheduledTask,
@@ -50,6 +52,8 @@ def test_chat_cancel_and_tool_decision_preserve_runtime_semantics(
             SuperAssistantConversation.__table__,
             SuperAssistantMcpServer.__table__,
             SuperAssistantMessage.__table__,
+            SuperAssistantMemorySetting.__table__,
+            SuperAssistantMemorySource.__table__,
             SuperAssistantToolRun.__table__,
         ],
     )
@@ -205,6 +209,8 @@ def test_chat_passes_agent_mode_to_stream_chat(tmp_path, monkeypatch):
             ModelConfig.__table__,
             SuperAssistantConversation.__table__,
             SuperAssistantMessage.__table__,
+            SuperAssistantMemorySetting.__table__,
+            SuperAssistantMemorySource.__table__,
         ],
     )
     Session = sessionmaker(bind=engine)
