@@ -74,7 +74,7 @@ import { deriveTurnRailItems, type TurnRailItem } from './components/turnRailMod
 import { readCachedConversations, writeCachedConversations } from './conversationCache'
 import { readCachedDrafts, writeCachedDrafts } from './draftCache'
 import { buildConversationExportFilename } from './exportFilename'
-import { resolveWeKnoraWebUrl } from './weknoraUrl'
+import { resolveWeKnoraEntryUrl, resolveWeKnoraWebUrl } from './weknoraUrl'
 import { resolveNativeWebUrl } from './webEntryUrl'
 import type { ModelConfig } from '@/types/ontology'
 import TicketFormModal from '@/components/tickets/TicketFormModal'
@@ -190,7 +190,9 @@ export default function SuperAssistantPage() {
   // 事件路由：头部按钮弹窗（入口位于会话纪要与领域知识之间，内容占位待后续迭代）
   const [eventRoutingOpen, setEventRoutingOpen] = useState(false)
   // 知识库（WeKnora）：页面加载只读后端返回的原生 Web URL；入口不依赖 state、
-  // 知识库或模型可用性，也不代表知识检索已就绪。登录走 WeKnora 自己的账号体系。
+  // 知识库或模型可用性，也不代表知识检索已就绪。普通点击走一键免登录（后端
+  // 签发一次性票据，网关中继在 WeKnora origin 完成登录），右键/中键/修饰键
+  // 直开原生 URL 作手动登录兜底。
   const [weknora, setWeknora] = useState<WeKnoraIntegration | null>(null)
   const [weknoraLoading, setWeknoraLoading] = useState(true)
   // 项目管理（Kaneo）：页面加载只读后端返回的原生 Web URL；普通点击走
@@ -287,6 +289,36 @@ export default function SuperAssistantPage() {
     () => resolveWeKnoraWebUrl(weknora?.web_url, window.location.hostname),
     [weknora],
   )
+  /** 领域知识（WeKnora）一键免登录：与 openKaneo 同构——先同步开空白标签
+      保住用户手势（await 后再 window.open 会被弹窗拦截），再领取一次性票据
+      跳转；跳转地址套用与领域知识入口一致的回环主机改写（weknoraUrl.ts）。
+      失败时关闭空白页并如实报错——原生 URL 直开（WeKnora 自己的登录页）
+      仍是可用兜底。 */
+  const openWeknora = useCallback(async () => {
+    const popup = window.open('', '_blank')
+    try {
+      const { redirect_url } = await superAssistantApi.createWeKnoraEntry()
+      const entryUrl = resolveWeKnoraEntryUrl(redirect_url, window.location.hostname)
+      if (!entryUrl) throw new Error('跳转地址无效')
+      if (!popup) {
+        // 弹窗被拦截：当前标签跳转，免登录体验保持完整
+        window.location.href = entryUrl
+        return
+      }
+      popup.opener = null
+      popup.location.href = entryUrl
+    } catch (error) {
+      popup?.close()
+      toast.error('领域知识入口打开失败', { description: errorText(error) })
+    }
+  }, [])
+  // 普通（无修饰键）左键点击走免登录；中键/修饰键/右键保留 <a> 原生行为，
+  // 落到 WeKnora 登录页作手动兜底
+  const handleWeknoraClick = useCallback((event: React.MouseEvent) => {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+    event.preventDefault()
+    void openWeknora()
+  }, [openWeknora])
   /** 项目管理（Kaneo）入口配置：页面加载即取；失败时保留可重试入口，不在加载期打断工作台 */
   const refreshKaneo = useCallback(async (notifyFailure = false) => {
     setKaneoLoading(true)
@@ -1708,11 +1740,13 @@ export default function SuperAssistantPage() {
             </button>
           )}
           {/* 知识库（WeKnora）入口：位于项目管理（Kaneo）入口右侧、所有会话（含新会话）可用；
-              新标签打开原生 Web，不在入口上宣称知识已就绪；悬停文案「领域知识」。
+              普通左键一键免登录（领一次性票据新标签进入原生 Web），中键/修饰键/右键直开
+              原生 URL 作手动登录兜底，不在入口上宣称知识已就绪；悬停文案「领域知识」。
               窄屏（<md）让位标题/模型选择器，收进「更多操作」溢出菜单。 */}
           {weknoraUrl ? (
             <a
               href={weknoraUrl}
+              onClick={handleWeknoraClick}
               target="_blank"
               rel="noopener noreferrer"
               aria-label="知识库（WeKnora）"
@@ -1882,12 +1916,16 @@ export default function SuperAssistantPage() {
               {weknoraUrl ? (
                 <a
                   href={weknoraUrl}
+                  onClick={(event) => {
+                    event.preventDefault()
+                    setHeaderOverflowOpen(false)
+                    void openWeknora()
+                  }}
                   target="_blank"
                   rel="noopener noreferrer"
                   aria-label="知识库（WeKnora）"
                   title="领域知识"
                   data-workbench-weknora
-                  onClick={() => setHeaderOverflowOpen(false)}
                   className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   <Network size={15} className="shrink-0 text-brand-ink" aria-hidden="true" />

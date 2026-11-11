@@ -622,7 +622,7 @@ start_and_verify_weknora_app() {
 }
 
 check_weknora_public_entry() {
-  local http_port https_port auth_json mcp_status
+  local http_port https_port auth_json mcp_status sso_status
   http_port="$(env_value WEKNORA_HTTP_PORT)"
   https_port="$(env_value WEKNORA_HTTPS_PORT)"
   http_port="${http_port:-8089}"
@@ -647,6 +647,15 @@ check_weknora_public_entry() {
       return 1
     fi
   done
+  # 一键免登录中继链路（weknora-gateway /sso/entry → backend consume）：无票据
+  # 访问必须 302 回根路径且不带载荷，证明网关→backend 反代与路由已接通。
+  sso_status="$(curl -ksS -o /dev/null -w '%{http_code}' \
+    --connect-timeout 5 --max-time 10 \
+    "https://127.0.0.1:${https_port}/sso/entry" || true)"
+  if [ "$sso_status" != "302" ]; then
+    log "WeKnora SSO entry relay must answer 302 on the HTTPS entry (got ${sso_status})"
+    return 1
+  fi
   return 0
 }
 

@@ -13,3 +13,28 @@ export function resolveWeKnoraWebUrl(
 ): string | null {
   return resolveWebUrl(raw, currentHostname)
 }
+
+/**
+ * 解析一键免登录跳转地址（POST /super-assistant/weknora/entry 下发）。
+ *
+ * redirect_url 与 web_url 同源，形如 {WEKNORA_WEB_URL}/sso/entry?ticket=…：
+ * 套用与领域知识入口一致的回环主机改写（后端下发回环默认值时改用当前访问
+ * 平台的主机名，协议/端口保留），避免远程浏览器把票据送到访客自己的机器；
+ * 非回环地址视为部署方显式配置，原样使用。仅接受 http(s) 且路径恰为
+ * /sso/entry 的地址，异常输入返回 null（调用方按打开失败回退原生直开）。
+ */
+export function resolveWeKnoraEntryUrl(
+  raw: string | null | undefined,
+  currentHostname: string,
+): string | null {
+  const trimmed = raw?.trim()
+  if (!trimmed) return null
+  try {
+    const target = new URL(trimmed)
+    const origin = resolveWebUrl(trimmed, currentHostname)
+    if (!origin || target.pathname !== '/sso/entry') return null
+    return `${origin}${target.pathname}${target.search}`
+  } catch {
+    return null
+  }
+}

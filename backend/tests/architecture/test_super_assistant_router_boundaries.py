@@ -793,8 +793,12 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     # 共 1 个操作（1 条路径）；一键免登录（共享管理员会话）新增
     # /kaneo/entry 的 POST 与 /kaneo/sso/consume 的 GET（网关反代抵达，
     # 不挂平台守卫，一次性票据即凭证）共 2 个操作（2 条路径）。
-    assert len(paths) == 95
-    assert sum(len(item) for item in paths.values()) == 123
+    # WeKnora 领域知识一键免登录（与 Kaneo 中继同构）新增 /weknora/entry 的
+    # POST 与 /weknora/sso/consume 的 GET（经 weknora-gateway 反代抵达，
+    # 不挂平台守卫，登录响应经原生 #oidc_result= 管道交接）共 2 个操作
+    # （2 条路径）。
+    assert len(paths) == 97
+    assert sum(len(item) for item in paths.values()) == 125
     assert hashlib.sha256(payload).hexdigest() == (
-        "462978af90bca46e0f14ab1feea627f0f0d10a84596fd614c4b47ef840d00e43"
+        "10abf2d761ada7e9847c2f7442b1102520263a70ace5c96218ad2155db604643"
     )

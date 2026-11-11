@@ -109,8 +109,14 @@ export interface SuperSearchResult {
 
 /** WeKnora 原生 Web 入口（后端只回公网 URL，不读取 state/知识库/模型可用性） */
 export interface WeKnoraIntegration {
-  /** WeKnora 原生 Web 页面公网地址：前端只负责新标签打开，登录使用其原生账号体系 */
+  /** WeKnora 原生 Web 页面公网地址：右键/中键直开的兜底入口（WeKnora 自己的登录页） */
   web_url: string
+}
+
+/** WeKnora 一键免登录跳转票据 */
+export interface WeKnoraEntry {
+  /** 带 90s 一次性票据的 WeKnora 入口地址：新标签打开后由网关中继完成登录 */
+  redirect_url: string
 }
 
 /** Kaneo 项目管理原生 Web 入口（后端只回 Web URL） */
@@ -731,9 +737,12 @@ export const superAssistantApi = {
       timeout: 90_000,
       signal: config?.signal,
     }),
-  /** WeKnora 原生 Web 入口（页面加载即读公网 URL；不依赖 state/知识库/模型） */
+  /** WeKnora 原生 Web 入口（页面加载即读公网 URL；普通点击走下方免登录入口） */
   getWeKnoraIntegration: () =>
     apiClientV2.get<WeKnoraIntegration>('/super-assistant/weknora'),
+  /** WeKnora 一键免登录：领取一次性跳转票据，登录由中继在 WeKnora origin 完成 */
+  createWeKnoraEntry: () =>
+    apiClientV2.post<WeKnoraEntry>('/super-assistant/weknora/entry'),
   /** Kaneo 项目管理原生 Web 入口（页面加载即读 URL；普通点击走下方免登录入口） */
   getKaneoIntegration: () =>
     apiClientV2.get<KaneoIntegration>('/super-assistant/kaneo'),

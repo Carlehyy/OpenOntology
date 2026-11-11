@@ -130,15 +130,29 @@ Hub SQLite 完整备份、停写、全量解密校验和可恢复迁移机制就
 
 WeKnora 使用官方 app、UI、docreader 和独立 ParadeDB、Redis、文件卷。
 图谱增强默认关闭，不运行额外 Neo4j，也不共用平台业务图数据。原生 Web
-使用独立根路径及端口（HTTP 8089、HTTPS 8444），保留自身账号登录；不做 SSO。
-正式 app 仅在 Compose 内网的 `http://weknora-app:8080` 提供 API/MCP，公网
-网关对精确 `/mcp` 与全部 `/mcp/` 子路径返回 404。
+使用独立根路径及端口（HTTP 8089、HTTPS 8444）。正式 app 仅在 Compose 内网的
+`http://weknora-app:8080` 提供 API/MCP，公网网关对精确 `/mcp` 与全部 `/mcp/`
+子路径返回 404。
+
+一键免登录（共享管理员会话，与 Kaneo 中继同构）：普通左键点击「领域知识」
+按钮时，平台后端为已登录且有超级助手菜单权限的用户签发一次性票据（HMAC
+签名、90 秒有效、Redis 单次消费），新标签打开 `WEKNORA_WEB_URL/sso/entry?ticket=...`；
+`weknora-gateway` 把该精确路径反代到 backend，backend 校验票据后以管理员凭据
+服务端登录 WeKnora，并把登录响应经 WeKnora 原生 `#oidc_result=` 管道在其自身
+origin 落盘（纯 Bearer token 模型，无 cookie）。全程用户无需知道 WeKnora 账号
+密码；所有有权限的平台用户共享同一个 WeKnora 管理员身份。任何失败（票据无效/
+重放、Redis 不可用、WeKnora 拒绝登录）都回落到 WeKnora 自带登录页；中键/
+修饰键/右键点击按钮仍直开原生地址作手动登录兜底。管理员凭据除
+`weknora-bootstrap` 外只进入 backend 容器（compose 掩码锚点下的唯一例外），
+不进日志、接口响应与前端。
 
 平台只使用 `WEKNORA_BASE_URL`、`WEKNORA_WEB_URL` 和
-`WEKNORA_TIMEOUT_SECONDS` 做服务探活与页面跳转。前端知识库入口在
-`WEKNORA_WEB_URL` 为主机回环地址（localhost/127.0.0.1 等）时，自动改用浏览器
-当前访问平台的主机名（协议与端口保留），内网与公网部署未显式配置时同样跳到
-同机网关；非回环地址按配置原样跳转。标准 MCP 的内部访问范围由
+`WEKNORA_TIMEOUT_SECONDS` 做服务探活与页面跳转（backend 另持
+`WEKNORA_ADMIN_EMAIL`/`WEKNORA_ADMIN_PASSWORD` 供上述中继登录）。前端知识库
+入口与免登录跳转地址在 `WEKNORA_WEB_URL` 为主机回环地址（localhost/127.0.0.1
+等）时，自动改用浏览器当前访问平台的主机名（协议与端口保留），内网与公网
+部署未显式配置时同样跳到同机网关；非回环地址按配置原样跳转。标准 MCP 的
+内部访问范围由
 `SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS` 指定（Docker 固定
 `http://weknora-app:8080/mcp`；源码模式由配置中心生成为
 `http://127.0.0.1:18080/mcp`）。只允许精确同源、路径在前缀内的请求；其它 MCP
@@ -160,7 +174,8 @@ DB、Redis、JWT、AES 与 signing 凭据独立生成并跨部署保持不变。
 
 管理员首次配置流程：
 
-1. 从超级助手会话头部打开 WeKnora，使用原生账号登录。
+1. 从超级助手会话头部点击「领域知识」一键免登录进入 WeKnora（或中键/修饰键
+   直开原生地址手动登录）。
 2. 在“设置 → 模型”添加聊天（KnowledgeQA）和 Embedding 模型，在原生页面输入
    模型地址、密钥、名称及向量维度；无需 GitHub 模型变量或 Secrets。
 3. 创建一个共享知识库，绑定所需模型，再上传文档并等待解析、索引完成。

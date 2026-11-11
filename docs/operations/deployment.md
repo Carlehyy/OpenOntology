@@ -86,7 +86,12 @@ WeKnora v0.9.0 的公开入口与平台 Nginx 独立：它只暴露原生 Web �
 `weknora-bootstrap` 的 `weknora-app-init` 完成首次账号注册，删除后
 才启动 `DISABLE_REGISTRATION=true` 的正式 app；`bootstrap --verify` 会通过
 官方管理员设置 API 持久化 `invite_only`，因此数据库运行时设置不能覆盖环境
-关闭开关。公网精确 `/mcp` 与 `/mcp/` 都固定 404；平台通过内网 MCP 使用工具。全部
+关闭开关。公网精确 `/mcp` 与 `/mcp/` 都固定 404；平台通过内网 MCP 使用工具。
+公开入口检查除 `/healthz`、`invite_only` 与 MCP 404 外，还要求免登录中继
+`/sso/entry` 无票据访问必须 302 回根路径（证明 weknora-gateway → backend
+反代与中继路由接通）。`backend` 容器额外持有
+`WEKNORA_ADMIN_EMAIL`/`WEKNORA_ADMIN_PASSWORD` 供「领域知识」一键免登录
+中继做服务端登录，其余运行时容器仍被掩码。全部
 `WEKNORA_*_IMAGE` 已有 `@sha256` 默认值；部署仍在 digest 校验处 fail closed，
 防止 tag 漂移。模型与知识库不属于部署输入；管理员登录原生 Web 配置后，
 通过超级助手现有 MCP 管理手工接入，详见

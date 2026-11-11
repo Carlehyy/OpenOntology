@@ -282,6 +282,13 @@ class Settings(BaseSettings):
     weknora_base_url: str = "http://weknora-app:8080"
     weknora_web_url: str = "http://localhost:8089"
     weknora_timeout_seconds: int = Field(default=15, ge=3, le=60)
+    # 一键免登录中继（super_assistant/weknora/sso.py）需要管理员邮箱/密码在
+    # backend 运行时做服务端登录（与部署 bootstrap 同一账号），仅此用途；密码
+    # repr=False，不进日志与接口响应。凭据只注入 backend 容器（compose :?
+    # 强制存在），其余运行时容器由掩码锚点合法置空——与 Kaneo 同构，不得加
+    # 全局生产必需校验（见下方 Kaneo 注释中的 2026-11-11 事故记录）。
+    weknora_admin_email: str = "admin@weknora.local"
+    weknora_admin_password: str = Field(default="", repr=False)
     # Kaneo（项目/任务服务，上游固定 2.49.0）同构：私网 http API 供探活，
     # 浏览器入口经 nginx 走 HTTPS 的公开 web 地址。一键免登录中继
     # （super_assistant/kaneo/sso.py）需要管理员邮箱/密码在 backend 运行时
