@@ -578,6 +578,16 @@ app.include_router(
     dependencies=scenes_guard,
 )
 
+# 智能运营 — 平台级运营报告册：Markdown、受控单数据集 SQL 与交互图表
+operations_reports_guard = menu_guard("operations.reports")
+from app.operations import router as operations_reports_router
+app.include_router(
+    operations_reports_router.router,
+    prefix="/api/v2/operations/reports",
+    tags=["operations-reports"],
+    dependencies=operations_reports_guard,
+)
+
 def get_db():
     db = SessionLocal()
     try:

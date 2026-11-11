@@ -226,6 +226,8 @@ DROP TABLE IF EXISTS fo_agent_run_events;
 DROP TABLE IF EXISTS fo_agent_runs;
 DROP TABLE IF EXISTS super_assistant_conversation_summaries;
 DROP TABLE IF EXISTS super_assistant_summary_settings;
+DROP TABLE IF EXISTS operations_report_articles;
+DROP TABLE IF EXISTS operations_reports;
 ALTER TABLE super_assistant_messages DROP COLUMN IF EXISTS completed_at;
 DROP INDEX IF EXISTS uq_curated_reviews_proposal_key;
 ALTER TABLE v2_curated_reviews DROP COLUMN IF EXISTS proposal_key;
@@ -273,6 +275,8 @@ SELECT concat_ws(',',
   CASE WHEN to_regclass('v2_unified_query_rows') IS NOT NULL THEN 'v2_unified_query_rows' END,
   CASE WHEN to_regclass('super_assistant_conversation_summaries') IS NOT NULL THEN 'super_assistant_conversation_summaries' END,
   CASE WHEN to_regclass('super_assistant_summary_settings') IS NOT NULL THEN 'super_assistant_summary_settings' END,
+  CASE WHEN to_regclass('operations_reports') IS NOT NULL THEN 'operations_reports' END,
+  CASE WHEN to_regclass('operations_report_articles') IS NOT NULL THEN 'operations_report_articles' END,
   CASE WHEN (SELECT count(*) FROM information_schema.columns
              WHERE table_schema='public' AND table_name='ontology_projects'
                AND column_name LIKE 'structure_projection_%') > 0
@@ -320,6 +324,7 @@ UNION ALL SELECT 'unified query rows table present', (to_regclass('v2_unified_qu
 UNION ALL SELECT 'curated review provenance columns present', (SELECT count(*)::text FROM information_schema.columns WHERE table_schema='public' AND table_name='v2_curated_reviews' AND column_name IN ('base_version_id','proposal_key')), '2'
 UNION ALL SELECT 'structure projection columns present', (SELECT count(*)::text FROM information_schema.columns WHERE table_schema='public' AND table_name='ontology_projects' AND column_name IN ('structure_projection_status','structure_projection_error','structure_projection_release_id','structure_projection_hash')), '4'
 UNION ALL SELECT 'conversation summary tables present', (SELECT count(*)::text FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('super_assistant_conversation_summaries','super_assistant_summary_settings')), '2'
+  UNION ALL SELECT 'operations report tables present', (SELECT count(*)::text FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('operations_reports','operations_report_articles')), '2'
 UNION ALL SELECT 'message completed_at column present', (SELECT count(*)::text FROM information_schema.columns WHERE table_schema='public' AND table_name='super_assistant_messages' AND column_name='completed_at'), '1'
 SQL
   local check actual expect pass_lines="" fail_lines=""

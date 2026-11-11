@@ -27,6 +27,7 @@ app/
 ├── auth/              身份、角色与菜单授权
 ├── inbox/             收件箱契约
 ├── notifications/     消息通知（管理员消息总线）
+├── operations/        智能运营（平台级运营报告册与分析查询）
 ├── shared/            迁移期共享基础能力
 ├── tasks/             后台任务体入口（Celery 已退役；定时/后台任务走 APScheduler + NATS JetStream → nats_executor）
 ├── engine/            预留的运行引擎 package；旧 post-harness 已退役

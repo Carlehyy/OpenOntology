@@ -180,6 +180,24 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      - name: Operations reports PostgreSQL acceptance
+        if: matrix.shard == 1
+        env:
+          ENVIRONMENT: test
+          DATABASE_URL: postgresql://openontology_ci:openontology_ci@127.0.0.1:5432/openontology_ci
+          OPENONTOLOGY_OPERATIONS_REPORTS_E2E: "1"
+        run: uv run python scripts/operations_reports_postgres_e2e.py --report ../.artifacts/operations-reports/query-postgres.json
+        working-directory: backend
+
+      - name: Upload operations reports acceptance evidence
+        if: ${{ always() && matrix.shard == 1 }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: operations-reports-postgres-${{ github.run_id }}
+          path: .artifacts/operations-reports/query-postgres.json
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Persisted ciphertext secret-split E2E
         if: matrix.shard == 1
         env:

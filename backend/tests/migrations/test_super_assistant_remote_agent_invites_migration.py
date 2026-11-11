@@ -84,4 +84,4 @@ def test_head_is_single(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     from alembic.script import ScriptDirectory
     heads = ScriptDirectory.from_config(cfg).get_heads()
-    assert heads == ["0144_hindsight_memory"]
+    assert heads == ["0145_operations_reports"]

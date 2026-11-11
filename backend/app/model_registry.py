@@ -29,6 +29,7 @@ MODEL_MODULES = (
     "app.inbox.models",
     "app.model_configs.models",
     "app.notifications.models",
+    "app.operations.models",
     "app.ontologies.actions.models",
     "app.ontologies.actions.v2_models",
     "app.ontologies.agent_runtime.models",
