@@ -261,13 +261,17 @@ Kaneo 自带登录页；中键/修饰键/右键点击按钮仍直开原生地址
 未配置 S3/SMTP，因此附件上传与邮件找回密码不可用——不得把 `kaneo_data`
 当作附件持久化，也不得以本地卷 workaround 冒充附件能力。
 
-### Hindsight 长期记忆（可选，默认关闭）
+### Hindsight 长期记忆（生产默认启用）
 
 Hindsight 1.2.0 以独立 Compose profile `hindsight` 提供超级助手长期记忆，
-含专用 pgvector 数据库与模型缓存卷，不共用平台 PostgreSQL。本地启用
-`docker compose -f docker-compose.local.yml --profile hindsight up -d`；
-生产在服务器 `.env` 写 `HINDSIGHT_ENABLED=true` 后由 `deploy-prod.sh` 启停
-（未启用时自动停掉历史容器，不删卷）。API 仅 Compose 内网（本地另有 loopback
+含专用 pgvector 数据库与模型缓存卷，不共用平台 PostgreSQL。**生产开箱即用**：
+`HINDSIGHT_ENABLED` 默认为 `true`，`deploy-prod.sh` 自动生成凭据并启动；栈的
+拉取与启动始终后置到核心部署成功之后，任何失败只降级记忆特性，不影响聊天与
+全局 readiness。本地不受该开关控制，仍用
+`docker compose -f docker-compose.local.yml --profile hindsight up -d` 显式启用。
+停用记忆栈就在服务器 `.env` 显式写 `HINDSIGHT_ENABLED=false`（脚本随即停掉
+历史容器，不删卷）；历史模板默认 `false` 的存量服务器会在下次部署被一次性
+迁移为启用，此后显式 `false` 一律尊重。API 仅 Compose 内网（本地另有 loopback
 `18888`）；管理 UI（9999 控制面）本地经 loopback `19999` 访问，生产由
 `HINDSIGHT_WEB_PORT`（默认 `19999`）发布到宿主并以官方访问密钥登录保护。
 

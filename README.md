@@ -50,7 +50,7 @@ Kaneo 项目管理（官方 2.49.0，独立单用户账号）随同一套 Compos
 超级助手长期记忆是可选服务：本地 `docker compose --profile hindsight up -d`
 启用（loopback `http://127.0.0.1:18888`），不启用或故障时仅记忆特性降级，
 聊天不受影响。细节见
-[Hindsight 长期记忆](./docs/development/setup.md#hindsight-长期记忆可选)。
+[Hindsight 长期记忆](./docs/development/setup.md#hindsight-长期记忆生产默认启用本地手动开启)。
 
 三个编排文件分工如下：`docker-compose.local.yml` 是单机一键完整栈（即上文
 流程，`up --build` 会自动执行 Alembic 迁移并按 `.env` 播种首个管理员）；

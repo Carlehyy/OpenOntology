@@ -185,9 +185,10 @@ Kaneo，使页面 API、认证来源和平台入口一致；不会按当前访�
 `kaneo_data` 卷（`/var/lib/kaneo`）只是运行时资源，不是附件持久化，项目数据
 的权威存储是 `kaneo_postgres_data`。
 
-## Hindsight 长期记忆（可选）
+## Hindsight 长期记忆（生产默认启用，本地手动开启）
 
-Hindsight 默认不启动。启用本地记忆栈（含专用 pgvector DB 与模型缓存卷）：
+生产由 `deploy-prod.sh` 默认启用（`HINDSIGHT_ENABLED=true`），本地不受该开关
+控制，需显式启用本地记忆栈（含专用 pgvector DB 与模型缓存卷）：
 
 ```bash
 docker compose -f docker-compose.local.yml --profile hindsight up -d
@@ -198,7 +199,7 @@ curl http://127.0.0.1:18888/health/ready   # API + DB 就绪探针
 （`intfloat/multilingual-e5-small`，缓存在 `hindsight_model_cache` 卷）；无
 egress 环境先在有网机器预下载同一 repo 并填入该卷，再在 `.env` 设
 `HINDSIGHT_HF_OFFLINE=1`（方法见
-[operations/configuration.md](../operations/configuration.md#hindsight-长期记忆可选默认关闭)）。
+[operations/configuration.md](../operations/configuration.md#hindsight-长期记忆生产默认启用)）。
 API 仅 loopback `18888`，管理 UI 仅 loopback `19999`，都不对外。服务不可用时
 仅记忆特性降级，聊天不受影响；配置中心 `Hindsight` 节为可选测试，不阻塞生成本地配置。
 
@@ -207,7 +208,7 @@ API 仅 loopback `18888`，管理 UI 仅 loopback `19999`，都不对外。服�
 额外端口。URL 内不得携带 tenant 或 API key；生产在 `HINDSIGHT_ENABLED=true`
 且留空时由 `deploy-prod.sh` 从 `PUBLIC_TLS_IP` + `HINDSIGHT_WEB_PORT` 自动
 推导默认入口，控制面由自动生成的 `HINDSIGHT_CP_ACCESS_KEY` 登录保护（详见
-[operations/configuration.md](../operations/configuration.md#hindsight-长期记忆可选默认关闭)）。
+[operations/configuration.md](../operations/configuration.md#hindsight-长期记忆生产默认启用)）。
 
 ## 最小验证
 

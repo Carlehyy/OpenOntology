@@ -950,8 +950,11 @@ bootstrap_production_env() {
     "$(random_hex 32)" "$bootstrap_tmp_path"
   set_env_value_in_file PYTHON_KERNEL_GATEWAY_AUTH_TOKEN \
     "$(random_hex 32)" "$bootstrap_tmp_path"
-  # 可选记忆栈默认关闭；启用时由 configure_hindsight_env 生成独立凭据。
-  set_env_value_in_file HINDSIGHT_ENABLED false "$bootstrap_tmp_path"
+  # 记忆栈生产默认启用（开箱即用）：凭据/端口由 configure_hindsight_env
+  # 生成；栈本体的拉取与启动仍后置到核心部署成功之后，失败只降级记忆特性。
+  # 运维显式写 false 即可关闭（存量 false 服务器见 configure_hindsight_env
+  # 的一次性迁移）。
+  set_env_value_in_file HINDSIGHT_ENABLED true "$bootstrap_tmp_path"
   sync "$bootstrap_tmp_path" 2>/dev/null || sync
   # Publishing with a same-directory hard link is atomic and never replaces
   # an existing file, directory or dangling secret-mount symlink. A check then
@@ -1353,10 +1356,18 @@ hindsight_web_url_origin_ok() {
 }
 
 configure_hindsight_env() {
-  # Hindsight 长期记忆（可选）：HINDSIGHT_ENABLED=true 时生成/保留独立凭据并
-  # 钉扎镜像 digest；未启用时不动任何值（缺 secret 不阻断平台部署）。
+  # Hindsight 长期记忆：生产默认启用（开箱即用），运维可随时显式关闭。
+  # 历史模板/引导曾默认 false；对"从未开通"的存量服务器做一次性迁移——
+  # 指纹取 HINDSIGHT_WEB_PORT（它只在启用后被本函数写入，不随依赖清单
+  # 物化）。首次启用即生成全部凭据与端口并落 .env，指纹自然分化；此后
+  # 运维显式 false 一律尊重，不再翻动。
   local current
   local -a updates=()
+  if [ "$(env_value HINDSIGHT_ENABLED)" != "true" ] \
+    && [ -z "$(env_value HINDSIGHT_WEB_PORT)" ]; then
+    set_env_value HINDSIGHT_ENABLED true
+    log "migrated HINDSIGHT_ENABLED=true (the memory stack now deploys on by default; write false explicitly to opt out)"
+  fi
   case "$(env_value HINDSIGHT_ENABLED)" in
     1|true|TRUE|yes|YES) HINDSIGHT_INTERNAL=1 ;;
     ""|0|false|FALSE|no|NO) HINDSIGHT_INTERNAL=0 ;;

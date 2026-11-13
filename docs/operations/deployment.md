@@ -136,7 +136,7 @@ secrets 与 `PROD_HINDSIGHT_IMAGE`/`PROD_HINDSIGHT_POSTGRES_IMAGE` variables
 部署结论；启动成功但未在观察窗内健康（首启可能在下载 embedding 模型）则
 保持运行并仅记录告警。未启用时自动停掉历史容器（保留卷）。它不参与平台
 readiness 与部署成败判定，部署日志仅记录功能健康状态。详见
-[配置流程](./configuration.md#hindsight-长期记忆可选默认关闭)。
+[配置流程](./configuration.md#hindsight-长期记忆生产默认启用)。
 
 ## 数据库迁移停机边界
 

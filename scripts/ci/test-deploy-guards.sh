@@ -2310,12 +2310,18 @@ if grep -Fq 'deployment succeeded' "$timeout_log"; then
 fi
 printf 'ok deploy-runtime-source-timeout-fail\n'
 
-# Optional Hindsight memory stack isolation through the real deploy script:
-# enabled startup happens only after core success in a separate --profile
+# Hindsight memory stack isolation through the real deploy script: the memory
+# stack now deploys on by default, including a one-time migration for legacy
+# server .env files that still carry the historical false default. The fixture
+# below simulates exactly such a server (false, no HINDSIGHT_WEB_PORT marker).
+# Enabled startup happens only after core success in a separate --profile
 # hindsight invocation; optional pull, init, database, app-start, timeout, or
 # health failures never gate or stop the core deployment, and the final core
 # compose up never carries the profile.
-set_test_env_value HINDSIGHT_ENABLED true
+set_test_env_value HINDSIGHT_ENABLED false
+set_test_env_value HINDSIGHT_WEB_URL ""
+sed -i.bak '/^[[:space:]]*HINDSIGHT_WEB_PORT=/d' "$test_dir/.env"
+rm -f "$test_dir/.env.bak"
 
 hindsight_success_log="$attestation_root/deploy-hindsight-success.log"
 if ! run_attestation_deploy "$hindsight_success_log" "$attestation_source" 5 \
@@ -2369,7 +2375,11 @@ if [ -n "$hindsight_api_key_value" ] \
 fi
 # 默认控制面入口：HINDSIGHT_ENABLED=true 且未显式配置时，入口 URL 从
 # PUBLIC_TLS_IP + HINDSIGHT_WEB_PORT 推导并落 .env，控制面密钥自动生成且
-# 不进部署日志（fixture 的 PUBLIC_TLS_IP 为 64.83.14.139）。
+# 不进部署日志（fixture 的 PUBLIC_TLS_IP 为 64.83.14.139）。同时验证存量
+# false 服务器的一次性迁移确实发生并落盘。
+grep -Fq 'migrated HINDSIGHT_ENABLED=true' "$hindsight_success_log"
+grep -Fxq 'HINDSIGHT_ENABLED=true' "$test_dir/.env"
+grep -Fxq 'HINDSIGHT_WEB_PORT=19999' "$test_dir/.env"
 grep -Fq 'configured HINDSIGHT_WEB_URL from PUBLIC_TLS_IP and HINDSIGHT_WEB_PORT' \
     "$hindsight_success_log"
 grep -Fxq 'HINDSIGHT_WEB_URL=http://64.83.14.139:19999' "$test_dir/.env"
@@ -2436,6 +2446,9 @@ fi
 printf 'ok deploy-hindsight-optional-unhealthy-degrades\n'
 
 hindsight_core_fail_log="$attestation_root/deploy-hindsight-core-failure.log"
+# 同时验证运维显式关闭：.env 已带 HINDSIGHT_WEB_PORT 指纹，写 false 即为
+# 停用表态，部署必须尊重它，绝不能被一次性迁移翻回启用。
+set_test_env_value HINDSIGHT_ENABLED false
 if run_attestation_deploy "$hindsight_core_fail_log" "$attestation_source" 5 \
     HINDSIGHT_HEALTH_WAIT_ATTEMPTS=2 HINDSIGHT_HEALTH_WAIT_INTERVAL=0 \
     FAKE_FINAL_UP_FAIL=1; then
@@ -2446,11 +2459,18 @@ if grep -Fq 'deployment succeeded' "$hindsight_core_fail_log"; then
   printf 'deployment must not claim success after the final core compose up fails\n' >&2
   exit 1
 fi
-if grep -q -- '--profile hindsight' "$hindsight_core_fail_log.docker"; then
-  printf 'no compose invocation may carry the hindsight profile before core deployment success\n' >&2
+if grep -q -- '--profile hindsight up' "$hindsight_core_fail_log.docker"; then
+  printf 'no compose invocation may start the hindsight profile before core deployment success\n' >&2
   exit 1
 fi
-set_test_env_value HINDSIGHT_ENABLED false
+# 显式 false（且已带 HINDSIGHT_WEB_PORT 指纹）是运维的停用表态：部署必须
+# 尊重它，绝不能被一次性迁移翻回启用。
+grep -Fxq 'HINDSIGHT_ENABLED=false' "$test_dir/.env"
+if grep -Fq 'migrated HINDSIGHT_ENABLED=true' "$hindsight_core_fail_log"; then
+  printf 'an explicit HINDSIGHT_ENABLED=false must not be migrated back on\n' >&2
+  exit 1
+fi
+printf 'ok deploy-hindsight-explicit-disable-respected\n'
 printf 'ok deploy-hindsight-core-final-isolation\n'
 
 printf 'deployment guard self-tests passed\n'
