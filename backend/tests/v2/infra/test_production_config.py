@@ -368,6 +368,20 @@ def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
     assert hindsight_service["environment"][
         "HINDSIGHT_CP_DATAPLANE_API_KEY"
     ] == "${HINDSIGHT_API_KEY:-}"
+    # The one-click relay needs the same key in the backend: an explicit key in
+    # backend's environment wins over the shared mask (KANEO_ADMIN_PASSWORD
+    # precedent), and the control-plane base URL is a fixed in-network address.
+    assert backend["environment"]["HINDSIGHT_CP_ACCESS_KEY"] == (
+        "${HINDSIGHT_CP_ACCESS_KEY:-}"
+    )
+    assert backend["environment"]["HINDSIGHT_CP_BASE_URL"] == "http://hindsight:9999"
+    for service in ("pipeline_executor", "task_worker"):
+        assert compose["services"][service]["environment"][
+            "HINDSIGHT_CP_ACCESS_KEY"
+        ] == ""
+        assert "HINDSIGHT_CP_BASE_URL" not in compose["services"][service][
+            "environment"
+        ]
     # backend/pipeline_executor/task_worker inherit .env but never need the
     # control-plane key: the shared mask anchor pins it to "" there (asserted
     # below with the other stack-only secrets).
@@ -428,11 +442,10 @@ def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
         "KANEO_AUTH_SECRET",
     )
     # Hindsight stack-only secrets follow the same isolation: the DB password
-    # and the published Control-Plane access key never reach env_file consumers.
-    hindsight_stack_only = (
-        "HINDSIGHT_DB_PASSWORD",
-        "HINDSIGHT_CP_ACCESS_KEY",
-    )
+    # never reaches env_file consumers. The control-plane access key is a
+    # sanctioned backend exception (one-click relay, like KANEO_ADMIN_PASSWORD)
+    # and is pinned to the real value there instead.
+    hindsight_stack_only = ("HINDSIGHT_DB_PASSWORD",)
     env_file_services = [
         name for name, service in compose["services"].items()
         if service.get("env_file")

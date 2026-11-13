@@ -313,6 +313,36 @@ export default function MemoryPanel({ active, models }: { active: boolean; model
   const statusPresentation = status ? memoryStatusPresentation(status.state) : null
   const consoleUrl = isAdmin ? memoryWebUrl(settings?.web_url) : null
 
+  /** 一键免密进入控制台：先同步开空白标签保住用户手势（await 后再
+      window.open 会被弹窗拦截），再领一次性票据导航到平台中继；中继在
+      服务端登录控制面并把会话 cookie 透传给浏览器。失败时关闭空白页并
+      如实提示——原生地址直开（控制台自带密钥登录）仍是可用兜底。 */
+  const openConsole = useCallback(async () => {
+    const popup = window.open('', '_blank')
+    try {
+      const { redirect_url } = await superAssistantApi.createMemoryConsoleEntry()
+      const entryUrl = new URL(redirect_url, window.location.origin).toString()
+      if (!popup) {
+        // 弹窗被拦截：当前标签跳转，免密体验保持完整
+        window.location.href = entryUrl
+        return
+      }
+      popup.opener = null
+      popup.location.href = entryUrl
+    } catch (error) {
+      popup?.close()
+      toast.error('记忆控制台免密进入失败，可右键新标签打开后手工输入密钥', {
+        description: errorText(error),
+      })
+    }
+  }, [])
+  const handleConsoleClick = useCallback((event: React.MouseEvent) => {
+    // 中键/修饰键/右键保留 <a> 原生行为，落到控制台密钥登录页作手动兜底
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+    event.preventDefault()
+    void openConsole()
+  }, [openConsole])
+
   return (
     <div className="grid gap-3" data-testid="memory-panel">
       {/* 设置：启用 + 记忆模型（保存后由后端能力校验） */}
@@ -377,6 +407,7 @@ export default function MemoryPanel({ active, models }: { active: boolean; model
                 rel="noopener noreferrer"
                 className={buttonVariants({ variant: 'outline', size: 'sm' })}
                 data-testid="memory-web-entry"
+                onClick={handleConsoleClick}
               >
                 <ExternalLink size={12} aria-hidden="true" />
                 打开 Hindsight
@@ -394,7 +425,7 @@ export default function MemoryPanel({ active, models }: { active: boolean; model
             )}
             <p className="mt-1.5 text-[10px] leading-4 text-[var(--color-text-tertiary)]">
               {consoleUrl
-                ? '在新标签页打开原生管理控制台，仅管理员可见'
+                ? '在新标签页免密打开原生管理控制台，仅管理员可见；中键/右键可直开并手工登录'
                 : settingsLoaded
                   ? '尚未配置 Hindsight Web 地址，请在部署配置中设置 HINDSIGHT_WEB_URL'
                   : '正在加载 Hindsight Web 地址…'}

@@ -366,6 +366,14 @@ app.include_router(
     tags=["super-assistant-memory"],
     dependencies=assistant_guard,
 )
+# 记忆控制台一键免密中继（/memory/console/sso）：浏览器以顶层导航抵达，
+# 带不上平台 Bearer 头——有意不挂 assistant_guard，凭证是 entry 签发的
+# 一次性票据（HMAC + 90s TTL + Redis 单次消费），管理员边界在签发时校验。
+app.include_router(
+    memory_router.console_router,
+    prefix="/api/v2/super-assistant",
+    tags=["super-assistant-memory"],
+)
 app.include_router(
     memory_llm.router,
     prefix="/api/v2/super-assistant",

@@ -707,8 +707,14 @@ services:
       HINDSIGHT_SERVICE_TOKEN: ${HINDSIGHT_SERVICE_TOKEN:-}
       # 可选：管理员专用的 Hindsight 原生 Web 入口（服务器 .env 值，空=未启用；
       # 非密钥，其余 env_file 服务亦会继承但不使用）。仅 backend 显式映射并
-      # 使用；生产不发布任何 UI 端口。
+      # 使用。
       HINDSIGHT_WEB_URL: ${HINDSIGHT_WEB_URL:-}
+      # 控制面一键免密中继：backend 用访问密钥在服务端登录并把会话 cookie
+      # 透传给浏览器。内网地址固定；密钥是 sanctioned exception——显式键
+      # 覆盖共享掩码锚点，只有 backend 拿到真值（executor/task_worker 保持
+      # 空串，与 KANEO_ADMIN_PASSWORD 同构）。
+      HINDSIGHT_CP_BASE_URL: http://hindsight:9999
+      HINDSIGHT_CP_ACCESS_KEY: ${HINDSIGHT_CP_ACCESS_KEY:-}
       UPLOADS_DIR: ${UPLOADS_DIR:-/uploads}
       API_HUB_DATA_DIR: /api-hub-data
       STEWARD_WORKSPACE_ROOT: /uploads/steward-sessions

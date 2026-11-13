@@ -207,7 +207,9 @@ API 仅 loopback `18888`，管理 UI 仅 loopback `19999`，都不对外。服�
 `http://127.0.0.1:19999`（写 `localhost` 也按原样保留，不做改写），不为此发布
 额外端口。URL 内不得携带 tenant 或 API key；生产在 `HINDSIGHT_ENABLED=true`
 且留空时由 `deploy-prod.sh` 从 `PUBLIC_TLS_IP` + `HINDSIGHT_WEB_PORT` 自动
-推导默认入口，控制面由自动生成的 `HINDSIGHT_CP_ACCESS_KEY` 登录保护（详见
+推导默认入口，控制面由自动生成的 `HINDSIGHT_CP_ACCESS_KEY` 登录保护；管理员
+面板「打开 Hindsight」经平台中继一键免密（backend 用该密钥服务端登录并透传
+会话 cookie），中继未就绪时回落为控制台密钥登录（详见
 [operations/configuration.md](../operations/configuration.md#hindsight-长期记忆生产默认启用)）。
 
 ## 最小验证

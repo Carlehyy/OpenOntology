@@ -722,6 +722,10 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
         f"{prefix}/memory/search": {"post"},
         f"{prefix}/memory/sources/{{source_id}}": {"delete"},
         f"{prefix}/memory/sources/{{source_id}}/retry": {"post"},
+        # 控制面一键免密（与 WeKnora/Kaneo 中继同构）：entry 受守卫、consume
+        # 不挂平台守卫（浏览器顶层导航带不上 Bearer 头，一次性票据即凭证）。
+        f"{prefix}/memory/console/entry": {"post"},
+        f"{prefix}/memory/console/sso": {"get"},
         f"{prefix}/internal/memory/v1/chat/completions": {"post"},
     }
     all_paths = app.openapi()["paths"]

@@ -644,6 +644,10 @@ services:
       # 仅 backend 显式映射并使用；其余 env_file 服务可能继承该非密钥值但不
       # 使用。UI 仍走 profile 的 loopback 映射，不新增任何发布端口。
       HINDSIGHT_WEB_URL: ${HINDSIGHT_WEB_URL:-}
+      # 控制面一键免密中继（与生产同构）：容器内网地址固定，密钥来自 .env；
+      # 本地不设 key 时中继 fail-closed，前端退回控制台自带密钥登录页。
+      HINDSIGHT_CP_BASE_URL: http://hindsight:9999
+      HINDSIGHT_CP_ACCESS_KEY: ${HINDSIGHT_CP_ACCESS_KEY:-}
     depends_on:
       db:
         condition: service_healthy

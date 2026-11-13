@@ -319,6 +319,13 @@ class Settings(BaseSettings):
     # 浏览器可访问且已保护的原生管理页地址；不从私网 API 地址推导。
     # 部署级管理入口仅向平台管理员提供。
     hindsight_web_url: str = ""
+    # 控制面（9999）的一键免密中继：backend 用访问密钥在服务端登录并把会话
+    # cookie 透传给浏览器（super_assistant/hindsight_sso.py）。密钥只注入
+    # backend 容器（compose 显式覆盖掩码锚点），其余运行时容器合法置空；
+    # 因此不得加全局生产必需校验，强度由 deploy-prod.sh 与路由级 fail-closed
+    # 承担。base_url 固定为容器内网地址，空值 = 中继关闭（前端保留手动登录）。
+    hindsight_cp_base_url: str = ""
+    hindsight_cp_access_key: str = Field(default="", repr=False)
     # backend → Hindsight 的 Bearer 凭据（默认镜像无租户鉴权时仅作请求上下文）。
     hindsight_api_key: str = Field(default="", repr=False)
     hindsight_timeout_seconds: float = Field(default=2.0, gt=0, le=60)

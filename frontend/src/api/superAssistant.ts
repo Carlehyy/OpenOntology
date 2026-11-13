@@ -591,6 +591,11 @@ export interface MemorySettings {
 
 export type MemoryRuntimeState = 'ready' | 'unconfigured' | 'unavailable' | 'syncing' | 'error'
 
+/** 记忆控制台免密中继：平台 origin 下的相对地址，导航后由后端种会话 cookie。 */
+export interface MemoryConsoleEntry {
+  redirect_url: string
+}
+
 export interface MemoryStatus {
   state: MemoryRuntimeState
   message: string | null
@@ -868,6 +873,9 @@ export const superAssistantApi = {
   updateMemorySettings: (body: { enabled: boolean; model_config_id?: string | null }) =>
     apiClientV2.patch<MemorySettings>('/super-assistant/memory/settings', body),
   memoryStatus: () => apiClientV2.get<MemoryStatus>('/super-assistant/memory/status'),
+  /** Hindsight 控制台一键免密：领取一次性票据的中继地址，登录由后端中继完成 */
+  createMemoryConsoleEntry: () =>
+    apiClientV2.post<MemoryConsoleEntry>('/super-assistant/memory/console/entry'),
   memorySources: (params: { limit?: number; offset?: number; query?: string } = {}) =>
     apiClientV2.get<MemorySourcePage>('/super-assistant/memory/sources', { params }),
   searchMemory: (query: string) =>

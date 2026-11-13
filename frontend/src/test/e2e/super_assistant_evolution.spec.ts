@@ -211,6 +211,12 @@ test('超级助手：技能审批保留（旧记忆/冲突卡隐藏）与 Hindsi
         }],
       })
     }
+    // 控制台一键免密：entry 签发票据，中继 302 到控制台（cookie 由真实后端种）
+    if (path === '/api/v2/super-assistant/memory/console/entry' && method === 'POST') {
+      return json(route, {
+        redirect_url: '/api/v2/super-assistant/memory/console/sso?ticket=test-ticket',
+      })
+    }
     return route.fulfill({ status: 404, body: '{}' })
   })
 
@@ -241,17 +247,33 @@ test('超级助手：技能审批保留（旧记忆/冲突卡隐藏）与 Hindsi
   await expect(page.getByTestId('memory-status-unconfigured')).toBeVisible()
 
   const consoleLink = page.getByRole('link', { name: '打开 Hindsight' })
+  // href 保留原生控制台地址：中键/右键/修饰键直开时落到其自带密钥登录页
   await expect(consoleLink).toHaveAttribute('href', 'https://memory.example.invalid:9443')
   await expect(consoleLink).toHaveAttribute('target', '_blank')
   await expect(consoleLink).toHaveAttribute('rel', 'noopener noreferrer')
   await page.context().route('https://memory.example.invalid:9443/**', route => route.fulfill({
     contentType: 'text/html', body: '<title>Hindsight test console</title><h1>Hindsight</h1>',
   }))
+  // 中继导航发生在弹窗里：page.route 不拦截 popup，必须用 context 级路由。
+  // 这里直接返回控制台页面（真实后端是 302 到控制面，跳转契约由后端单测
+  // 覆盖），断言重点在"左键确实换了票据并经中继进入控制台"。
+  await page.context().route('**/api/v2/super-assistant/memory/console/sso*', route => {
+    expect(new URL(route.request().url()).searchParams.get('ticket')).toBe('test-ticket')
+    return route.fulfill({
+      contentType: 'text/html',
+      body: '<title>Hindsight test console</title><h1>Hindsight</h1>',
+    })
+  })
+  // 左键：先领一次性票据，经平台中继 302 到控制台（免密，无需输入密钥）
+  const entryRequest = page.waitForRequest(request =>
+    request.url().includes('/super-assistant/memory/console/entry') && request.method() === 'POST')
   const popupPromise = page.waitForEvent('popup')
   await consoleLink.click()
+  const entryCall = await entryRequest
+  expect(entryCall.postData() ?? '').toBe('')
   const popup = await popupPromise
   await popup.waitForLoadState('domcontentloaded')
-  await expect(popup).toHaveURL('https://memory.example.invalid:9443/')
+  await expect(popup).toHaveURL(/\/memory\/console\/sso\?ticket=test-ticket$/)
   await expect(popup.getByRole('heading', { name: 'Hindsight', exact: true })).toBeVisible()
   expect(await popup.evaluate(() => window.opener)).toBeNull()
   await popup.close()

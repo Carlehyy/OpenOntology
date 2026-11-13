@@ -305,7 +305,17 @@ env_file 服务可能继承该值但不使用；不经 GitHub secrets 物化）�
 `deploy-prod.sh` 强制生成该密钥（16 个十六进制字符，保存在服务器 `.env`，
 登录一次换 24 小时会话 cookie）。控制台检索记忆的 BFF 调用由
 `HINDSIGHT_CP_DATAPLANE_API_KEY`（与 backend 的 `HINDSIGHT_API_KEY` 同值）
-通过数据面租户鉴权。平台入口链接本身不新增任何代理或 SSO。
+通过数据面租户鉴权。
+
+管理员面板的「打开 Hindsight」是一键免密的：前端先领一次性票据
+（`POST /api/v2/super-assistant/memory/console/entry`，仅管理员），浏览器
+经平台 origin 的中继（`/memory/console/sso`）校验票据后，由 backend 用上述
+密钥在服务端登录控制面，并把会话 cookie 透过 302 交给浏览器——用户无需
+知道或输入密钥（与 WeKnora/Kaneo 一键免登录同构）。会话 cookie 按主机存储
+且忽略端口，因此该链路要求平台与控制面同主机（生产同为 `PUBLIC_TLS_IP`）；
+平台改用域名访问时 entry 自动 503，入口回落为控制台自带密钥登录（中键/右键
+直开同样如此）。Redis 不可用或控制面未就绪时中继 fail-closed，不影响记忆
+写入/召回链路。密钥本身仍只保存在服务器 `.env`，平台页面不回显。
 
 记忆 LLM 的模型选择是服务级的、每用户只有一个"当前模型"：Compose 三文件
 把 Hindsight 的 `HINDSIGHT_API_LLM_MODEL` 固定为平台别名

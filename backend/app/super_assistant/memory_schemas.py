@@ -13,6 +13,11 @@ class MemorySettingsOut(BaseModel):
     web_url: str | None = None
 
 
+class MemoryConsoleEntryOut(BaseModel):
+    # 平台 origin 下的相对中继地址：浏览器经它换取控制面会话 cookie。
+    redirect_url: str
+
+
 class MemorySettingsUpdate(BaseModel):
     enabled: bool | None = None
     model_config_id: str | None = None
