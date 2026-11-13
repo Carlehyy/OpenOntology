@@ -6,6 +6,7 @@
   超长转录从最旧处截断；
 - 解析：五维微卡片模板宽容解析（标题/状态/标签/五要点，含续行与缺失字段）；
 - 生成：默认用会话当前模型、用户级配置覆盖优先生效、每会话仅保留最新一份、
+  纪要标题每轮同步为会话标题（空/占位不覆盖、超长截断）、
   空会话 400、LLM 失败 502、他人会话一律 404；
 - 设置：默认 null、upsert 往返、重置回 null、非法模型 400。
 """
@@ -243,6 +244,59 @@ def test_generate_uses_conversation_model_and_upserts_latest(tmp_path, monkeypat
     stored = client.get("/api/v2/super-assistant/conversations/conv-1/summary")
     assert stored.status_code == 200
     assert stored.json()["structured"]["title"] == "第二轮纪要"
+
+
+def test_generate_syncs_summary_title_to_conversation_title(tmp_path, monkeypatch):
+    """纪要每次更新后纪要标题同步为会话标题（每轮覆盖，非仅首次）。"""
+    calls = 0
+
+    def fake_chat(call_kwargs, messages, tools):
+        nonlocal calls
+        calls += 1
+        return {"content": _SAMPLE_CARD if calls == 1 else
+                _SAMPLE_CARD.replace("查询平台Skill列表", "第二轮纪要")}
+
+    client, Session = _make_client(tmp_path, monkeypatch, fake_chat=fake_chat)
+    _seed_messages(Session, "conv-1", [
+        _row("user", "帮我查询有哪些Skill"),
+        _row("assistant", "当前有web-access技能", completed_at=datetime(2026, 7, 10, 14, 51)),
+    ])
+
+    first = client.post("/api/v2/super-assistant/conversations/conv-1/summary/generate")
+    assert first.status_code == 200, first.text
+    with Session() as db:
+        assert db.get(SuperAssistantConversation, "conv-1").title == "查询平台Skill列表"
+
+    second = client.post("/api/v2/super-assistant/conversations/conv-1/summary/generate")
+    assert second.status_code == 200, second.text
+    with Session() as db:
+        # 第二轮纪要更新后标题跟着更新（「每次更新后同步」语义）
+        assert db.get(SuperAssistantConversation, "conv-1").title == "第二轮纪要"
+
+
+def test_generate_keeps_title_for_uninformative_or_overlong_summary_titles(tmp_path, monkeypatch):
+    """空标题（模型跑偏）与「会话纪要」占位不覆盖原会话标题；超长标题截断到列宽。"""
+    replies = iter([
+        "模型跑偏了，没有按模板输出。",                      # structured.title 为空
+        "### 📋 会话纪要\n`状态：进行中`",                   # 模板占位文案
+        f"### 📋 [{'标' * 260}]",                            # 超长标题 → 截断 200
+    ])
+
+    client, Session = _make_client(
+        tmp_path, monkeypatch, fake_chat=lambda *args: {"content": next(replies)},
+    )
+    _seed_messages(Session, "conv-1", [_row("user", "你好")])
+
+    for _ in range(2):
+        resp = client.post("/api/v2/super-assistant/conversations/conv-1/summary/generate")
+        assert resp.status_code == 200, resp.text
+    with Session() as db:
+        assert db.get(SuperAssistantConversation, "conv-1").title == "会话一"
+
+    trimmed = client.post("/api/v2/super-assistant/conversations/conv-1/summary/generate")
+    assert trimmed.status_code == 200, trimmed.text
+    with Session() as db:
+        assert db.get(SuperAssistantConversation, "conv-1").title == "标" * 200
 
 
 def test_generate_prefers_user_setting_model(tmp_path, monkeypatch):

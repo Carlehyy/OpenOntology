@@ -9,6 +9,9 @@ Markdown 交给 LLM 压缩为五维微卡片；输出按模板解析为结构化
 全局覆盖（super_assistant_summary_settings，每用户一行，对所有会话生效），
 两种来源都经 select_llm_model_config 解析（不可用时按平台规则回退）。
 
+每次纪要落库时把纪要标题同步为会话标题（LLM 主题行比首条消息截断的
+自动标题更概括；空标题与「会话纪要」占位不覆盖，长于列宽截断到 200）。
+
 触发时机由前端决定（发送后约 1s / 完全响应结束后约 1s 调 generate 端点），
 本模块不感知触发；LLM 调用走 llm_gateway.chat（同步、写 model_call_logs，
 与 assistant_evaluation 同 seam）。
@@ -42,6 +45,11 @@ router = APIRouter()
 
 # 超长会话防御：纪要输入从最新内容截断（保留尾部），避免超出模型上下文
 _MAX_TRANSCRIPT_CHARS = 80_000
+
+# LLM 未按模板给主题时的模板占位文案（与前端纪要兜底标题一致）：同步成
+# 会话标题没有信息量，跳过；会话标题列宽与手动改名上限同为 200
+_SUMMARY_TITLE_PLACEHOLDER = "会话纪要"
+_TITLE_MAX_CHARS = 200
 
 # 纪要提示词：指令 + 输出模板作为 system，会话正文以 user 消息注入
 _SUMMARY_SYSTEM_PROMPT = """# Role
@@ -216,6 +224,22 @@ def get_summary(
     return db.get(SuperAssistantConversationSummary, conversation_id)
 
 
+def _sync_title_from_summary(
+    conversation: SuperAssistantConversation,
+    structured: dict,
+) -> None:
+    """纪要每次更新后把纪要标题同步为会话标题（与纪要同事务提交）。
+
+    首条消息截断的自动标题概括性差，纪要主题行（15 字以内）更贴合会话
+    内容；空标题（模型跑偏未按模板）与占位文案不覆盖，避免无信息量标题
+    反过来破坏原会话标题。
+    """
+    title = str(structured.get("title") or "").strip()
+    if not title or title == _SUMMARY_TITLE_PLACEHOLDER:
+        return
+    conversation.title = title[:_TITLE_MAX_CHARS]
+
+
 def generate_summary(
     db: Session,
     owner_id: str,
@@ -251,6 +275,7 @@ def generate_summary(
     summary.model_config_id = model_config.id
     summary.message_count = included
     summary.generated_at = datetime.now(timezone.utc)
+    _sync_title_from_summary(conversation, summary.structured)
     db.commit()
     db.refresh(summary)
     return summary
