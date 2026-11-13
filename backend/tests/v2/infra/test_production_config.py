@@ -507,7 +507,22 @@ def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
     assert build_environment["KANEO_WEB_URL"].endswith(".invalid")
     assert "env" not in workflow
     assert "env" not in build_job
-    assert build_step["run"] == "docker compose -f docker-compose.prod.yml build"
+    build_script = build_step["run"]
+    ordered_commands = (
+        "docker compose -f docker-compose.prod.yml build\n",
+        "trap 'chmod -R go+rX backend/app backend/integrated_runtime' EXIT",
+        "chmod -R go-rwx backend/app backend/integrated_runtime",
+        "docker compose -f docker-compose.prod.yml build integrated_replica_executor",
+        "docker run --rm --network none --read-only --tmpfs /tmp:size=256m,nosuid,nodev",
+        '-e ENVIRONMENT=test --entrypoint python "$replica_image"',
+    )
+    positions = [build_script.index(command) for command in ordered_commands]
+    assert positions == sorted(positions)
+    assert "assert os.geteuid() == 10001" in build_script
+    assert (
+        "from app.data_channel.integrated import cdc_executor, replica_executor"
+        in build_script
+    )
 
 
 def test_removed_graph_fallback_dependencies_are_not_packaged():
