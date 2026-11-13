@@ -42,11 +42,13 @@ export interface IntegratedAsset {
   columns: IntegratedColumn[]
   primary_key: string[]
   writable: boolean
-  capabilities: { read: boolean; write: boolean; sync: boolean; dbx_metadata: boolean }
+  capabilities: { read: boolean; write: boolean; sync: boolean; dbx_metadata: boolean; stop?: boolean }
   /** Server-reported execution lanes; metadata=dbx is an intent, usable only when dbx status allows it. */
   backends?: IntegratedBackends
   dbx?: IntegratedDbxStatus
   status: string
+  /** Current local replica state; null when the asset has no replica row. */
+  replica?: IntegratedReplica | null
   latest_version_id: string | null
   created_at: string
   updated_at?: string
@@ -65,17 +67,25 @@ export interface IntegratedRows {
   columns: IntegratedColumn[]
   source_state: {
     id?: string
-    /** Snapshot mode (repeatable_read), not the physical source kind. */
+    /** Snapshot mode: `replica_snapshot` for local replica reads. */
     kind: string
     consistent?: boolean
-    started_at: string
+    started_at: string | null
     /** Preview reads are bounded by `limit`, so this is about the read, not total row count. */
     complete?: boolean
     row_count?: number
     expected_rows?: number
     snapshot_id?: string
     schema_fingerprint?: string
+    /** Local replica facts (replica reads only). */
+    replica_status?: string
+    stale?: boolean
+    coverage_confirmed_at?: string | null
+    generation?: number
+    run_id?: string
   }
+  /** True when the read served a stale-but-readable replica. */
+  stale?: boolean
   preview?: true
   limit?: number
 }
@@ -91,6 +101,8 @@ export interface MutationReceipt {
   operation?: string
   status: 'applied' | 'conflict' | 'failed' | 'unknown' | 'pending'
   affected_rows: number
+  /** Platform receipt persistence time after the source commit, when provided. */
+  applied_at?: string
   row_token?: string
   error_code?: string
   error?: string
@@ -150,6 +162,58 @@ export interface IntegratedCdcStatus {
   /** Changes before this instant are not covered: CDC never backfills history. */
   coverage_started_at: string | null
   subscriptions: IntegratedCdcSubscription[]
+}
+
+/** Current-replica lifecycle (server contract; `stopped` is terminal control state). */
+export type IntegratedReplicaStatus =
+  | 'pending' | 'initializing' | 'catching_up' | 'ready'
+  | 'stale' | 'rebuild_required' | 'blocked' | 'stopped'
+
+/**
+ * Server-observed local replica for one asset. Platform facts only: no source
+ * IO, no credentials. `complete` is true only while an active run exists and
+ * the state admits reads; `stale` stays readable with an annotation while
+ * `rebuild_required`/`blocked` reject reads.
+ */
+export interface IntegratedReplica {
+  status: IntegratedReplicaStatus
+  complete: boolean
+  /** Readable but not cleanly ready: coverage may lag the replication cut. */
+  stale?: boolean
+  row_count: number | null
+  applied_at: string | null
+  coverage_confirmed_at: string | null
+  last_error_code: string | null
+  generation: number
+  run_id: string | null
+}
+
+/** Response of GET /{asset_id}/replica: the replica DTO with its asset id. */
+export interface IntegratedReplicaStatusPayload extends IntegratedReplica {
+  asset_id: string
+}
+
+/** Queued rebuild acknowledgement; the run is fenced server-side. */
+export interface IntegratedReplicaRebuildReceipt {
+  asset_id: string
+  run_id: string
+  generation: number
+  status: string
+  replica_status: string | null
+  complete: boolean
+}
+
+/** Source replication capability preflight; failures carry a stable safe code. */
+export interface IntegratedReplicaPreflightResult {
+  ok: boolean
+  code?: string
+}
+
+/** Stop acknowledgement; the current replica is fenced unreadable until rebuilt. */
+export interface IntegratedReplicaStopReceipt {
+  asset_id: string
+  status: string
+  cleanup_pending: boolean
 }
 
 export interface SourceConnection { id: string; name: string; kind: string; status: string }
@@ -334,4 +398,16 @@ export const integratedDatasetsApi = {
   versions: (id: string): Promise<{ items: IntegratedVersion[] }> => apiClientV2.get(`${assetPath(id)}/versions`),
   /** Read-only automatic CDC subscription status; authorized like an asset read. */
   cdc: (id: string, signal?: AbortSignal): Promise<IntegratedCdcStatus> => apiClientV2.get(`${assetPath(id)}/cdc`, { signal }),
+  /** Local replica control plane: read status (no source IO). */
+  replica: (id: string, signal?: AbortSignal): Promise<IntegratedReplicaStatusPayload> =>
+    apiClientV2.get(`${assetPath(id)}/replica`, { signal }),
+  /** Queue a fenced rebuild of the current replica (admin/editor). */
+  rebuildReplica: (id: string): Promise<IntegratedReplicaRebuildReceipt> =>
+    apiClientV2.post(`${assetPath(id)}/replica/rebuild`, {}),
+  /** Stop replication and fence the current replica unreadable (owner/admin). */
+  stopReplica: (id: string): Promise<IntegratedReplicaStopReceipt> =>
+    apiClientV2.post(`${assetPath(id)}/replica/stop`, {}),
+  /** Source replication capability preflight (admin/editor); stable safe codes only. */
+  replicaPreflight: (id: string): Promise<IntegratedReplicaPreflightResult> =>
+    apiClientV2.post(`${assetPath(id)}/replica/preflight`, {}),
 }

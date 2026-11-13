@@ -12,6 +12,8 @@ mid-budget refusal. The executor under test is the production path.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
+from uuid import uuid4
 from dataclasses import replace
 
 import pytest
@@ -384,73 +386,71 @@ def test_ledger_counts_batch_transfer_not_consumption(sources):
     engine.dispose()
 
 
-def test_liveness_probe_refuses_before_sql_when_statement_budget_full(db, admin_user, monkeypatch):
-    """Cursor liveness probe: budget refusal BEFORE the SELECT 1, not after.
-
-    With the whole-query statement budget exhausted, the recheck closure must
-    reject without issuing the probe (no extra source work past the limit) and
-    must not charge anything for the refused probe. With room available the
-    probe runs exactly once per unique source and is disclosed as one control
-    statement (statements only — its single returned row is control overhead,
-    never counted as data rows or bytes).
-    """
+def test_replica_recheck_never_spends_the_source_statement_budget(db, admin_user, monkeypatch):
+    """Local replica rechecks are platform-only: no liveness probe exists, so a
+    fully exhausted whole-query statement budget cannot and must not refuse a
+    recheck, and nothing is ever charged for revalidation (the old SELECT 1
+    refusal path is gone together with the probe itself)."""
     from contextlib import ExitStack
 
-    from app.data_channel.integrated import native
+    from app.data_channel.integrated import native, replica_control, replica_store
     from app.data_channel.connections.models import Connection
+    from app.data_channel.datasets.models import Dataset
+    from app.data_channel.integrated.contracts import digest
+    from app.data_channel.integrated.models import IntegratedAsset
     from app.data_channel.query import providers
     from app.data_channel.query.contracts import Binding
 
-    db.add(Connection(id="conn-probe-budget", name="probe source", kind="mysql",
-                      config={"host": "127.0.0.1", "port": 56306, "user": "u",
-                              "password": "p", "database": "integrated_source"},
-                      status="active", created_by=admin_user.id))
+    connection = Connection(id="conn-probe-budget", name="probe source", kind="mysql",
+                            config={"host": "127.0.0.1", "port": 56306, "user": "u",
+                                    "password": "p", "database": "integrated_source"},
+                            status="active", created_by=admin_user.id)
+    schema = {"columns": [{"name": "id", "type": "integer", "nullable": False,
+                           "primary_key": True}],
+              "primary_key": ["id"]}
+    dataset = Dataset(id="ds-probe-budget", name="probe budget", kind="integrated",
+                      source_connection_id=connection.id, source_resource="public.rows")
+    asset = IntegratedAsset(id="asset-probe", dataset_id="ds-probe-budget",
+                            connection_id=connection.id, name="probe budget",
+                            schema_name="public", table_name="rows",
+                            schema_json=schema, schema_fingerprint=digest(schema),
+                            writable=False, created_by=admin_user.id)
+    db.add_all([connection, dataset, asset])
+    db.commit()
+    run = replica_control.request_rebuild(db, asset)
+    token = replica_control.claim_run(db, run.id)
+    store_schema = replica_store.build_replica_schema(
+        run.id, run.schema_json, schema_fingerprint=run.schema_fingerprint)
+    replica_store.create_table(db.connection(), store_schema)
+    replica_store.write_batch(db.connection(), store_schema, [{"id": 1}])
+    db.commit()
+    replica_control.begin_load(db, run.id, token, capture_id=str(uuid4()),
+                               capture_start={"file": "bin.000001", "pos": 4})
+    replica_control.finish_load(db, run.id, token, completion={
+        "complete": True, "row_count": 1, "expected_rows": 1,
+        "schema_fingerprint": run.schema_fingerprint, "snapshot_id": "snap"})
+    db.commit()
+    replica_control.publish_run(db, run.id, token, applied_position={"pos": 5},
+                                coverage_confirmed_at=datetime.now(timezone.utc),
+                                row_count=1)
     db.commit()
 
-    meta = {"asset-probe": {
-        "asset_id": "asset-probe", "dataset_id": "ds", "connection_id": "conn-probe-budget",
-        "connection_status": "active", "dialect": "mysql",
-        "columns": [{"name": "id", "type": "integer", "nullable": False}],
-        "primary_key": ["id"], "schema_fingerprint": "fp-1",
-        "auth_fingerprint": "fp-auth", "projection": None}}
-    probes = []
-
-    def fake_metadata(_db, _user, asset_ids):
-        return {asset_id: meta[asset_id] for asset_id in asset_ids}
-
-    def fake_probe(connection):
-        probes.append(connection.id)
-
-    monkeypatch.setattr(native, "resolve_metadata", fake_metadata)
-    monkeypatch.setattr(native, "probe_source", fake_probe)
+    monkeypatch.setattr(native, "probe_source", lambda *_args, **_kwargs: pytest.fail(
+        "replica rechecks never probe the source"))
     binding = Binding(kind="integrated", asset_id="asset-probe")
     limits = QueryLimits(execution_source_statements_limit=1)
 
-    # Budget already exhausted: the probe must not run and nothing is charged.
+    # Budget fully exhausted elsewhere: the recheck still passes — it needs no
+    # source statement at all — and refuses nothing.
     full = QueryExecutionBudget(limits)
     full.charge_statement("native:conn-probe-budget:control")
     with ExitStack() as stack:
         relation = providers.resolve_integrated(db, admin_user, [("d", binding)],
                                                 limits, stack, recheck_only=True,
                                                 execution_budget=full)["d"]
-    with pytest.raises(QueryError) as caught:
-        relation.recheck()
-    assert caught.value.extra["budget"] == "execution_source_statements_limit"
-    assert probes == []  # no SELECT 1 left the budget
-    assert full.layer_totals()["native:conn-probe-budget:control"]["statements"] == 1
-
-    # Room available: exactly one probe per unique source, charged as one
-    # control statement with zero rows and zero bytes.
-    room = QueryExecutionBudget(QueryLimits(execution_source_statements_limit=4))
-    with ExitStack() as stack:
-        relation = providers.resolve_integrated(db, admin_user, [("d", binding)],
-                                                limits, stack, recheck_only=True,
-                                                execution_budget=room)["d"]
     relation.recheck()
-    relation.recheck()  # probe memoized per fetch cell: still one round trip
-    assert probes == ["conn-probe-budget"]
-    assert room.layer_usage("native:conn-probe-budget:control") == {
-        "rows": 0, "bytes": 0, "statements": 1, "countChecks": 0}
+    relation.recheck()
+    assert full.layer_totals()["native:conn-probe-budget:control"]["statements"] == 1
 
 
 def test_configured_limits_pick_up_new_dimensions():

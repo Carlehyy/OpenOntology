@@ -91,6 +91,32 @@ def asset_cdc_status(asset_id: str, db: Session = Depends(get_db),
     return service.cdc_status(db, user, asset_id)
 
 
+# 本地副本控制面：status 只读（无源端 IO）；rebuild/preflight 为 admin/editor。
+# 读走平台副本（active_run 指针），错误为稳定安全码，不携带凭据或驱动原文。
+@router.get("/{asset_id}/replica")
+def asset_replica_status(asset_id: str, db: Session = Depends(get_db),
+                         user=Depends(get_current_user)):
+    return service.replica_status(db, user, asset_id)
+
+
+@router.post("/{asset_id}/replica/rebuild", status_code=202)
+def rebuild_replica(asset_id: str, db: Session = Depends(get_db),
+                    user=Depends(get_current_user)):
+    return service.request_replica_rebuild(db, user, asset_id)
+
+
+@router.post("/{asset_id}/replica/stop", status_code=202)
+def stop_replica(asset_id: str, db: Session = Depends(get_db),
+                 user=Depends(get_current_user)):
+    return service.stop_replica(db, user, asset_id)
+
+
+@router.post("/{asset_id}/replica/preflight")
+def replica_preflight(asset_id: str, db: Session = Depends(get_db),
+                      user=Depends(get_current_user)):
+    return service.replica_preflight(db, user, asset_id)
+
+
 @router.get("/{asset_id}/rows")
 def rows(asset_id: str, limit: int = Query(100, ge=1, le=1000),
          db: Session = Depends(get_db), user=Depends(get_current_user)):

@@ -19,6 +19,8 @@ from app.data_channel.integrated import cdc_control
 from app.data_channel.connections.models import Connection
 from app.data_channel.datasets.models import Dataset, DatasetVersion, IntegratedSyncRun
 from app.data_channel.integrated import fields
+from app.data_channel.integrated import replica_control
+from app.data_channel.integrated import replica_read
 from app.data_channel.integrated.contracts import (
     DBX_COMMIT, DBX_VERSION, JsonText, RegisterAsset, RowMutation, SourceReference,
     SourceSchemaRequest, digest, fail, row_token, wire_value,
@@ -26,9 +28,11 @@ from app.data_channel.integrated.contracts import (
 from app.data_channel.integrated.wire_decode import _decode
 from app.data_channel.integrated.fields import FieldConfigError
 from app.data_channel.integrated.models import IntegratedAsset, IntegratedAssetFieldConfig, IntegratedMutation
+from app.data_channel.integrated.replica_models import IntegratedReplica, IntegratedReplicaRun
 from app.data_channel.integrated.native import (
-    authorize, check_transactional_table, get_asset, open_read_scope, open_snapshot,
+    authorize, check_transactional_table, get_asset,
     normalize_row, reflect, resolve_metadata, source_engine,
+    source_token_select, token_float32_columns, token_json_columns,
 )
 from app.shared.encryption import encrypt
 
@@ -182,9 +186,14 @@ def asset_dto(db, user, asset, *, dbx_status=None, raw_config=_UNSET):
               "primary_key": projection["primary_key"] if projection else asset.schema_json["primary_key"],
               "schema_fingerprint": asset.schema_fingerprint, "writable": asset.writable,
               "capabilities": {"read": True, "write": write, "sync": user.role in {"admin", "editor"},
-                             "dbx_metadata": status.get("available") is True},
+                               "dbx_metadata": status.get("available") is True,
+                               # Stopping replication is owner/admin only; keep
+                               # the UI from offering an action the server
+                               # would reject for a non-owner editor.
+                               "stop": user.role == "admin" or user.id == asset.created_by},
               "backends": {"snapshot": "native", "mutation": "native", "metadata": "dbx"},
               "dbx": status, "status": "registered",
+              "replica": replica_read.replica_status_dto(db, asset),
               "latest_version_id": dataset.latest_version_id if dataset else None,
               "created_at": asset.created_at, "updated_at": asset.updated_at}
     if projection is not None:
@@ -402,6 +411,12 @@ def register_asset(db, user, body):
         # commit atomically; no partial registration can survive a failure.
         db.flush()
         db.add(asset)
+        # Registration is incomplete without a local read replica: the durable
+        # replica row and its queued rebuild run join the same transaction, and
+        # the replication runtime reconciles queued runs (no extra dispatch
+        # channel). A read lane that cannot exist yet is never advertised.
+        replica_control.ensure_replica(db, asset)
+        replica_control.request_rebuild(db, asset)
         db.commit()
     except IntegrityError:
         db.rollback()
@@ -416,6 +431,7 @@ def refresh_schema(db, user, asset_id):
         fail(403, "ASSET_OWNER_REQUIRED", "Only the owner or admin may refresh schema")
     connection = _connection(db, asset.connection_id)
     schema, fingerprint = _verified_source_schema(connection, asset.schema_name, asset.table_name)
+    previous_fingerprint = asset.schema_fingerprint
     raw_config = raw_config_of(asset)
     normalized = None
     if raw_config is not None:
@@ -438,6 +454,17 @@ def refresh_schema(db, user, asset_id):
     # Versions retain their own frozen schema. Do not reinterpret prior versions.
     if dataset.latest_version_id is None:
         dataset.schema_json = schema
+    # Schema drift invalidates the current replica: its typed table no longer
+    # matches the asset fingerprint. Mark rebuild_required so the durable
+    # state refuses reads (the old table must never keep serving as normal)
+    # and queue a fenced rebuild in the same transaction as the change.
+    if fingerprint != previous_fingerprint:
+        replica_control.ensure_replica(db, asset)
+        replica = db.get(IntegratedReplica, asset.id)
+        replica_control.request_rebuild(db, asset)
+        if replica is not None and replica.active_run_id:
+            replica_control.mark_unavailable(
+                db, asset.id, error_code="REPLICA_SCHEMA_CHANGED", rebuild_required=True)
     db.commit()
     return asset_dto(db, user, asset)
 
@@ -530,9 +557,34 @@ def decommission_asset(db, user, asset_id):
         if cdc_blockers:
             detail["cdc"] = cdc_blockers
         raise HTTPException(409, detail)
-    # 零依赖：先清已停流确认的 CDC 控制行（asset FK RESTRICT），再删资产
-    # （dataset FK RESTRICT），最后删其专属 integrated 数据集。
+    # 零依赖：先清已停流确认的 CDC 控制行（asset FK RESTRICT）。
     cdc_control.asset_cleanup(db, asset.id)
+    from app.data_channel.integrated import replica_cleanup
+
+    # The executor must have detached the stopped asset and cleaned its private
+    # relations before this transaction can remove operational metadata.
+    replica_cleanup.purge_asset(db, asset.id)
+    replica = db.get(IntegratedReplica, asset.id)
+    replica_runs = db.scalars(sa.select(IntegratedReplicaRun.id).where(
+        IntegratedReplicaRun.asset_id == asset.id).limit(1)).all()
+    if replica is not None or replica_runs:
+        active = replica.active_run_id if replica is not None else None
+        pending = replica.pending_run_id if replica is not None else None
+        raise HTTPException(409, {
+            "code": "REPLICA_CLEANUP_REQUIRED",
+            "message": (
+                "该资产仍有本地读副本（物理副本表与运行记录），不能直接注销。"
+                "请先走副本受控下线（停止同步并清理副本运行），再重试注销。"
+            ),
+            "replica": {
+                "status": replica.status if replica is not None else None,
+                "generation": replica.generation if replica is not None else None,
+                "active_run_id": active,
+                "pending_run_id": pending,
+                "run_rows": db.scalar(sa.select(sa.func.count()).select_from(
+                    IntegratedReplicaRun).where(IntegratedReplicaRun.asset_id == asset.id)),
+            },
+        })
     # 不触碰连接本体；连接注销由 DELETE /connections/{id} 的守卫独立裁决。
     db.delete(asset)
     db.flush()
@@ -553,33 +605,74 @@ def cdc_status(db, user, asset_id):
 
 
 def preview_rows(db, user, asset_id, limit=100):
-    if type(limit) is not int or not 1 <= limit <= 1000:
-        fail(422, "INVALID_PREVIEW_LIMIT", "Preview limit must be between 1 and 1000")
-    with open_read_scope(db, user, [asset_id]) as scope:
-        table = scope.tables[asset_id]
-        statement = sa.select(table)
-        if table.primary_key.columns:
-            statement = statement.order_by(*table.primary_key.columns)
-        statement = statement.limit(limit)
-        meta = scope.meta[asset_id]
-        projection = meta.get("projection")
-        rows = []
-        for batch in scope.iter_batches(statement):
-            for row in batch:
-                # Tokens bind to the FULL physical row under the physical
-                # fingerprint, so a later locked re-read recomputes the
-                # identical token even when the response is projected.
-                token = row_token(row, meta["schema_fingerprint"])
-                if projection is None:
-                    values = row
-                else:
-                    values = {column["name"]: row[column["source_key"]]
-                              for column in projection["columns"]}
-                rows.append({"values": wire_value(values), "row_token": token})
-        return {"rows": rows,
-                "columns": projection["columns"] if projection else meta["columns"],
-                "source_state": {**scope.provenance, **scope.completion},
-                "preview": True, "limit": limit}
+    # 本地副本读取：无源端 IO，源网不可达不影响预览；行令牌与源读同一
+    # 命名空间（store 规格化的源码值 + 资产物化指纹），受控写入的 CAS
+    # 语义不受影响。未就绪/需重建副本按结构化错误拒绝，不静默回退源读。
+    return replica_read.preview_rows(db, user, asset_id, limit)
+
+
+def replica_status(db, user, asset_id):
+    """副本运行状态（只读控制面，无源端 IO、无凭据）。
+
+    读授权与资产详情一致（get_asset）；契约见 ``replica_read.replica_status_dto``：
+    status/complete/row_count/applied_at/coverage_confirmed_at/last_error_code/
+    generation/run_id，complete 仅在 active 运行存在且可读时为真。
+    """
+    asset = get_asset(db, user, asset_id)
+    dto = replica_read.replica_status_dto(db, asset)
+    if dto is None:
+        fail(404, "REPLICA_NOT_REGISTERED", "The asset has no local replica")
+    return {"asset_id": asset.id, **dto}
+
+
+def request_replica_rebuild(db, user, asset_id):
+    """请求重建当前副本（admin/editor）：复用 request_rebuild 的围栏生命周期。
+
+    与旧 /sync 的显式版本语义并存：重建只替换当前副本，不生成数据集版本。
+    """
+    authorize(db, user, write=True)
+    asset = get_asset(db, user, asset_id)
+    try:
+        run = replica_control.request_rebuild(db, asset)
+    except replica_control.ReplicaControlError as exc:
+        fail(503 if exc.code == "REPLICA_RUN_MISSING" else 404,
+             exc.code, "The replica rebuild could not be requested")
+    db.commit()
+    replica = db.get(IntegratedReplica, asset.id)
+    return {"asset_id": asset.id, "run_id": run.id, "generation": run.generation,
+            "status": run.status, "replica_status": replica.status if replica else None,
+            "complete": False}
+
+
+def stop_replica(db, user, asset_id):
+    authorize(db, user, write=True)
+    asset = get_asset(db, user, asset_id)
+    if user.role != "admin" and asset.created_by != user.id:
+        fail(403, "ASSET_OWNER_REQUIRED", "Only the owner or admin may stop replication")
+    # 停止是既存副本的控制动作；没有副本行时不能靠 ensure 隐式创建再停止。
+    if db.get(IntegratedReplica, asset.id) is None:
+        fail(404, "REPLICA_NOT_REGISTERED", "The asset has no local replica")
+    replica = replica_control.request_stop(db, asset)
+    db.commit()
+    return {"asset_id": asset.id, "status": replica.status,
+            "cleanup_pending": True}
+
+
+def replica_preflight(db, user, asset_id):
+    """源复制能力预检（admin/editor）：复用 CDC preflight，安全错误码。
+
+    返回稳定错误码（cdc_runtime.CODE_*），绝不携带驱动原文、主机或凭据；
+    预检不做任何持久化。
+    """
+    authorize(db, user, write=True)
+    asset = get_asset(db, user, asset_id)
+    connection = _connection(db, asset.connection_id)
+    from app.data_channel.integrated import replica_connector
+    try:
+        replica_connector.preflight(connection, [asset])
+    except replica_connector.ConnectorError as exc:
+        return {"ok": False, "code": exc.code}
+    return {"ok": True}
 
 
 def versions(db, user, asset_id):
@@ -665,9 +758,21 @@ def get_sync_run(db, user, asset_id, run_id):
     return sync_run_dto(run)
 
 
+def _receipt_applied_at(value):
+    """Receipt persistence time as an aware UTC ISO string (None stays None)."""
+    if value is None:
+        return None
+    aware = value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+    return aware.astimezone(timezone.utc).isoformat()
+
+
 def receipt(record, *, replayed=False):
     return {"id": record.id, "asset_id": record.asset_id, "status": record.status,
             "operation": record.operation, "affected_rows": record.affected_rows,
+            # Written after the source commit and before the platform commit;
+            # the frontend uses this platform clock as the replica coverage
+            # baseline instead of its own local clock.
+            "applied_at": _receipt_applied_at(record.completed_at),
             "error_code": record.error_code, "replayed": replayed, **record.result_json}
 
 
@@ -707,7 +812,8 @@ def mutate_row(db, user, asset_id, operation, body):
         # namespace and must never be written through the logical projection.
         fail(422, "UNKNOWN_COLUMN", "Mutation contains an unknown column")
     if operation in {"update", "delete"} and not body.expected_row_token:
-        fail(422, "EXPECTED_ROW_TOKEN_REQUIRED", "Updates/deletes require the row token from a source read")
+        fail(422, "EXPECTED_ROW_TOKEN_REQUIRED",
+             "Updates/deletes require the row token from a local replica read")
     if operation == "update" and not body.values:
         fail(422, "EMPTY_UPDATE", "An update must change at least one non-primary-key column")
     if operation == "delete" and body.values:
@@ -766,7 +872,15 @@ def mutate_row(db, user, asset_id, operation, body):
         values = {to_physical.get(name, name): _decode(table.c[to_physical.get(name, name)], value)
                   for name, value in body.values.items()}
         condition = sa.and_(*(table.c[name] == value for name, value in key.items()))
-        existing = conn.execute(sa.select(table).where(condition).with_for_update()).mappings().first()
+        token_columns = token_json_columns(table)
+        float32_columns = token_float32_columns(table, conn.dialect.name)
+        # Token reads cast float-family columns to DOUBLE: the text protocol's
+        # FLOAT/DOUBLE rendering is lossy, while the local replica stores the
+        # exact Debezium value. This changes only the CAS token, never the
+        # source write payload or the write table's physical types.
+        token_statement = source_token_select(table)
+        existing = conn.execute(token_statement.where(condition)
+                                .with_for_update()).mappings().first()
         if operation == "insert":
             if existing is not None:
                 fail(409, "ROW_ALREADY_EXISTS", "The requested primary key already exists")
@@ -774,7 +888,9 @@ def mutate_row(db, user, asset_id, operation, body):
         else:
             if existing is None:
                 fail(409, "ROW_NOT_FOUND", "The row no longer exists")
-            if row_token(normalize_row(existing, table), fingerprint) != body.expected_row_token:
+            if (row_token(normalize_row(existing, table), fingerprint,
+                          json_columns=token_columns,
+                          float32_columns=float32_columns) != body.expected_row_token):
                 fail(409, "ROW_CONFLICT", "The source row changed since it was read")
             if operation == "update":
                 result = conn.execute(sa.update(table).where(condition).values(**values))
@@ -791,12 +907,14 @@ def mutate_row(db, user, asset_id, operation, body):
                 result.close()
             except Exception:
                 pass
-        remaining = conn.execute(sa.select(table).where(condition)).mappings().one_or_none()
+        remaining = conn.execute(token_statement.where(condition)).mappings().one_or_none()
         if (remaining is not None) == (operation == "delete"):
             fail(409, "SOURCE_WRITE_NOT_APPLIED", "Source row does not match the requested operation")
         if operation != "delete":
             updated = normalize_row(remaining, table)
-            record.result_json = {"row_token": row_token(updated, fingerprint)}
+            record.result_json = {"row_token": row_token(
+                updated, fingerprint, json_columns=token_columns,
+                float32_columns=float32_columns)}
         committing = True
         transaction.commit()
         record.status = "applied"

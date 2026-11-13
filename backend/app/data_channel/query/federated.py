@@ -1484,10 +1484,8 @@ class MemoryExecutor:
             state["alias"] = alias
             source_states.append(state)
         connections = {r.connection_key for r in self.relations.values()}
-        consistency = ("immutable_versions"
-                       if all(s.get("consistency") == "immutable_version" for s in source_states)
-                       else "single_source_snapshot" if len(connections) == 1
-                       else "cross_source_non_atomic")
+        from .providers import composed_consistency
+        consistency = composed_consistency(source_states, connections)
         if avg_semantics:
             plan["avgSemantics"] = avg_semantics
         return MemoryResult(columns=columns, rows=rows, row_bytes=row_bytes,

@@ -438,7 +438,9 @@ jobs:
 
   verify-docker-build:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # Includes the real replica PG/MySQL acceptance after the image canaries;
+    # the extra wall clock is bounded by the isolated 7 GB runner.
+    timeout-minutes: 45
     # 前端镜像改为预构建形态（COPY dist），需要 verify-frontend 产出的 dist；
     # 该依赖仍早于关键路径上的 verify-backend，不延长整体墙钟。
     needs: [changes, verify-frontend]
@@ -589,6 +591,21 @@ jobs:
         with:
           name: kaneo-canary-${{ github.run_id }}
           path: .artifacts/kaneo-canary/report.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Integrated replica acceptance (real PG/MySQL)
+        env: *service-canary-env
+        run: |
+          set -Eeuo pipefail
+          bash scripts/ci/test-integrated-replica-acceptance.sh
+
+      - name: Upload integrated replica acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integrated-replica-acceptance-${{ github.run_id }}
+          path: .artifacts/ci-replicaacceptance
           if-no-files-found: warn
           retention-days: 14
 

@@ -7,6 +7,15 @@
 # 端口、不挂载 docker.sock；Debezium HTTP sink 的接收端只监听本容器
 # 127.0.0.1 临时端口，签名密钥每运行期随机生成，不来自任何环境变量。
 # 运行细节见 docs/operations/deployment.md 的「集成 CDC 执行器」一节。
+#
+# 本覆盖层只定义 integrated_cdc_executor。集成副本执行器
+# （integrated_replica_executor）定义在标准 docker-compose.prod.yml /
+# docker-compose.local.yml 中并随标准栈自动启动；Compose 对同名 service
+# 是静默合并而非报错，任何覆盖层都不得再定义同名服务，否则会以半个文件的
+# 默认值悄悄改写标准定义（test-deploy-guards.sh 拒绝）。两个执行器共用
+# backend/Dockerfile.cdc 镜像（含 replica-smt.jar，对 CDC 子进程 classpath
+# 是未被引用的多余 jar，不改变 CDC/Sentinel 行为），状态根与卷各自独立
+# （/var/lib/openontology-cdc 与 /var/lib/openontology-replicas）。
 services:
   integrated_cdc_executor:
     build:

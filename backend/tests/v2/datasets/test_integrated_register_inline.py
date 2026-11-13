@@ -6,7 +6,9 @@ that must hold regardless of driver: exactly-one source references, atomic
 registration, encrypted inline credentials that never echo, physical truth
 kept pristine behind the logical projection, and full-row token continuity.
 """
+from datetime import datetime, timezone
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 import sqlalchemy as sa
@@ -491,26 +493,53 @@ def _live_source(monkeypatch, schema, fingerprint):
     return engine, table
 
 
+def _published_replica(db, asset, rows):
+    """Drive one fenced run into a published local replica with wire rows."""
+    from app.data_channel.integrated import replica_control, replica_store
+
+    run = replica_control.request_rebuild(db, asset)
+    token = replica_control.claim_run(db, run.id)
+    schema = replica_store.build_replica_schema(
+        run.id, run.schema_json, schema_fingerprint=run.schema_fingerprint)
+    replica_store.create_table(db.connection(), schema)
+    if rows:
+        replica_store.write_batch(db.connection(), schema, rows)
+    db.commit()
+    replica_control.begin_load(db, run.id, token, capture_id=str(uuid4()),
+                               capture_start={"lsn": 1})
+    replica_control.finish_load(db, run.id, token, completion={
+        "complete": True, "row_count": len(rows), "expected_rows": len(rows),
+        "schema_fingerprint": run.schema_fingerprint, "snapshot_id": "snap-inline"})
+    db.commit()
+    replica_control.publish_run(db, run.id, token, applied_position={"lsn": 2},
+                                coverage_confirmed_at=datetime.now(timezone.utc),
+                                row_count=len(rows))
+    db.commit()
+    return run
+
+
 def test_preview_projects_logical_columns_with_full_physical_tokens(db, admin_user, monkeypatch):
     asset, schema, fingerprint = _configured_asset(db, admin_user)
-    engine, table = _live_source(monkeypatch, schema, fingerprint)
-    try:
-        with engine.connect() as conn:
-            conn.execute(table.insert(), {"id": 7, "customer_name": "alice", "secret_note": "hidden"})
-            conn.commit()
-        preview = service.preview_rows(db, admin_user, asset.id, 10)
-        assert len(preview["rows"]) == 1
-        row = preview["rows"][0]
-        # Values are projected: only logical columns, unmapped stay invisible.
-        assert set(row["values"]) == {"row_id", "customer"}
-        assert row["values"] == {"row_id": 7, "customer": "alice"}
-        # The token still binds to the FULL physical row + physical fingerprint.
-        from app.data_channel.integrated.contracts import row_token
-        assert row["row_token"] == row_token(
-            {"id": 7, "customer_name": "alice", "secret_note": "hidden"}, fingerprint)
-        assert [c["name"] for c in preview["columns"]] == ["row_id", "customer"]
-    finally:
-        engine.dispose()
+    # Preview reads the local replica: the projection semantics are unchanged,
+    # and no source dial is needed to serve them.
+    def forbidden(*args, **kwargs):
+        raise AssertionError("preview must read the local replica, never the source")
+
+    monkeypatch.setattr(native, "open_read_scope", forbidden)
+    monkeypatch.setattr(native, "source_engine", forbidden)
+    _published_replica(db, asset, [
+        {"id": 7, "customer_name": "alice", "secret_note": "hidden"}])
+    preview = service.preview_rows(db, admin_user, asset.id, 10)
+    assert len(preview["rows"]) == 1
+    row = preview["rows"][0]
+    # Values are projected: only logical columns, unmapped stay invisible.
+    assert set(row["values"]) == {"row_id", "customer"}
+    assert row["values"] == {"row_id": 7, "customer": "alice"}
+    # The token still binds to the FULL physical row + physical fingerprint.
+    from app.data_channel.integrated.contracts import row_token
+    assert row["row_token"] == row_token(
+        {"id": 7, "customer_name": "alice", "secret_note": "hidden"}, fingerprint)
+    assert [c["name"] for c in preview["columns"]] == ["row_id", "customer"]
 
 
 def test_configured_mutations_use_logical_names_and_physical_tokens(db, admin_user, monkeypatch):
@@ -543,7 +572,11 @@ def test_configured_mutations_use_logical_names_and_physical_tokens(db, admin_us
                 key={"id": 9}, expected_row_token="t", idempotency_key="cfg-pk"))
         assert exc.value.detail["code"] == "COMPLETE_PRIMARY_KEY_REQUIRED"
 
-        # Token continuity: preview token (full physical row) authorizes update.
+        # Token continuity: a preview token read from the local replica (the
+        # same full-physical-row namespace as a source read) authorizes the
+        # source CAS update.
+        _published_replica(db, asset, [
+            {"id": 9, "customer_name": "bob", "secret_note": None}])
         preview = service.preview_rows(db, admin_user, asset.id, 10)
         token = preview["rows"][0]["row_token"]
         updated = service.mutate_row(db, admin_user, asset.id, "update", RowMutation(
@@ -690,42 +723,47 @@ def test_provider_projection_and_cursor_context_follow_logical_config(
     from app.data_channel.query.providers import resolve_integrated
 
     asset, schema, fingerprint = _configured_asset(db, admin_user)
-    engine, table = _live_source(monkeypatch, schema, fingerprint)
-    try:
-        with ExitStack() as stack:
-            relation = resolve_integrated(
-                db, admin_user, [("s", Binding(kind="integrated", asset_id=asset.id))],
-                QueryLimits(), stack, recheck_only=recheck_only)["s"]
-            assert set(relation.columns) == {"row_id", "customer"}
-            assert set(relation.expressions) == {"row_id", "customer"}
-            assert (relation.batches is None) is recheck_only
-            compiled = compile_query(parse("from s as s | fields s.row_id, s.customer"),
-                                     {"s": relation}, {})
-            assert [column.name for column in compiled.statement.selected_columns] == [
-                "row_id", "customer"]
-            for hidden in ("id", "customer_name", "secret_note"):
-                with pytest.raises(QueryError) as exc:
-                    compile_query(parse(f"from s as s | fields s.{hidden}"), {"s": relation}, {})
-                assert exc.value.code == "unknown_field"
-
-            before = native.resolve_metadata(db, admin_user, [asset.id])[asset.id]
-            cached = db.get(IntegratedAssetFieldConfig, asset.id)
-            with Session(bind=db.get_bind()) as other:
-                other.execute(sa.update(IntegratedAssetFieldConfig).where(
-                    IntegratedAssetFieldConfig.asset_id == asset.id).values(field_config=[
-                        {"source_key": "id", "name": "row_id", "display_name": None}]))
-                other.commit()
-            after = native.resolve_metadata(db, admin_user, [asset.id])[asset.id]
-            assert cached.field_config == after["projection"]["field_config"]
-            assert after["schema_fingerprint"] == before["schema_fingerprint"]
-            assert after["auth_fingerprint"] != before["auth_fingerprint"]
-            monkeypatch.setattr(native, "probe_source", lambda *_: pytest.fail(
-                "A changed logical projection must reject delivery before a source probe"))
+    _published_replica(db, asset, [
+        {"id": 2, "customer_name": "bob", "secret_note": "h2"}])
+    monkeypatch.setattr(native, "open_read_scope", lambda *_: pytest.fail(
+        "integrated relations are platform replica reads; no source scope"))
+    monkeypatch.setattr(native, "probe_source", lambda *_: pytest.fail(
+        "integrated relations never probe the source"))
+    with ExitStack() as stack:
+        relation = resolve_integrated(
+            db, admin_user, [("s", Binding(kind="integrated", asset_id=asset.id))],
+            QueryLimits(), stack, recheck_only=recheck_only)["s"]
+        assert set(relation.columns) == {"row_id", "customer"}
+        assert set(relation.expressions) == {"row_id", "customer"}
+        # The relation is a platform replica read in both call shapes.
+        assert relation.batches is None and relation.platform is True
+        assert relation.connection_key == "platform"
+        assert relation.state["consistency"] == "replica_snapshot"
+        compiled = compile_query(parse("from s as s | fields s.row_id, s.customer"),
+                                 {"s": relation}, {})
+        assert [column.name for column in compiled.statement.selected_columns] == [
+            "row_id", "customer"]
+        rows = db.execute(compiled.statement, compiled.params).mappings().all()
+        assert [dict(row) for row in rows] == [{"row_id": 2, "customer": "bob"}]
+        for hidden in ("id", "customer_name", "secret_note"):
             with pytest.raises(QueryError) as exc:
-                relation.recheck()
-            assert (exc.value.status, exc.value.code) == (409, "query_context_changed")
-    finally:
-        engine.dispose()
+                compile_query(parse(f"from s as s | fields s.{hidden}"), {"s": relation}, {})
+            assert exc.value.code == "unknown_field"
+
+        before = native.resolve_metadata(db, admin_user, [asset.id])[asset.id]
+        cached = db.get(IntegratedAssetFieldConfig, asset.id)
+        with Session(bind=db.get_bind()) as other:
+            other.execute(sa.update(IntegratedAssetFieldConfig).where(
+                IntegratedAssetFieldConfig.asset_id == asset.id).values(field_config=[
+                    {"source_key": "id", "name": "row_id", "display_name": None}]))
+            other.commit()
+        after = native.resolve_metadata(db, admin_user, [asset.id])[asset.id]
+        assert cached.field_config == after["projection"]["field_config"]
+        assert after["schema_fingerprint"] == before["schema_fingerprint"]
+        assert after["auth_fingerprint"] != before["auth_fingerprint"]
+        with pytest.raises(QueryError) as exc:
+            relation.recheck()
+        assert (exc.value.status, exc.value.code) == (409, "query_context_changed")
 
 
 @pytest.mark.parametrize("load_config", [False, True])

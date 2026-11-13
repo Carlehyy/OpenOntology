@@ -262,6 +262,103 @@ def normalize_row(row, columns):
     return result
 
 
+_TOKEN_EXACT_PREFIX = "__oo_token_exact_"
+
+
+def token_json_columns(table) -> set[str]:
+    """Source names whose reflected type is JSON (never value-sniffed)."""
+    columns = table.c if hasattr(table, "c") else table
+    return {column.name for column in columns
+            if isinstance(column.type, sa.JSON)}
+
+
+def token_float32_columns(table, dialect_name: str) -> set[str]:
+    """Single-precision source columns (MySQL FLOAT, PostgreSQL REAL)."""
+    columns = table.c if hasattr(table, "c") else table
+    if dialect_name == "mysql":
+        return {column.name for column in columns
+                if isinstance(column.type, mysql.FLOAT)
+                and not isinstance(column.type, mysql.DOUBLE)}
+    if dialect_name == "postgresql":
+        return {column.name for column in columns
+                if isinstance(column.type, sa.REAL)}
+    return set()
+
+
+def replica_token_float32_columns(columns, dialect_name: str) -> set[str]:
+    """Single-precision columns from a replica manifest's typed source_type."""
+    result = set()
+    for column in columns:
+        spec = getattr(column, "spec", None)
+        source_name = getattr(column, "source_name", None)
+        if spec is None or source_name is None or spec.type != "float":
+            continue
+        source_type = str(spec.source_type or "").strip().upper()
+        if ((dialect_name == "mysql" and source_type == "FLOAT")
+                or (dialect_name == "postgresql" and source_type == "REAL")):
+            result.add(source_name)
+    return result
+
+
+def _token_exact_aliases(table) -> dict[str, str]:
+    """Deterministic exact-value aliases that cannot collide with real columns."""
+    taken = {column.name for column in table.columns}
+    aliases = {}
+    for index, column in enumerate(table.columns):
+        if not isinstance(column.type, sa.Float):
+            continue
+        alias = f"{_TOKEN_EXACT_PREFIX}{index}"
+        while alias in taken:
+            alias += "_"
+        taken.add(alias)
+        aliases[column.name] = alias
+    return aliases
+
+
+def _token_expression(column):
+    # Source text protocol rounds MySQL FLOAT to FLT_DIG and MySQL DOUBLE to a
+    # Decimal with a driver-side scale; PostgreSQL REAL prints the shortest
+    # float4. CAST AS DOUBLE returns the exact stored IEEE value (float32
+    # widened exactly, float64 unchanged), matching the Debezium FLOAT32/64
+    # value the local replica stores. This is a token-read transform only.
+    if isinstance(column.type, sa.Float):
+        return sa.cast(column, sa.Double())
+    return column
+
+
+def source_token_select(table, *, include_source: bool = False) -> Select:
+    """SELECT for a source row-token read.
+
+    ``include_source`` adds the raw columns beside exact float aliases so a
+    caller that also displays/compares source values keeps the original wire
+    shape; the token row must be rebuilt with :func:`token_row_from_source`.
+    Without it every returned column is already the exact token value.
+    """
+    aliases = _token_exact_aliases(table)
+    selected = []
+    for index, column in enumerate(table.columns):
+        expression = _token_expression(column)
+        if include_source:
+            selected.append(column.label(column.name))
+            if expression is not column:
+                selected.append(expression.label(aliases[column.name]))
+        else:
+            selected.append(expression.label(column.name))
+    return sa.select(*selected)
+
+
+def token_row_from_source(row, table, exact_aliases: dict[str, str]) -> dict:
+    result = {}
+    for column in table.columns:
+        label = exact_aliases.get(column.name)
+        result[column.name] = row[label if label is not None else column.name]
+    return result
+
+
+def source_token_exact_aliases(table) -> dict[str, str]:
+    return _token_exact_aliases(table)
+
+
 MAX_SOURCE_BATCH_BYTES = 16 * 1024**2
 
 

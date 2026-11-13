@@ -179,7 +179,7 @@ if ! grep -Fq 'deploy/runtime_source_attestation.py' "$ARCHIVE_SCRIPT" \
   exit 1
 fi
 attestation_call_line="$(grep -nF 'if ! verify_runtime_source_attestation; then' "$DEPLOY_SCRIPT" | head -n1 | cut -d: -f1)"
-readiness_line="$(grep -nF 'log "waiting for backend, pipeline executor and frontend readiness' "$DEPLOY_SCRIPT" | head -n1 | cut -d: -f1)"
+readiness_line="$(grep -nF 'log "waiting for backend, pipeline executor, replica executor and frontend readiness' "$DEPLOY_SCRIPT" | head -n1 | cut -d: -f1)"
 deployment_succeeded_line="$(grep -nF 'log "deployment succeeded"' "$DEPLOY_SCRIPT" | head -n1 | cut -d: -f1)"
 if [ -z "$attestation_call_line" ] || [ -z "$readiness_line" ] \
     || [ -z "$deployment_succeeded_line" ] \
@@ -269,7 +269,7 @@ post_migration_stop_count="$(
 )"
 if [ "$post_migration_stop_count" -ne 5 ] \
     || ! grep -Fq \
-      'if ! compose stop --timeout 30 frontend pipeline_executor backend; then' \
+      'if ! compose stop --timeout 30 frontend pipeline_executor backend integrated_replica_executor; then' \
       "$DEPLOY_SCRIPT"; then
   printf 'post-migration startup, readiness, or attestation failures must stop the new runtime\n' >&2
   exit 1
@@ -355,6 +355,88 @@ if ! grep -Fq '      - dbx_bridge' <<<"$backend_block"; then
 fi
 if ! grep -Fq 'configure_integrated_dbx' "$DEPLOY_SCRIPT"     || ! grep -Fq 'INTEGRATED_DBX_COMMIT_PIN="0137e0cbc8b663da5a17ec424c6d47e4e5570ead"'       "$DEPLOY_SCRIPT"     || ! grep -Fq 'start_integrated_dbx_if_needed' "$DEPLOY_SCRIPT"     || ! grep -Fq 'INTEGRATED_DBX_PASSWORD' "$DEPLOY_SCRIPT"; then
   printf 'deploy must configure/pin/preflight dbx and redact its password\n' >&2
+  exit 1
+fi
+
+# Integrated replica executor: defined once in the standard local/prod files and
+# started by the standard stack (no profiles gate — the approved plan mandates
+# auto-start), host-port free, docker.sock free, env_file free (bootstrap
+# secrets in .env stay out), backed by the dedicated single-writer state volume,
+# with capacity knobs pinned to the honest default (2 concurrent captures).
+# Compose silently merges same-name services, so the CDC overlay must never
+# redefine the service.
+replica_block="$(awk -v service=integrated_replica_executor '
+  $0 == "  " service ":" { in_service = 1 }
+  in_service && NR > 1 && /^  (#|[A-Za-z0-9_-]+:)/ && $0 != "  " service ":" { exit }
+  in_service { print }
+' "$PROD_COMPOSE")"
+local_replica_block="$(awk -v service=integrated_replica_executor '
+  $0 == "  " service ":" { in_service = 1 }
+  in_service && NR > 1 && /^  (#|[A-Za-z0-9_-]+:)/ && $0 != "  " service ":" { exit }
+  in_service { print }
+' "$LOCAL_COMPOSE")"
+if [ -z "$replica_block" ] || [ -z "$local_replica_block" ] \
+    || grep -Eq '^[[:space:]]+profiles:' <<<"$replica_block" \
+    || grep -Eq '^[[:space:]]+profiles:' <<<"$local_replica_block" \
+    || grep -Eq '^[[:space:]]+ports:' <<<"$replica_block" \
+    || grep -Eq '^[[:space:]]+ports:' <<<"$local_replica_block" \
+    || grep -Fq 'docker.sock' <<<"$replica_block" \
+    || grep -Fq 'docker.sock' <<<"$local_replica_block" \
+    || grep -Eq '^[[:space:]]+env_file:' <<<"$replica_block" \
+    || grep -Eq '^[[:space:]]+env_file:' <<<"$local_replica_block" \
+    || grep -Eq '^[[:space:]]+container_name:' <<<"$replica_block" \
+    || grep -Eq '^[[:space:]]+container_name:' <<<"$local_replica_block" \
+    || ! grep -Fq 'REPLICA_MAX_CAPTURES=2' "$REPO_ROOT/.env.example" \
+    || ! grep -Fq 'command: python -m app.data_channel.integrated.replica_executor' <<<"$replica_block" \
+    || ! grep -Fq 'command: python -m app.data_channel.integrated.replica_executor' <<<"$local_replica_block" \
+    || ! grep -Fq 'REPLICA_STATE_ROOT: /var/lib/openontology-replicas' <<<"$replica_block" \
+    || ! grep -Fq 'integrated_replica_state:/var/lib/openontology-replicas' <<<"$replica_block" \
+    || ! grep -Fq 'REPLICA_MAX_CAPTURES: ${REPLICA_MAX_CAPTURES:-2}' <<<"$replica_block" \
+    || ! grep -Fq 'mem_limit: ${REPLICA_EXECUTOR_MEM_LIMIT:-3g}' <<<"$replica_block" \
+    || ! grep -Fq '  integrated_replica_state:' "$PROD_COMPOSE" \
+    || ! grep -Fq '  integrated_replica_state:' "$LOCAL_COMPOSE" \
+    || ! grep -Fq 'check_replica_executor' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq '&& check_replica_executor' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq 'REPLICA_MAX_CAPTURES must be within 1..64' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq 'compose stop --timeout 30 frontend pipeline_executor backend integrated_replica_executor' "$DEPLOY_SCRIPT" \
+    || grep -Fq 'integrated_replica_executor:' "$REPO_ROOT/docker-compose.cdc.yml"; then
+  printf 'integrated_replica_executor must auto-start without profiles, stay port/sock/env_file-free, remain scale-safe (no container_name), document REPLICA_MAX_CAPTURES in .env.example, be volume-backed with honest capacity defaults, participate in deploy readiness/rollback stop, and must not be redefined by the CDC overlay\n' >&2
+  exit 1
+fi
+if ! grep -Fq \
+    'COPY --from=debezium /tmp/replica-smt-artifacts/replica-smt.jar /opt/debezium/lib/replica-smt.jar' \
+    "$REPO_ROOT/backend/Dockerfile.cdc" \
+    || ! grep -Fq \
+    'mkdir -p /var/lib/openontology-cdc /var/lib/openontology-replicas' \
+    "$REPO_ROOT/backend/Dockerfile.cdc" \
+    || ! grep -Fq 'backend/integrated_runtime' "$ARCHIVE_SCRIPT"; then
+  printf 'Dockerfile.cdc must ship replica-smt.jar on the Debezium classpath, preset both state roots, and the SMT sources must travel in the deployment archive\n' >&2
+  exit 1
+fi
+
+# The real replica acceptance gate must stay wired to the docker-build job,
+# use an isolated port-free fixture stack, and upload evidence even on failure.
+replica_acceptance_wrapper="$REPO_ROOT/scripts/ci/test-integrated-replica-acceptance.sh"
+replica_acceptance_compose="$REPO_ROOT/docker-compose.replica-acceptance.yml"
+if [ ! -x "$replica_acceptance_wrapper" ] \
+    || [ ! -f "$replica_acceptance_compose" ] \
+    || ! grep -Fq -- '--project' "$replica_acceptance_wrapper" \
+    || ! grep -Fq -- '--network' "$replica_acceptance_wrapper" \
+    || ! grep -Fq -- '--target-db' "$replica_acceptance_wrapper" \
+    || ! grep -Fq -- '--jar builtin' "$replica_acceptance_wrapper" \
+    || ! grep -Fq -- '--artifacts' "$replica_acceptance_wrapper" \
+    || ! grep -Fq -- '--timeout' "$replica_acceptance_wrapper" \
+    || ! grep -Fq '${PROJECT}-acceptance-driver' "$replica_acceptance_wrapper" \
+    || ! grep -Fq 'down --volumes --remove-orphans' "$replica_acceptance_wrapper" \
+    || grep -Eq '^[[:space:]]+ports:' "$replica_acceptance_compose" \
+    || ! grep -Fq 'replica_fixture' "$replica_acceptance_compose" \
+    || ! grep -Fq 'Integrated replica acceptance (real PG/MySQL)' "$DEPLOY_WORKFLOW" \
+    || ! grep -Fq 'bash scripts/ci/test-integrated-replica-acceptance.sh' "$DEPLOY_WORKFLOW" \
+    || ! grep -Fq 'name: integrated-replica-acceptance-${{ github.run_id }}' "$DEPLOY_WORKFLOW" \
+    || ! grep -Fq 'path: .artifacts/ci-replicaacceptance' "$DEPLOY_WORKFLOW" \
+    || ! grep -Fq 'trap '\''rc=$?; cleanup; trap - EXIT; exit "$rc"'\'' EXIT' "$replica_acceptance_wrapper" \
+    || grep -Eq 'test-integrated-replica-acceptance\.sh.*\|\|[[:space:]]*true' "$DEPLOY_WORKFLOW"; then
+  printf 'real replica acceptance must be wired to the docker-build job, use an isolated port-free fixture stack, upload evidence, and never swallow failures\n' >&2
   exit 1
 fi
 
@@ -569,6 +651,7 @@ archive_fixture_paths=(
   "backend/.dockerignore"
   "backend/Dockerfile"
   "backend/Dockerfile.cdc"
+  "backend/integrated_runtime"
   "backend/alembic.ini"
   "backend/alembic/env.py"
   "backend/app/main.py"
@@ -646,6 +729,7 @@ for required_member in \
   ".env.example" \
   "docker-compose.cdc.yml" \
   "backend/Dockerfile.cdc" \
+  "backend/integrated_runtime" \
   "backend/app/main.py" \
   "backend/scripts/maintenance/reset_admin_password.py" \
   "backend/scripts/download_voice_model.py" \
@@ -2107,6 +2191,7 @@ case "$*" in
     fi
     ;;
   *' ps -q pipeline_executor') printf '%s\n' "$(printf 'p%.0s' {1..64})" ;;
+  *' ps -q integrated_replica_executor') printf '%s\n' "$(printf 'r%.0s' {1..64})" ;;
   *' ps -q backend') printf '%s\n' "$(printf 'c%.0s' {1..64})" ;;
   *' ps -q hindsight')
     if [ "${FAKE_HINDSIGHT_NEVER_HEALTHY:-0}" != "1" ]; then

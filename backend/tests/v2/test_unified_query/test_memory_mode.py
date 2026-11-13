@@ -20,6 +20,8 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
+from app.data_channel.integrated.contracts import digest
+
 import pytest
 import sqlalchemy as sa
 
@@ -1556,18 +1558,47 @@ def test_eof_revocation_prevents_handle_publication(sources):
 # resolves platform metadata only (recheck_only=True), never reflects source
 # schema and never reads source rows. It fails closed when the pinned
 # fingerprints no longer match (credentials, schema, or lifecycle status via
-# the auth digest), when the connection's explicit state is failed-test
-# "error", and when a bounded SELECT 1 liveness probe (one per unique physical
-# source per page fetch) cannot reach the source: physical outages are not
-# reinterpreted as success.
+# the auth digest), and when the replica cursor (active run / generation) was
+# replaced. Reads serve the local replica: a source network outage never
+# fails them and no liveness probe exists on this path anymore.
+
+def _publish_replica(db, asset, rows):
+    """Drive one fenced run into a published local replica (platform db)."""
+    from datetime import datetime, timezone
+    from uuid import uuid4
+
+    from app.data_channel.integrated import replica_control, replica_store
+
+    run = replica_control.request_rebuild(db, asset)
+    token = replica_control.claim_run(db, run.id)
+    schema = replica_store.build_replica_schema(
+        run.id, run.schema_json, schema_fingerprint=run.schema_fingerprint)
+    replica_store.create_table(db.connection(), schema)
+    if rows:
+        replica_store.write_batch(db.connection(), schema, rows)
+    db.commit()
+    replica_control.begin_load(db, run.id, token, capture_id=str(uuid4()),
+                               capture_start={"lsn": 1})
+    replica_control.finish_load(db, run.id, token, completion={
+        "complete": True, "row_count": len(rows), "expected_rows": len(rows),
+        "schema_fingerprint": run.schema_fingerprint, "snapshot_id": "snap-local"})
+    db.commit()
+    replica_control.publish_run(db, run.id, token, applied_position={"lsn": 2},
+                                coverage_confirmed_at=datetime.now(timezone.utc),
+                                row_count=len(rows))
+    db.commit()
+    return run
+
 
 @pytest.fixture
 def remote_asset(db, admin_user):
-    """Registered integrated asset + connection rows on the platform database.
+    """Registered integrated asset + connection rows plus a published local
+    replica on the platform database.
 
     resolve_metadata stays real: the auth fingerprint includes the connection
     config revision, so credential rotation is observable without any source
-    connection being opened.
+    connection being opened. The replica carries the same customers rows the
+    ``sources`` fixture serves, so integrated reads stay local and source-free.
     """
     from app.data_channel.connections.models import Connection
     from app.data_channel.integrated.models import IntegratedAsset
@@ -1576,15 +1607,20 @@ def remote_asset(db, admin_user):
                             config={"host": "10.0.0.9", "port": 5432, "user": "svc",
                                     "password": "secret-v1", "database": "erp"},
                             status="active", created_by=admin_user.id)
+    schema = {"columns": [{"name": "id", "type": "integer", "nullable": False,
+                           "primary_key": True},
+                          {"name": "name", "type": "string", "nullable": True}],
+              "primary_key": ["id"]}
     asset = IntegratedAsset(
         id="asset-remote", dataset_id="dataset-remote", connection_id=connection.id,
         name="customers", schema_name="public", table_name="customers",
-        schema_json={"columns": [{"name": "id", "type": "integer", "nullable": False},
-                                 {"name": "name", "type": "string", "nullable": True}],
-                     "primary_key": ["id"]},
-        schema_fingerprint="fp-customers-v1", writable=False, created_by=admin_user.id)
+        schema_json=schema,
+        schema_fingerprint=digest(schema), writable=False, created_by=admin_user.id)
     db.add_all([connection, asset])
     db.commit()
+    _publish_replica(db, asset, [
+        {"id": 1, "name": "acme"}, {"id": 2, "name": "globex"},
+        {"id": 3, "name": "initech"}])
     # Snapshot the original credentials: committing expires the ORM instance,
     # and later reads of connection.config must not silently pick up rotations.
     return SimpleNamespace(user=admin_user, connection=connection, asset=asset,
@@ -1630,73 +1666,59 @@ def _fake_remote_scope(events, table, conn):
     return fake_open_read_scope
 
 
-def test_resolve_integrated_execute_opens_remote_scope(db, remote_asset, sources, monkeypatch):
+def test_resolve_integrated_executes_against_local_replica_only(db, remote_asset, monkeypatch):
     from app.data_channel.connections.models import Connection
     from app.data_channel.integrated import native
     from app.data_channel.integrated.native import resolve_metadata
     from app.data_channel.query import providers
 
-    events = []
-    probes = []
-    monkeypatch.setattr(native, "probe_source",
-                        lambda connection, **kwargs: probes.append(connection.id))
-    monkeypatch.setattr(native, "open_read_scope",
-                        _fake_remote_scope(events, sources["customers"], sources["pg_conn"]))
+    monkeypatch.setattr(native, "probe_source", lambda *_args, **_kwargs:
+                        pytest.fail("replica resolution never probes the source"))
+    monkeypatch.setattr(native, "open_read_scope", lambda *_args, **_kwargs:
+                        pytest.fail("replica resolution never opens a source scope"))
     limits = QueryLimits(statement_timeout_ms=1234)
     binding = Binding(kind="integrated", asset_id=remote_asset.asset.id)
     with ExitStack() as stack:
-        relations = providers.resolve_integrated(db, remote_asset.user, [("src", binding)],
-                                                 limits, stack)
-        relation = relations["src"]
-        # Execute-time resolution enters the remote scope eagerly with the
-        # service statement budget.
-        assert events == [("open", ("asset-remote",), 1234)]
-        assert relation.source_group is not None
-        assert relation.source_group.provenance["id"] == "remote-snapshot-1"
-        assert relation.state["asOf"] == "2026-10-26T00:00:00+00:00"
-        assert relation.state["snapshotId"] == "remote-snapshot-1"
+        relation = providers.resolve_integrated(
+            db, remote_asset.user, [("src", binding)], limits, stack)["src"]
+        # The relation is a platform-local replica read, not a source scope.
+        assert relation.platform is True and relation.batches is None
+        assert relation.source_group is None
+        assert relation.connection_key == "platform"
+        assert relation.state["consistency"] == "replica_snapshot"
+        assert relation.state["snapshotId"]
+        assert relation.state["asOf"]
         meta = resolve_metadata(db, remote_asset.user, [remote_asset.asset.id])[remote_asset.asset.id]
-        assert relation.auth_fingerprint == meta["auth_fingerprint"]
+        assert relation.auth_fingerprint == providers.integrated_auth_fingerprint(
+            meta["auth_fingerprint"], relation.state["snapshotId"])
         assert relation.schema_fingerprint == remote_asset.asset.schema_fingerprint
-        # The execute-time relation carries a working bounded stream.
-        statement = sa.select(relation.table.c.id).order_by(relation.table.c.id)
-        streamed = [row["id"] for batch in relation.batches(statement, {}, 500) for row in batch]
+        # Typed SQL runs directly against the platform replica table.
+        streamed = db.execute(sa.select(relation.expressions["id"]).order_by(
+            relation.expressions["id"])).scalars().all()
         assert streamed == [1, 2, 3]
-    # Scope teardown is registered on the caller's stack and ran exactly once.
-    assert events == [("open", ("asset-remote",), 1234), "close"]
-    # Execute-time resolution never probes liveness: the read scope itself is
-    # the physical availability proof on this path.
-    assert probes == []
 
-    # "inactive" is the untested creation default, not a disable: reads stay
-    # allowed. Only the explicit failed-test "error" state rejects up front,
-    # before any scope is opened.
-    db.execute(sa.update(Connection).where(Connection.id == remote_asset.connection.id)
-               .values(status="inactive"))
-    db.commit()
-    with ExitStack() as stack:
-        providers.resolve_integrated(db, remote_asset.user, [("src", binding)], limits, stack)
-    db.execute(sa.update(Connection).where(Connection.id == remote_asset.connection.id)
-               .values(status="error"))
-    db.commit()
-    with ExitStack() as stack:
+    # Connection lifecycle states never gate a complete local replica: "inactive"
+    # (untested default) and "error" (failed test) are source-side facts and the
+    # offline replica stays readable through both.
+    for status in ("inactive", "error"):
+        db.execute(sa.update(Connection).where(Connection.id == remote_asset.connection.id)
+                   .values(status=status))
+        db.commit()
+        with ExitStack() as stack:
+            readable = providers.resolve_integrated(
+                db, remote_asset.user, [("src", binding)], limits, stack)["src"]
+            assert readable.platform is True
+        # In-flight relations bound to the previous lifecycle state fail closed.
         with pytest.raises(QueryError) as exc:
-            providers.resolve_integrated(db, remote_asset.user, [("src", binding)],
-                                         limits, stack)
-        assert (exc.value.status, exc.value.code) == (409, "source_connection_error")
-    assert probes == []
+            relation.recheck()
+        assert (exc.value.status, exc.value.code) == (409, "query_context_changed")
     db.execute(sa.update(Connection).where(Connection.id == remote_asset.connection.id)
                .values(status="active"))
     db.commit()
-    with ExitStack() as stack:
-        providers.resolve_integrated(db, remote_asset.user, [("src", binding)], limits, stack)
-    # Three successful resolutions (initial, inactive, restored) each opened
-    # and closed exactly one scope; the error state opened none.
-    assert events == [("open", ("asset-remote",), 1234), "close"] * 3
-    assert probes == []
+    relation.recheck()
 
 
-def test_resolve_integrated_recheck_only_never_opens_remote_scope(db, remote_asset, monkeypatch):
+def test_resolve_integrated_recheck_only_reads_the_same_local_replica(db, remote_asset, monkeypatch):
     from app.data_channel.integrated import native
     from app.data_channel.integrated.native import resolve_metadata
     from app.data_channel.query import providers
@@ -1704,10 +1726,9 @@ def test_resolve_integrated_recheck_only_never_opens_remote_scope(db, remote_ass
     def forbidden(*args, **kwargs):
         raise AssertionError("recheck-only resolution must not open a remote read scope")
 
-    probes = []
     real_probe = native.probe_source
-    monkeypatch.setattr(native, "probe_source",
-                        lambda connection, **kwargs: probes.append(connection.id))
+    monkeypatch.setattr(native, "probe_source", lambda *_args, **_kwargs:
+                        pytest.fail("replica rechecks never probe the source"))
     monkeypatch.setattr(native, "open_read_scope", forbidden)
     binding = Binding(kind="integrated", asset_id=remote_asset.asset.id)
     with ExitStack() as stack:
@@ -1715,22 +1736,19 @@ def test_resolve_integrated_recheck_only_never_opens_remote_scope(db, remote_ass
                                                 QueryLimits(), stack,
                                                 recheck_only=True)["src"]
     meta = resolve_metadata(db, remote_asset.user, [remote_asset.asset.id])[remote_asset.asset.id]
-    # No stream, no source group: pages read already-materialized platform rows.
+    # No stream, no source group: both call shapes read the platform replica.
     assert relation.batches is None
     assert relation.source_group is None
-    assert relation.table.original.name == "integrated_asset-remote"
+    assert relation.platform is True and relation.connection_key == "platform"
     assert set(relation.columns) == {"id", "name"}
-    assert relation.state["asOf"] is None and relation.state["snapshotId"] is None
+    assert relation.state["consistency"] == "replica_snapshot"
     assert relation.state["completeness"] == "complete"
-    assert relation.auth_fingerprint == meta["auth_fingerprint"]
+    assert relation.auth_fingerprint == providers.integrated_auth_fingerprint(
+        meta["auth_fingerprint"], relation.state["snapshotId"])
     assert relation.schema_fingerprint == remote_asset.asset.schema_fingerprint
-    # With an unchanged context the metadata recheck passes and probes the
-    # physical source exactly once (availability, never schema or rows).
-    assert probes == []
+    # With an unchanged context the recheck passes source-free, repeatedly.
     relation.recheck()
-    assert probes == ["conn-remote"]
     relation.recheck()
-    assert probes == ["conn-remote"]
 
     # Probe transport budget on the real engine-construction path: connection
     # establishment is bounded by connect_timeout on both drivers; psycopg2
@@ -1789,19 +1807,15 @@ def test_recheck_only_relation_fails_closed_on_credential_or_schema_change(db, r
 
     monkeypatch.setattr(native, "open_read_scope", lambda *args, **kwargs:
                         pytest.fail("recheck-only resolution must not open a remote read scope"))
-    probes = []
-
-    def probe(connection, **kwargs):
-        probes.append(connection.id)
-
-    monkeypatch.setattr(native, "probe_source", probe)
+    monkeypatch.setattr(native, "probe_source", lambda *args, **kwargs:
+                        pytest.fail("replica rechecks never probe the source"))
     binding = Binding(kind="integrated", asset_id=remote_asset.asset.id)
     with ExitStack() as stack:
         relation = providers.resolve_integrated(db, remote_asset.user, [("src", binding)],
                                                 QueryLimits(), stack,
                                                 recheck_only=True)["src"]
-    relation.recheck()  # baseline: unchanged context revalidates and probes once
-    assert probes == ["conn-remote"]
+    relation.recheck()  # baseline: unchanged context revalidates, source-free
+    relation.recheck()
 
     # Credential rotation changes the connection config revision inside the
     # pinned auth fingerprint: the cursor context is invalidated, fail-closed.
@@ -1820,13 +1834,13 @@ def test_recheck_only_relation_fails_closed_on_credential_or_schema_change(db, r
 
     # Schema fingerprint drift fails closed the same way.
     db.execute(sa.update(IntegratedAsset).where(IntegratedAsset.id == remote_asset.asset.id)
-               .values(schema_fingerprint="fp-customers-v2"))
+               .values(schema_fingerprint="fp-different"))
     db.commit()
     with pytest.raises(QueryError) as exc:
         relation.recheck()
     assert (exc.value.status, exc.value.code) == (409, "query_context_changed")
     db.execute(sa.update(IntegratedAsset).where(IntegratedAsset.id == remote_asset.asset.id)
-               .values(schema_fingerprint="fp-customers-v1"))
+               .values(schema_fingerprint=digest(remote_asset.asset.schema_json)))
     db.commit()
     relation.recheck()
 
@@ -1851,6 +1865,10 @@ def test_recheck_only_relation_fails_closed_on_credential_or_schema_change(db, r
     # bypassed the session, so fresh instances replace the stale identity-map
     # objects instead of re-adding them.
     user_id = remote_asset.user.id
+    asset_schema = {"columns": [{"name": "id", "type": "integer", "nullable": False,
+                                 "primary_key": True},
+                                {"name": "name", "type": "string", "nullable": True}],
+                    "primary_key": ["id"]}
     db.expunge_all()
     user = db.get(User, user_id)
     db.add(Connection(id="conn-remote", name="remote source", kind="postgres",
@@ -1859,33 +1877,27 @@ def test_recheck_only_relation_fails_closed_on_credential_or_schema_change(db, r
     db.add(IntegratedAsset(
         id="asset-remote", dataset_id="dataset-remote", connection_id="conn-remote",
         name="customers", schema_name="public", table_name="customers",
-        schema_json={"columns": [{"name": "id", "type": "integer", "nullable": False},
-                                 {"name": "name", "type": "string", "nullable": True}],
-                     "primary_key": ["id"]},
-        schema_fingerprint="fp-customers-v1", writable=False, created_by=user_id))
+        schema_json=asset_schema,
+        schema_fingerprint=digest(asset_schema), writable=False, created_by=user_id))
     db.commit()
 
-    # Physical outage mid-pagination: metadata is unchanged and the connection
-    # stays "active", but the bounded SELECT 1 cannot reach the source — the
-    # page fails closed (503 SOURCE_UNAVAILABLE), never reinterpreted as
-    # metadata-only success. A later successful probe resumes delivery of the
-    # still-valid snapshot rows on the next fetch.
-    def unreachable(connection, **kwargs):
-        probes.append("unreachable:" + connection.id)
-        raise HTTPException(503, {"code": "SOURCE_UNAVAILABLE",
-                                  "message": "Source is not physically reachable"})
-
-    monkeypatch.setattr(native, "probe_source", unreachable)
+    # A source outage mid-pagination is now irrelevant to delivery: pages read
+    # the local replica and never dial the source. Any probe attempt is a
+    # contract violation.
+    monkeypatch.setattr(native, "probe_source",
+                        lambda *_args, **_kwargs: pytest.fail(
+                            "replica reads never probe the source"))
+    monkeypatch.setattr(native, "open_read_scope",
+                        lambda *_args, **_kwargs: pytest.fail(
+                            "replica reads never open a source scope"))
     with ExitStack() as stack:
         relation = providers.resolve_integrated(db, user, [("src", binding)],
                                                 QueryLimits(), stack,
                                                 recheck_only=True)["src"]
-    with pytest.raises(HTTPException) as exc:
-        relation.recheck()
-    assert exc.value.status_code == 503
-    assert exc.value.detail["code"] == "SOURCE_UNAVAILABLE"
-    monkeypatch.setattr(native, "probe_source", probe)
     relation.recheck()
+    rows = db.execute(sa.select(relation.expressions["id"]).order_by(
+        relation.expressions["id"])).scalars().all()
+    assert rows == [1, 2, 3]
 
     # Lifecycle changes are fenced by the status input inside the auth
     # fingerprint: flipping the pinned "active" state (test pass, rotation
@@ -1902,31 +1914,33 @@ def test_recheck_only_relation_fails_closed_on_credential_or_schema_change(db, r
     db.commit()
     relation.recheck()
 
-    # A fresh resolution against an explicit failed-test connection is
-    # rejected up front without any scope or probe.
+    # A fresh resolution against an explicit failed-test connection still
+    # serves the complete local replica: a source lifecycle state is not a
+    # read disable (offline readability).
     db.execute(sa.update(Connection).where(Connection.id == "conn-remote")
                .values(status="error"))
     db.commit()
     with ExitStack() as stack:
-        with pytest.raises(QueryError) as exc:
-            providers.resolve_integrated(db, user, [("src", binding)], QueryLimits(), stack,
-                                         recheck_only=True)
-        assert (exc.value.status, exc.value.code) == (409, "source_connection_error")
+        offline = providers.resolve_integrated(db, user, [("src", binding)],
+                                               QueryLimits(), stack,
+                                               recheck_only=True)["src"]
+    assert offline.platform is True and offline.connection_key == "platform"
     db.execute(sa.update(Connection).where(Connection.id == "conn-remote")
                .values(status="active"))
     db.commit()
 
-    # One bounded probe per unique physical source per page fetch: two assets
-    # sharing one connection pay a single SELECT 1 even when both recheck.
+    # Two assets sharing one connection both recheck without any source IO.
+    orders_schema = {"columns": [{"name": "oid", "type": "integer", "nullable": False,
+                                  "primary_key": True}],
+                     "primary_key": ["oid"]}
     second = IntegratedAsset(
         id="asset-remote-2", dataset_id="dataset-remote-2", connection_id="conn-remote",
         name="orders", schema_name="public", table_name="orders",
-        schema_json={"columns": [{"name": "oid", "type": "integer", "nullable": False}],
-                     "primary_key": ["oid"]},
-        schema_fingerprint="fp-orders-v1", writable=False, created_by=user_id)
+        schema_json=orders_schema,
+        schema_fingerprint=digest(orders_schema), writable=False, created_by=user_id)
     db.add(second)
     db.commit()
-    probes.clear()
+    _publish_replica(db, second, [{"oid": 100}, {"oid": 101}])
     with ExitStack() as stack:
         relations = providers.resolve_integrated(db, user,
                                                  [("src", binding),
@@ -1934,40 +1948,17 @@ def test_recheck_only_relation_fails_closed_on_credential_or_schema_change(db, r
                                                  QueryLimits(), stack, recheck_only=True)
     relations["src"].recheck()
     relations["ord"].recheck()
-    assert probes == ["conn-remote"]
 
 
-def test_memory_execute_opens_scope_and_lazy_fetch_reopens_bounded_scope(db, remote_asset, sources, monkeypatch):
+def test_memory_execute_and_lazy_fetch_read_the_local_replica(db, remote_asset, monkeypatch):
     from app.data_channel.integrated import native
     from app.data_channel.query import providers
     from app.data_channel.query.contracts import TextQueryCursorRequest
 
-    events = []
-    probes = []
-    statements = []
-    batch_rows = []
-    scopes = []
-    base_scope = _fake_remote_scope(events, sources["customers"], sources["pg_conn"])
-
-    @contextmanager
-    def recording_scope(db, user, asset_ids, *, statement_timeout_ms=300000,
-                        execution_budget=None):
-        with base_scope(db, user, asset_ids, statement_timeout_ms=statement_timeout_ms) as scope:
-            original_iter = scope.iter_batches
-
-            def iter_batches(statement, params=None, *, batch_size=1000):
-                statements.append((str(statement), getattr(statement, "_limit", None)))
-                for batch in original_iter(statement, params, batch_size=batch_size):
-                    batch_rows.append(len(batch))
-                    yield batch
-
-            scope.iter_batches = iter_batches
-            scopes.append(scope)
-            yield scope
-
-    monkeypatch.setattr(native, "probe_source",
-                        lambda connection, **kwargs: probes.append(connection.id))
-    monkeypatch.setattr(native, "open_read_scope", recording_scope)
+    monkeypatch.setattr(native, "probe_source", lambda *_args, **_kwargs:
+                        pytest.fail("memory pages never probe the source"))
+    monkeypatch.setattr(native, "open_read_scope", lambda *_args, **_kwargs:
+                        pytest.fail("memory pages never open a source scope"))
     flags = []
     real_resolve_integrated = providers.resolve_integrated
 
@@ -1988,43 +1979,55 @@ def test_memory_execute_opens_scope_and_lazy_fetch_reopens_bounded_scope(db, rem
     assert [row["id"] for row in first["rows"]] == ["1", "2"]
     assert first["page"]["hasMore"] is True and first["page"]["cursor"]
     assert first["page"]["mode"] == "keyset_live"
-    # Resolve opened a metadata scope under the whole-query timeout; the lazy
-    # page re-opened the scope under the continuation page budget before its
-    # statement ran, and both scopes were torn down.
-    page_budget = min(QueryLimits().statement_timeout_ms,
-                      QueryLimits().continuation_page_timeout_ms)
+    # The whole result reads through local replica relations; page 0 resolves
+    # twice (execute + lazy handle re-open), both in execute mode.
     assert flags == [False, False]
-    assert events == [("open", ("asset-remote",), QueryLimits().statement_timeout_ms), "close",
-                      ("open", ("asset-remote",), page_budget), "close"]
-    # The execute path proves availability through the read scope itself: it
-    # never runs a liveness probe. The page statement was source-side limited
-    # to page+probe (2+1) — no whole-source fetch, no COUNT.
-    assert probes == []
-    assert len(statements) == 1
-    page_sql, limit = statements[0]
-    assert limit == 3 and "COUNT(" not in page_sql.upper()
-    # Drain-to-exhaustion semantics: the page statement transferred at most
-    # its LIMIT allows (page 2 + probe 1) and the scope's completion evidence
-    # ran to complete EOF before the scope closed.
-    assert batch_rows[0] == 3
-    # The page scope (the last opened one; the resolve scope runs no batches)
-    # reached complete EOF evidence before closing.
-    assert scopes[-1].completion["complete"] is True
+    assert first["consistency"] == "replica_keyset_paged"
+    replica_states = [state for state in first["sourceStates"]
+                      if state.get("kind") == "integrated"]
+    assert replica_states and replica_states[0]["consistency"] == "replica_snapshot"
 
     second = service.fetch(TextQueryCursorRequest(cursor=first["page"]["cursor"]))
     assert [row["id"] for row in second["rows"]] == ["3"]
     assert second["page"]["cursor"] is None
     assert second["page"]["counting"] == "complete"
-    # Lazy continuation re-authorizes and re-opens a bounded source scope per
-    # page (bounded continuation) instead of fossilizing the recheck-only
-    # in-memory handle; availability again comes from the scope itself.
+    # Lazy continuation re-authorizes and re-reads the local replica per page
+    # (bounded continuation), still without any source IO.
     assert flags == [False, False, False]
-    assert events[-2:] == [("open", ("asset-remote",), page_budget), "close"]
-    assert probes == []
-    assert len(statements) == 2
-    continuation_sql, continuation_limit = statements[1]
-    assert continuation_limit == 3 and "COUNT(" not in continuation_sql.upper()
-    assert ">" in continuation_sql  # keyset strictly-after predicate
+
+
+def test_lazy_replica_page_rejects_replacement_run_across_pages(db, remote_asset, monkeypatch):
+    """A replica rebuild between pages must fail closed, never mix generations.
+
+    Page 1 pins run A. Page 2 re-resolves the *new* active run B; comparing
+    only authorization/schema fingerprints (unchanged by a rebuild) would let
+    B answer page 2. The run identity folded into the existing auth fingerprint
+    makes the handle's pinned context differ from B.
+    """
+    from app.data_channel.integrated import native
+    from app.data_channel.query.contracts import TextQueryCursorRequest
+
+    monkeypatch.setattr(native, "probe_source", lambda *_args, **_kwargs:
+                        pytest.fail("memory pages never probe the source"))
+    monkeypatch.setattr(native, "open_read_scope", lambda *_args, **_kwargs:
+                        pytest.fail("memory pages never open a source scope"))
+    service = QueryService(db, remote_asset.user, secret="replica-run-fence")
+    request = TypedQueryRequest(
+        pipeline=typed_pipeline("from src as src | fields src.id | sort src.id asc"),
+        bindings={"src": Binding(kind="integrated", asset_id=remote_asset.asset.id)},
+        page_size=2, result_storage="memory")
+    first = service.execute_typed(request)
+    run_a = next(state["snapshotId"] for state in first["sourceStates"]
+                 if state.get("kind") == "integrated")
+    assert [row["id"] for row in first["rows"]] == ["1", "2"]
+
+    replacement = _publish_replica(db, remote_asset.asset, [
+        {"id": 1, "name": "acme"}, {"id": 2, "name": "globex"},
+        {"id": 3, "name": "initech"}])
+    assert replacement.id != run_a
+    with pytest.raises(QueryError) as exc:
+        service.fetch(TextQueryCursorRequest(cursor=first["page"]["cursor"]))
+    assert (exc.value.status, exc.value.code) == (409, "query_context_changed")
 
 
 def test_persisted_fetch_resolves_recheck_only_and_pages_existing_snapshot(db, remote_asset, sources, monkeypatch):
@@ -2076,7 +2079,7 @@ def test_persisted_fetch_resolves_recheck_only_and_pages_existing_snapshot(db, r
     assert flags == [True, True]
 
 
-def test_memory_lazy_reopen_with_derived_wrapper_real_resolver(db, remote_asset, sources, monkeypatch):
+def test_memory_lazy_reopen_with_derived_wrapper_real_resolver(db, remote_asset, monkeypatch):
     """Production regression: a derived-wrapper plan (the ontology adapter
     shape) through the REAL resolver must not trip unknown_derived_source on
     the lazy page-0 scope re-open — self.relations is reset to a fresh
@@ -2085,9 +2088,8 @@ def test_memory_lazy_reopen_with_derived_wrapper_real_resolver(db, remote_asset,
     from app.data_channel.query.contracts import TextQueryCursorRequest
     from app.data_channel.query.derived import DerivedSourceSpec
 
-    events = []
-    monkeypatch.setattr(native, "open_read_scope",
-                        _fake_remote_scope(events, sources["customers"], sources["pg_conn"]))
+    monkeypatch.setattr(native, "open_read_scope", lambda *_args, **_kwargs:
+                        pytest.fail("replica reads never open a source scope"))
     wrapper = typed_pipeline("from s2 as s2 | fields s2.id, s2.name")
     typed = TypedQueryRequest(
         pipeline=typed_pipeline("from s1 as s1 | fields s1.id, s1.name | sort s1.id asc"),

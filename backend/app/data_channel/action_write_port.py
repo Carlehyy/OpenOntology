@@ -288,7 +288,7 @@ class AssetWritePortAdapter:
         target_snapshot: Optional[dict] = None
         before: Optional[dict] = None
         if operation in (WP.OPERATION_UPDATE, WP.OPERATION_DELETE):
-            row, fingerprint, table = self._read_integrated_row(
+            row, fingerprint, table, exact_aliases, dialect_name = self._read_integrated_row(
                 db, user, asset, key)
             if row is None:
                 raise WP.WritePortError(
@@ -297,8 +297,13 @@ class AssetWritePortAdapter:
                     status=409, key=key)
             from app.data_channel.integrated.contracts import row_token
             from app.data_channel.integrated.native import normalize_row
+            from app.data_channel.integrated import native
 
-            expected_token = row_token(normalize_row(row, table), fingerprint)
+            token_row = native.token_row_from_source(row, table, exact_aliases)
+            expected_token = row_token(
+                normalize_row(token_row, table), fingerprint,
+                json_columns=native.token_json_columns(table),
+                float32_columns=native.token_float32_columns(table, dialect_name))
             # 有界目标快照：仅定位键、写入属性与待求值属性（不整行）。
             wanted_props = set(request.key_values) | set(request.property_values) \
                 | set(request.pending_value_mappings) \
@@ -312,7 +317,7 @@ class AssetWritePortAdapter:
                 col: row.get(col)
                 for col in wanted_columns if col not in key}
         elif operation == WP.OPERATION_INSERT:
-            row, _, _ = self._read_integrated_row(db, user, asset, key)
+            row, _, _, _, _ = self._read_integrated_row(db, user, asset, key)
             if row is not None:
                 raise WP.WritePortError(
                     "row_already_exists",
@@ -350,7 +355,11 @@ class AssetWritePortAdapter:
 
     @staticmethod
     def _read_integrated_row(db, user, asset, key: dict):
-        """按完整主键有界读取单行；返回 (row, fingerprint, table)。"""
+        """按完整主键有界读取单行；返回 (row, fingerprint, table, exact_aliases, dialect)。
+
+        The select carries both the raw source columns (for before/target
+        snapshots) and exact DOUBLE aliases for float-family token values.
+        """
         import sqlalchemy as sa
 
         from app.data_channel.integrated import native
@@ -366,28 +375,35 @@ class AssetWritePortAdapter:
             condition = sa.and_(*(
                 table.c[to_physical.get(name, name)] == value
                 for name, value in key.items()))
-            statement = sa.select(table).where(condition).limit(2)
+            exact_aliases = native.source_token_exact_aliases(table)
+            statement = native.source_token_select(
+                table, include_source=True).where(condition).limit(2)
             row = None
             for batch in scope.iter_batches(statement, batch_size=2):
                 row = batch[0] if batch else None
                 break
-            return row, fingerprint, table
+            return row, fingerprint, table, exact_aliases, meta.get("dialect")
 
     def _integrated_row_token(self, db, user, asset, key: dict, *,
                               missing_code: str,
                               missing_message: str) -> str:
-        row, fingerprint, table = self._read_integrated_row(
+        row, fingerprint, table, exact_aliases, dialect_name = self._read_integrated_row(
             db, user, asset, key)
         if row is None:
             raise WP.WritePortError(
                 missing_code, missing_message, status=409, key=key)
         from app.data_channel.integrated.contracts import row_token
         from app.data_channel.integrated.native import normalize_row
+        from app.data_channel.integrated import native
 
-        return row_token(normalize_row(row, table), fingerprint)
+        token_row = native.token_row_from_source(row, table, exact_aliases)
+        return row_token(normalize_row(token_row, table), fingerprint,
+                         json_columns=native.token_json_columns(table),
+                         float32_columns=native.token_float32_columns(
+                             table, dialect_name))
 
     def _integrated_row_exists(self, db, user, asset, key: dict) -> bool:
-        row, _, _ = self._read_integrated_row(db, user, asset, key)
+        row, _, _, _, _ = self._read_integrated_row(db, user, asset, key)
         return row is not None
 
 

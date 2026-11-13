@@ -422,6 +422,85 @@ docker.sock、以非 root（uid 10001）只读 rootfs 运行。
 - **运行日志边界**：子进程输出只分类为稳定错误码后记录，不转发原文；
   连接配置仅运行期瞬时解密，主机/账号/SQL/源值不进任何日志。
 
+## 集成副本执行器（integrated_replica_executor）
+
+集成数据集的副本表（`backend/app/data_channel/integrated/` 的 `replica_*`
+模块，控制面 `replica_control.py` + 运行时 `replica_executor.py`）由独立的
+常驻执行器承接：为每个受管连接按捕获代（capture cohort）拉起 Debezium
+Server 子进程做 initial 快照并续流，事件经 TransportMetadata SMT 封装
+（保留提交偏移）后由同容器回环接收端写入平台库的副本表。执行器不发布任何
+端口、不挂载 docker.sock，生产以非 root（uid 10001）只读 rootfs 运行。
+
+- **启动（标准栈自动拉起）**：服务定义在标准 `docker-compose.prod.yml`，
+  无 profile/opt-in——常规 `docker compose -f docker-compose.prod.yml
+  up -d` 与 deploy-prod.sh 的核心启动序列都会构建并启动它（首启会拉取
+  固定摘要的 Debezium 基础镜像）。它不在 deploy-prod.sh 的停机/重启核心
+  序列（frontend/pipeline_executor/backend）内：迁移窗口内执行器持续运行，
+  元数据库短暂不可达时按执行器自身重试口径恢复，健康检查可能如实抖动。
+  执行器运行期解密受管连接配置，需要与 backend 相同的
+  `SECRET_KEY`/`ENCRYPTION_KEY`（经服务器 `.env` 插值注入，缺失时应用侧
+  fail-closed），不引入任何新凭据变量。
+- **与 CDC 执行器的关系**：两者共用 `backend/Dockerfile.cdc` 镜像但容器、
+  状态根（`/var/lib/openontology-replicas` 与 `/var/lib/openontology-cdc`）、
+  卷完全独立，可同时运行；`replica-smt.jar` 对 CDC 子进程只是 classpath 上
+  未被引用的 jar，不改变 CDC/Sentinel 行为。`docker-compose.cdc.yml` 覆盖层
+  只定义 `integrated_cdc_executor`，任何覆盖层都不得重定义
+  `integrated_replica_executor`（Compose 对同名 service 静默合并，
+  `test-deploy-guards.sh` 拒绝重复定义）。
+- **镜像**：`backend/Dockerfile.cdc`。SMT（TransportMetadata + ReadOffsets）
+  在镜像构建的 debezium 阶段用固定摘要 Debezium 镜像自带的完整 JDK 工具链
+  对其 `/debezium/lib` 离线编译，构建即随跑 SelfTest 自校验（失败即构建
+  失败），产物放 `/opt/debezium/lib/replica-smt.jar`（执行器 classpath 的
+  `lib/*` 通配直接可见）；SMT 源码随部署归档上服务器
+  （`backend/integrated_runtime`）。
+- **状态卷与同宿主扩容（非跨主机 HA）**：`integrated_replica_state` 挂到
+  `/var/lib/openontology-replicas`，按连接/代保存 Debezium 偏移与模式
+  历史。同一宿主机可运行多个 executor 实例并共享该卷（service 未设
+  `container_name`，可 `docker compose ... up -d --scale
+  integrated_replica_executor=N`）；每个 capture 由 PostgreSQL 咨询锁
+  （`SourceLease`）单写者围栏，同一 capture 只有一个实例拉起子进程。不支持
+  跨主机共享卷或跨主机接管；宿主机迁移需先停全部实例再整体迁移卷。
+- **容量预算（诚实口径，禁止假宣称）**：`REPLICA_MAX_CAPTURES` 是**每个
+  executor 实例**的并发捕获上限，默认 2 仅匹配单实例 `mem_limit=3g`/
+  `cpus=2.0`（`REPLICA_EXECUTOR_MEM_LIMIT`/`REPLICA_EXECUTOR_CPUS` 可收紧）
+  的保守预算，**不满足 200 源容量**。单实例粗预算约为
+  `REPLICA_MAX_CAPTURES × 256m` JVM 堆 + Python/接收端开销；默认 2 对应 3g。
+  容量占满时新注册/新表的 cohort 保持可观测的 `queued` 状态，不会挤掉
+  已 active 的捕获，也不会自动接入全部资产；必须通过增加同一宿主机上的
+  executor 实例并同步提升实例资源/并发推进。禁止把默认 2 直接放大到 200
+  导致 OOM。任何 200 源/30M 行级/P95 或更大规模的容量承诺，都必须在目标
+  资源与隔离环境（staging/CI）用可复核证据验收；证据保存到 `.artifacts/`
+  或 CI artifact，不写入长期文档。容量只按已验收的分档宣称，不按源数量
+  宣称。
+- **覆盖证明与源端 WAL 副作用（固定版本协议）**：副本屏障按固定
+  Debezium Server 3.7.1.Final + PostgreSQL 14+ 的 pgoutput logical
+  messages 实现。初始快照完成和恢复续流前，执行器在源库发出受管
+  prefix/token 的 nontransactional `pg_logical_emit_message(false)` 作为
+  切换 cut；运行期约每 10 秒发一次轻量覆盖确认消息（可再收敛，不按批
+  发送），用于在保持源端健康的同时避免副本长时间旧标。该消息只产生源端
+  WAL，不写业务表；因此副本链路不得再被描述为源端“全只读/零写”——受管
+  WAL 逻辑消息是明确副作用，必须纳入源端 WAL 容量与监控。预检要求
+  PostgreSQL >=14、当前用户对 `pg_logical_emit_message` 有 EXECUTE，且
+  源不是 standby/read_only；PG<14 直接阻塞为
+  `REPLICA_PG_VERSION_UNSUPPORTED`，不提供 fallback。MySQL 侧只读执行
+  `SHOW BINARY LOG STATUS`（8.4+；旧版 `SHOW MASTER STATUS`）读取
+  GTID/filepos，并以已完成的 heartbeat offset 作为覆盖证明，不写源表。
+- **分档扩容验收条件**：
+  - 档 1（默认每实例 2 并发捕获）：在目标资源隔离环境用真实源库完成注册 →
+    快照 → 变更续流 → 执行器重启续流 → 偏移保留的全链路验收（AGENTS.md §5
+    的真实环境 E2E 口径）；通过后才按该默认分档运行。
+  - 档 2（每实例 >2 并发捕获或上调内存档，含任何 200 源/30M 行级/P95
+    目标）：在目标资源隔离环境按目标并发实测快照吞吐、内存峰值与源库
+    WAL/binlog 保留增长，留存可复核容量证据后才允许在生产 `.env` 覆盖
+    `REPLICA_MAX_CAPTURES`/`REPLICA_EXECUTOR_MEM_LIMIT` 并增加 executor
+    实例；未通过验收的分档不得进入生产配置或对外承诺。
+- **持久偏移丢失＝blocked/rebuild**：偏移卷丢失/为空而平台库仍声称副本已
+  覆盖时，执行器绝不以当前位点静默重开快照或续流——对应连接被阻塞，只能
+  由管理员显式 rebuild（重建捕获代、全量重锚）。因此恢复必须整恢复点还原
+  （见 [backup-restore.md](backup-restore.md)）：平台库（副本表 + 控制面）
+  与 `integrated_replica_state` 卷必须同一恢复点一致，只还原其一即落入
+  上述阻塞态，等价于一次全量 rebuild。
+
 ## 部署前检查
 
 超级助手用户进程插件的生产验收需要独立 Linux staging，不能用 macOS Docker

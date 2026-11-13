@@ -152,7 +152,7 @@ test('远程资产连线保存只提交 dataset id 与 bindingMode，不携带�
   // 远程分组可见并披露只读语义
   const remoteGroup = page.getByTestId('mapping-remote-assets')
   await expect(remoteGroup).toBeVisible()
-  await expect(remoteGroup.getByText('仅冻结绑定定义：数据在查询时从源读取，不物化、不做全量质量校验。')).toBeVisible()
+  await expect(remoteGroup.getByText('仅冻结绑定定义：查询读取平台本地副本（按各资产副本最近确认覆盖时点），不直连源库、不做全量质量校验。')).toBeVisible()
 
   // 登记资产与本体对象加入画布
   await remoteGroup.locator('.dmc-asset--remote').locator('.dmc-add').click()

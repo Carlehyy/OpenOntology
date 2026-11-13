@@ -99,6 +99,9 @@ compose_environment() {
     -u INTEGRATED_DBX_PASSWORD \
     -u INTEGRATED_DBX_COMMIT \
     -u INTEGRATED_DBX_INTERNAL \
+    -u REPLICA_MAX_CAPTURES \
+    -u REPLICA_EXECUTOR_MEM_LIMIT \
+    -u REPLICA_EXECUTOR_CPUS \
     -u PYTHON_KERNEL_GATEWAY_AUTH_TOKEN \
     -u SUPER_ASSISTANT_PROCESS_PLUGIN_RUNNER_MODE \
     -u ASSISTANT_ACTION_EXECUTION_ENABLED \
@@ -286,7 +289,7 @@ restore_previous_runtime_on_exit() {
 trap restore_previous_runtime_on_exit EXIT
 stop_new_runtime_after_failed_deploy() {
   log "stopping the partially started new runtime after a post-migration failure"
-  if ! compose stop --timeout 30 frontend pipeline_executor backend; then
+  if ! compose stop --timeout 30 frontend pipeline_executor backend integrated_replica_executor; then
     log "failed to stop the new runtime completely; operator intervention is required"
   fi
   if ! compose stop --timeout 30 weknora-gateway; then
@@ -344,6 +347,16 @@ check_pipeline_executor() {
   # executor 没有进程内 ping 接口，以容器健康检查（心跳文件 mtime）为准
   local container_id health
   container_id="$(compose ps -q pipeline_executor 2>/dev/null || true)"
+  [ -n "$container_id" ] || return 1
+  health="$(compose_environment docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' \
+    "$container_id" 2>/dev/null || true)"
+  [ "$health" = "healthy" ]
+}
+check_replica_executor() {
+  # 副本执行器同样以容器健康检查（对账心跳文件 mtime）为准；没有运行时
+  # 捕获时也会刷新心跳，因此健康不代表已接入源，只代表执行器真实存活。
+  local container_id health
+  container_id="$(compose ps -q integrated_replica_executor 2>/dev/null || true)"
   [ -n "$container_id" ] || return 1
   health="$(compose_environment docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' \
     "$container_id" 2>/dev/null || true)"
@@ -2323,6 +2336,25 @@ check_secret NEO4J_PASSWORD ontoprompt123
 check_secret NEO4J_AUTH neo4j/ontoprompt123
 check_secret MINIO_ACCESS_KEY minioadmin
 check_secret MINIO_SECRET_KEY minioadmin
+validate_replica_capacity() {
+  # Capacity is per executor instance. 0 would silently starve every newly
+  # registered asset; a large single-instance value would exceed the memory
+  # budget. Scale with additional same-host instances instead of inflating it.
+  local value
+  value="$(env_value REPLICA_MAX_CAPTURES)"
+  value="${value:-2}"
+  case "$value" in
+    ""|*[!0-9]*)
+      log "REPLICA_MAX_CAPTURES must be a positive integer"
+      exit 1
+      ;;
+  esac
+  if [ "$value" -lt 1 ] || [ "$value" -gt 64 ]; then
+    log "REPLICA_MAX_CAPTURES must be within 1..64 per executor instance; scale with more instances instead"
+    exit 1
+  fi
+}
+validate_replica_capacity
 validated_secret_key="$(env_value SECRET_KEY)"
 validated_admin_seed="$(env_value FIRST_ADMIN_PASSWORD)"
 if [ "${#validated_secret_key}" -lt 32 ]; then
@@ -2621,6 +2653,9 @@ if ! run_with_retry compose run --rm --no-deps backend \
   exit 1
 fi
 log "starting services"
+# integrated_replica_executor is part of this single final up (it is not in
+# start_required_dependency_services), so it starts exactly once after Alembic
+# reached head and cannot race or double-start beside the migration.
 if ! run_with_retry compose up -d --remove-orphans; then
   log "service startup failed; printing redacted backend diagnostics"
   compose ps || true
@@ -2630,10 +2665,11 @@ if ! run_with_retry compose up -d --remove-orphans; then
   log "restore the pre-deploy database/files backup before rolling back the application"
   exit 1
 fi
-log "waiting for backend, pipeline executor and frontend readiness: ${READINESS_URL}"
+log "waiting for backend, pipeline executor, replica executor and frontend readiness: ${READINESS_URL}"
 for i in $(seq 1 60); do
   if curl -fsS --connect-timeout 5 --max-time 10 "$READINESS_URL" >/dev/null \
       && check_pipeline_executor \
+      && check_replica_executor \
       && check_frontend_assets \
       && check_weknora_public_entry \
       && check_kaneo_public_entry; then
@@ -2656,6 +2692,7 @@ done
 log "deployment health check failed"
 compose ps || true
 redact_compose_logs backend dbx browser frontend pipeline_executor \
+  integrated_replica_executor \
   weknora-app weknora-ui weknora-gateway weknora-docreader \
   kaneo-db kaneo-app kaneo-gateway || true
 stop_new_runtime_after_failed_deploy

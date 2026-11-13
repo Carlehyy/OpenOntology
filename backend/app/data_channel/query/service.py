@@ -176,6 +176,10 @@ class QueryService:
 
     def _platform_budget(self):
         self._deadline()
+        # The statement-level budget is a PostgreSQL session setting; on other
+        # engines (SQLite tests) only the wallclock deadline applies.
+        if self.db.get_bind().dialect.name != "postgresql":
+            return
         remaining = max(1, int(self.limits.statement_timeout_ms - (time.monotonic() - self.started) * 1000))
         self.db.execute(sa.text("SELECT set_config('statement_timeout', :value, true)"),
                         {"value": f"{remaining}ms"})
@@ -456,7 +460,8 @@ class QueryService:
     @staticmethod
     def _plan_needs_pin(plan: _Plan) -> bool:
         # Dataset versions and the ontology read port resolve and execute on
-        # the platform database; integrated sources bring their own scopes.
+        # the platform database; integrated relations are platform replica
+        # reads that do not need the PG-only pin (SQLite tests included).
         return any(binding.kind in {"dataset", "ontology"} for binding in plan.bindings.values())
 
     def _execution_relations(self, pipeline: Pipeline) -> dict[str, Relation]:
@@ -802,8 +807,8 @@ class QueryService:
                     state["snapshot"] = dict(relation.source_group.provenance)
                 state["alias"] = alias
                 source_states.append(state)
-            consistency = ("immutable_versions" if all(s.get("consistency") == "immutable_version" for s in source_states)
-                           else "single_source_snapshot" if len(connection_keys) == 1 else "cross_source_non_atomic")
+            from .providers import composed_consistency
+            consistency = composed_consistency(source_states, connection_keys)
             snapshot = UnifiedQuerySnapshot(
                 id=snapshot_id, owner_user_id=str(self.user.id), query_hash=plan.query_hash,
                 auth_fingerprint=auth_fp, schema_fingerprint=schema_fp,
@@ -927,10 +932,15 @@ class QueryService:
             started_monotonic=self.started, done=page.done,
             pages=1, rows_read=page.fetched, bytes_read=page.row_bytes)
         source_states = _relation_states(execution_relations)
-        # Every page re-reads the source under a fresh scope: the paged result
-        # is never one cross-page snapshot, whatever a single leaf's session
+        # Every page re-reads the leaf under a fresh scope: the paged result is
+        # never one cross-page snapshot, whatever a single leaf's session
         # consistency is, so the label states the paging semantics honestly.
-        consistency = "live_keyset_paged"
+        # Integrated leaves page over the local replica (per-leaf coverage
+        # instants), never over a live source.
+        consistency = ("replica_keyset_paged"
+                       if all(r.state.get("consistency") == "replica_snapshot"
+                              for r in execution_relations.values())
+                       else "live_keyset_paged")
         handle = MemoryHandle(
             id=handle_id, owner_user_id=str(self.user.id), instance_id=INSTANCE_ID,
             columns=[spec.output() for spec in page.user_columns], rows=page.user_rows,

@@ -97,6 +97,20 @@ type MockOptions = {
   decommissionBlocked?: boolean
   /** CDC status preset for GET /integrated-datasets/{id}/cdc; 'fail' makes the status unverifiable. */
   cdc?: CdcMode | 'fail'
+  /** Local replica lifecycle served by GET /{id}/replica; 'fail' makes it unverifiable. */
+  replica?: 'ready' | 'stale' | 'pending' | 'initializing' | 'stopped' | 'rebuild_required' | 'fail'
+  /** Fail POST /{id}/replica/rebuild with a structured 409. */
+  replicaRebuildError?: boolean
+  /** Fail POST /{id}/replica/stop with a structured 403. */
+  replicaStopError?: boolean
+  /** Source replication preflight result served by POST /{id}/replica/preflight. */
+  replicaPreflight?: { ok: boolean; code?: string }
+  /** Success receipt platform persistence time (post source commit), if the server sends one. */
+  receiptAppliedAt?: string
+  /** Replica applied_at; may advance for unrelated transactions. */
+  replicaAppliedAt?: string
+  /** Replica confirmed coverage cut; only a later cut proves this write is included. */
+  replicaCoverageAt?: string
 }
 async function mockIntegrated(page: Page, options: MockOptions = {}) {
   const captured: Array<{ method: string; path: string; body: any }> = []
@@ -105,11 +119,28 @@ async function mockIntegrated(page: Page, options: MockOptions = {}) {
   const dbx = options.dbxUnavailable
     ? { configured: false, available: false, commit: '0137e0cbc8b663da5a17ec424c6d47e4e5570ead', version: '0.6.53', reason: 'Pinned dbx metadata transport is not configured or verified' }
     : assetFixture.dbx
+  let replicaStatus: 'ready' | 'stale' | 'pending' | 'stopped' | 'rebuild_required' | 'initializing' =
+    options.replica === 'fail' ? 'ready' : (options.replica ?? 'ready')
+  let replicaGeneration = 1
+  const replicaPayload = () => ({
+    asset_id: 'asset-orders', status: replicaStatus,
+    // initializing keeps serving the previous active run while rebuilding.
+    complete: ['ready', 'stale', 'initializing'].includes(replicaStatus),
+    stale: replicaStatus !== 'ready' && ['ready', 'stale', 'initializing'].includes(replicaStatus),
+    row_count: 10000, applied_at: options.replicaAppliedAt ?? instant,
+    coverage_confirmed_at: options.replicaCoverageAt ?? (replicaStatus === 'pending' ? null : instant),
+    last_error_code: replicaStatus === 'stale' ? 'SOURCE_UNREACHABLE'
+      : replicaStatus === 'rebuild_required' ? 'SOURCE_LOG_GAP' : null,
+    generation: replicaGeneration,
+    run_id: replicaStatus === 'stopped' ? null : 'replica-run-1',
+  })
   const assets = options.noAssets ? [] : [{
     ...assetFixture,
     writable: options.writable ?? true,
-    capabilities: { ...assetFixture.capabilities, write: assetWrite, dbx_metadata: !options.dbxUnavailable },
+    capabilities: { ...assetFixture.capabilities, write: assetWrite, dbx_metadata: !options.dbxUnavailable,
+      stop: role === 'admin' || (role === 'editor' && assetWrite) },
     dbx,
+    replica: replicaPayload(),
     ...(options.unverifiedVersion ? { latest_version_id: 'sealed-version-1' } : {}),
   }]
   let connectionList = structuredClone(options.connections ?? defaultConnections)
@@ -207,6 +238,26 @@ async function mockIntegrated(page: Page, options: MockOptions = {}) {
       if (options.cdc === 'fail') return fail(503, { code: 'CDC_STATUS_UNAVAILABLE', message: 'CDC status is unavailable' })
       return respond(cdcStatusFixture(options.cdc ?? 'active'))
     }
+    // 本地副本控制面：状态、围栏重建、停止与源复制预检。
+    if (/\/integrated-datasets\/[^/]+\/replica\/rebuild$/.test(path) && method === 'POST') {
+      if (options.replicaRebuildError) return fail(409, { code: 'REPLICA_RUN_SUPERSEDED', message: 'The replica run was superseded' })
+      replicaStatus = 'initializing'
+      replicaGeneration += 1
+      return respond({ asset_id: 'asset-orders', run_id: 'replica-run-2',
+        generation: replicaGeneration, status: 'queued', replica_status: replicaStatus, complete: false }, 202)
+    }
+    if (/\/integrated-datasets\/[^/]+\/replica\/stop$/.test(path) && method === 'POST') {
+      if (options.replicaStopError) return fail(403, { code: 'ASSET_OWNER_REQUIRED', message: 'Only the owner or admin may stop replication' })
+      replicaStatus = 'stopped'
+      return respond({ asset_id: 'asset-orders', status: 'stopped', cleanup_pending: true }, 202)
+    }
+    if (/\/integrated-datasets\/[^/]+\/replica\/preflight$/.test(path) && method === 'POST') {
+      return respond(options.replicaPreflight ?? { ok: true })
+    }
+    if (/\/integrated-datasets\/[^/]+\/replica$/.test(path)) {
+      if (options.replica === 'fail') return fail(503, { code: 'REPLICA_STATUS_UNAVAILABLE', message: 'Replica status is unavailable' })
+      return respond(replicaPayload())
+    }
     if (/\/integrated-datasets\/[^/]+\/schema$/.test(path) || path.endsWith('/refresh-schema')) return respond({ columns, primary_key: ['id'], schema_fingerprint: 'schema-orders' })
     if (/\/integrated-datasets\/[^/]+\/versions$/.test(path)) return respond({ items: run?.status === 'sealed' || options.unverifiedVersion ? [{ id: 'sealed-version-1', version_no: 1, row_count: 10000, checksum: 'version-checksum', run_id: options.unverifiedVersion ? null : 'sync-run-1', status: options.unverifiedVersion ? 'unverified' : 'sealed', complete: !options.unverifiedVersion, created_at: instant }] : [] })
     if (path === '/api/__test__/history-recovered') {
@@ -235,7 +286,23 @@ async function mockIntegrated(page: Page, options: MockOptions = {}) {
     }
     if (/\/integrated-datasets\/[^/]+\/mutations\/[^/]+$/.test(path)) return respond({ id: 'mutation-unknown', status: 'unknown', error_code: 'UNKNOWN_REQUIRES_RECONCILIATION', affected_rows: 0, replayed: false })
     if (/\/integrated-datasets\/[^/]+\/rows$/.test(path)) {
-      if (method === 'GET') return respond({ columns, rows, source_state: { started_at: instant, kind: 'postgres', consistency: 'repeatable_read' }, preview: true, limit: 100 })
+      if (method === 'GET') {
+        // 本地副本是唯一读路径：未就绪/已停止/需重建一律结构化拒绝，
+        // 绝不静默回退为远端源直读。
+        if (!replicaPayload().complete) {
+          return fail(409, { code: 'replica_not_ready', message: 'The local replica is not currently readable; request a rebuild', replica_status: replicaStatus })
+        }
+        return respond({
+          columns, rows,
+          source_state: {
+            id: 'replica-run-1', kind: 'replica_snapshot', consistent: true,
+            started_at: instant, complete: true, coverage_confirmed_at: instant,
+            replica_status: replicaStatus, stale: replicaPayload().stale,
+            generation: replicaGeneration, run_id: 'replica-run-1',
+          },
+          stale: replicaPayload().stale, preview: true, limit: 100,
+        })
+      }
       if (method === 'PATCH' && options.conflict) return fail(409, { code: 'ROW_CONFLICT', message: 'The source row changed since it was read', mutation: { id: 'mutation-conflict', status: 'conflict', affected_rows: 0, replayed: false } })
       if (method === 'PATCH' && options.unknownMutation) return fail(409, { code: 'UNKNOWN_REQUIRES_RECONCILIATION', mutation: { id: 'mutation-unknown', status: 'unknown', affected_rows: 0, replayed: false } })
       // 明确失败回执：HTTP 200 + status=failed，源表未变更，该幂等键已结算。
@@ -246,7 +313,8 @@ async function mockIntegrated(page: Page, options: MockOptions = {}) {
       if (method === 'POST') rows.push({ values: { ...body.key, ...body.values }, row_token: 'inserted-row-token' })
       if (method === 'PATCH') rows = rows.map(row => JSON.stringify({ id: row.values.id }) === JSON.stringify(body.key) ? { values: { ...row.values, ...body.values }, row_token: 'updated-row-token' } : row)
       if (method === 'DELETE') rows = rows.filter(row => JSON.stringify({ id: row.values.id }) !== JSON.stringify(body.key))
-      return respond({ id: `mutation-${method}`, status: 'applied', affected_rows: 1, replayed: false })
+      return respond({ id: `mutation-${method}`, status: 'applied', affected_rows: 1, replayed: false,
+        ...(options.receiptAppliedAt ? { applied_at: options.receiptAppliedAt } : {}) })
     }
     if (/\/integrated-datasets\/[^/]+$/.test(path)) return respond(assets.find(asset => asset.id === path.split('/').at(-1)) ?? assets[0])
     if (path === '/api/v2/datasets/overview') return respond({ items: [], total: 0 })
@@ -276,7 +344,7 @@ test('integrated deep link opens the asset detail and survives reload', async ({
   await expect(detail).toContainText('快照版本')
   await expect(detail).toContainText('CDC 变更订阅：订阅中')
   await expect(detail.getByTestId('integrated-cdc-state')).toContainText(/订阅 2 条 · 最近变更事件 \d{4}-\d{2}-\d{2} \d{2}:\d{2}/)
-  await expect(detail).toContainText('活映射仍实时读取源当前数据')
+  await expect(detail).toContainText('日常查询读本地副本，不依赖该快照')
   await expect(detail.getByTestId('integrated-dbx-state')).toContainText('DBX 元数据：已配置')
   await expect(detail.getByTestId('integrated-dbx-state')).toContainText('v0.6.53 · commit 0137e0cbc8b663da5a17ec424c6d47e4e5570ead')
   await expect(detail.getByTestId('integrated-dbx-state')).toContainText('快照 native · 写入 native · 元数据 dbx')
@@ -384,7 +452,7 @@ test('controlled source CRUD uses original PK, row token and distinct secure ide
 test('409 conflict settles the idempotency key: no replay PATCH, cancel reloads the source', async ({ page }) => {
   const requests = await mockIntegrated(page, { conflict: true })
   await page.goto(deepLink)
-  await page.getByRole('button', { name: '加载源数据', exact: true }).click()
+  await page.getByRole('button', { name: '加载副本数据', exact: true }).click()
   await page.getByRole('button', { name: '编辑源记录 1', exact: true }).click()
   const changes = JSON.stringify({ ...sourceRow.values, note: 'not-applied' })
   await page.getByLabel('源记录值 JSON').fill(changes)
@@ -392,13 +460,13 @@ test('409 conflict settles the idempotency key: no replay PATCH, cancel reloads 
   // 深链已打开详情弹窗（base 层），编辑器是嵌套弹窗：断言必须按可达名区分层级。
   const dialog = page.getByRole('dialog', { name: '编辑源记录', exact: true })
   await expect(dialog.getByRole('alert')).toContainText('ROW_CONFLICT')
-  await expect(dialog.getByRole('alert')).toContainText('源记录已变化；请取消并重新加载源数据，不能重放当前幂等键')
+  await expect(dialog.getByRole('alert')).toContainText('源记录已变化；请取消并重新加载副本数据，不能重放当前幂等键')
   await expect(page.getByLabel('源记录值 JSON')).toHaveValue(changes)
   await expect(page.getByTestId('integrated-source-rows')).not.toContainText('not-applied')
   // 冲突回执结算当前幂等键：确认按钮禁用，同一键不能再次 PATCH。
   await expect(dialog.getByRole('button', { name: '确认写入源表' })).toBeDisabled()
   // 弹窗内提供取消并重新加载：关闭弹窗、重读源数据刷新行令牌、恢复编辑入口。
-  await dialog.getByRole('button', { name: '取消并重新加载源数据', exact: true }).click()
+  await dialog.getByRole('button', { name: '取消并重新加载副本数据', exact: true }).click()
   await expect(page.getByRole('dialog', { name: '编辑源记录', exact: true })).toHaveCount(0)
   await expect(page.getByRole('dialog', { name: '订单源' })).toBeVisible()
   await expect(page.getByRole('button', { name: '新增源记录', exact: true })).toBeEnabled()
@@ -411,7 +479,7 @@ test('409 conflict settles the idempotency key: no replay PATCH, cancel reloads 
 test('failed receipt settles its key and retry uses a fresh key with the edited JSON preserved', async ({ page }) => {
   const requests = await mockIntegrated(page, { failedMutation: true })
   await page.goto(deepLink)
-  await page.getByRole('button', { name: '加载源数据', exact: true }).click()
+  await page.getByRole('button', { name: '加载副本数据', exact: true }).click()
   await page.getByRole('button', { name: '编辑源记录 1', exact: true }).click()
   const changes = JSON.stringify({ ...sourceRow.values, note: 'retried' })
   await page.getByLabel('源记录值 JSON').fill(changes)
@@ -446,7 +514,7 @@ test('failed receipt settles its key and retry uses a fresh key with the edited 
 test('immutable PK is rejected locally before submitting and correction remains editable', async ({ page }) => {
   const requests = await mockIntegrated(page)
   await page.goto(deepLink)
-  await page.getByRole('button', { name: '加载源数据', exact: true }).click()
+  await page.getByRole('button', { name: '加载副本数据', exact: true }).click()
   await page.getByRole('button', { name: '编辑源记录 1', exact: true }).click()
   await page.getByLabel('源记录值 JSON').fill(JSON.stringify({ ...sourceRow.values, id: 2 }))
   await page.getByRole('button', { name: '确认写入源表' }).click()
@@ -458,7 +526,7 @@ test('immutable PK is rejected locally before submitting and correction remains 
 test('unknown write exposes its receipt inside the modal and prevents replays with fresh keys', async ({ page }) => {
   const requests = await mockIntegrated(page, { unknownMutation: true })
   await page.goto(deepLink)
-  await page.getByRole('button', { name: '加载源数据', exact: true }).click()
+  await page.getByRole('button', { name: '加载副本数据', exact: true }).click()
   await page.getByRole('button', { name: '编辑源记录 1', exact: true }).click()
   await page.getByLabel('源记录值 JSON').fill(JSON.stringify({ ...sourceRow.values, note: 'unconfirmed' }))
   await page.getByRole('button', { name: '确认写入源表' }).click()
@@ -485,7 +553,7 @@ for (const role of ['viewer', 'custom'] as const) {
     await expect(page.getByRole('button', { name: '完整同步到版本', exact: true })).toBeHidden()
     await openAdvancedOperations(page)
     await expect(page.getByRole('button', { name: '完整同步到版本', exact: true })).toBeDisabled()
-    await page.getByRole('button', { name: '加载源数据', exact: true }).click()
+    await page.getByRole('button', { name: '加载副本数据', exact: true }).click()
     await expect(page.getByRole('button', { name: '编辑源记录 1', exact: true })).toBeDisabled()
     await page.getByRole('dialog', { name: '订单源' }).getByRole('button', { name: '关闭', exact: true }).click()
     await expect(page.getByRole('button', { name: '登记集成数据集', exact: true })).toBeDisabled()
@@ -951,22 +1019,140 @@ test('persisted starting state is active and continues polling to sealed', async
   expect(requests.filter(request => request.path.endsWith('/sync') && request.method === 'POST')).toHaveLength(0)
 })
 
-test('整表同步入口默认折叠在离线快照区，日常路径只保留活读预览', async ({ page }) => {
+test('整表同步入口默认折叠在离线快照区，日常路径只保留本地副本预览', async ({ page }) => {
   await mockIntegrated(page)
   await page.goto(deepLink)
   const detail = page.getByTestId('integrated-asset-detail')
-  // 日常路径：活读预览入口可用；整表同步按钮在折叠区默认不可见
-  await expect(detail.getByRole('button', { name: '加载源数据', exact: true })).toBeEnabled()
+  // 日常路径：本地副本预览入口可用；整表同步按钮在折叠区默认不可见
+  await expect(detail.getByRole('button', { name: '加载副本数据', exact: true })).toBeEnabled()
   await expect(detail.getByRole('button', { name: '完整同步到版本', exact: true })).toBeHidden()
   await expect(detail.getByTestId('integrated-advanced-operations')).toContainText('离线快照与高级操作')
-  // 文案口径：活映射实时读源；快照仅离线使用，不是查询前提
-  await expect(detail).toContainText('活映射仍实时读取源当前数据')
-  await expect(detail).toContainText('不以快照为前提')
+  // 本地副本才是日常查询主路径：副本就绪才可读；封存快照仅离线对账用，
+  // 既不参与查询，也不是查询前提（读取资格由副本状态而非版本状态裁决）。
+  await expect(detail.getByTestId('integrated-replica-state')).toContainText('本地副本：已就绪')
+  await expect(detail.getByTestId('integrated-replica-state')).toContainText('查询与预览读取平台本地副本')
+  await expect(detail).toContainText('日常查询读本地副本，不依赖该快照')
+  await expect(detail).toContainText('仅用于精确对账')
   await expect(detail).not.toContainText('只有完整封存版本才能用于')
   // 展开：受控同步入口与封存历史保留（sync/sync-runs API 兼容不变）
   await openAdvancedOperations(page)
   await expect(detail.getByRole('button', { name: '完整同步到版本', exact: true })).toBeEnabled()
   await expect(detail.getByTestId('integrated-advanced-operations')).toContainText('同步版本')
+})
+
+test('首个副本未就绪时本地读取被拒绝且不回退远端源读', async ({ page }) => {
+  const requests = await mockIntegrated(page, { replica: 'pending' })
+  await page.goto(deepLink)
+  const detail = page.getByTestId('integrated-asset-detail')
+  await expect(detail.getByTestId('integrated-replica-state')).toContainText('本地副本：等待初始化')
+  await expect(detail.getByTestId('integrated-replica-state')).toContainText('初始化未完成前本地查询不可用')
+  await detail.getByRole('button', { name: '加载副本数据', exact: true }).click()
+  const alert = page.getByRole('alert').filter({ hasText: '本地副本读取失败' })
+  await expect(alert).toContainText('replica_not_ready')
+  // 拒绝是终态：页面没有发起任何源端读取/探测，也没有把失败伪装成源可读。
+  expect(requests.filter(request => request.path.includes('/sources/'))).toHaveLength(0)
+  expect(requests.filter(request => request.path.endsWith('/rows') && request.method === 'GET')).toHaveLength(1)
+  await expect(detail.getByTestId('integrated-source-rows')).toHaveCount(0)
+})
+
+test('已有完整副本在源断联后仍可本地读取并如实标注滞后', async ({ page }) => {
+  const requests = await mockIntegrated(page, { replica: 'stale' })
+  await page.goto(deepLink)
+  const detail = page.getByTestId('integrated-asset-detail')
+  await expect(detail.getByTestId('integrated-replica-state')).toContainText('本地副本：已滞后（可读）')
+  await expect(detail.getByTestId('integrated-replica-state')).toContainText('不直连源库')
+  await detail.getByRole('button', { name: '加载副本数据', exact: true }).click()
+  const rows = detail.getByTestId('integrated-source-rows')
+  await expect(rows).toBeVisible()
+  await expect(rows).toContainText('副本可能滞后（标注读取）')
+  await expect(rows).toContainText('读取模式 replica_snapshot')
+  expect(requests.filter(request => request.path.includes('/sources/'))).toHaveLength(0)
+})
+
+test('重建中旧 active 副本仍可读但必须标注滞后', async ({ page }) => {
+  const requests = await mockIntegrated(page, { replica: 'initializing' })
+  await page.goto(deepLink)
+  const detail = page.getByTestId('integrated-asset-detail')
+  await expect(detail.getByTestId('integrated-replica-state')).toContainText('本地副本：初始化中')
+  // 非 ready 但 complete：可读，且不得把旧覆盖当作最新。
+  await expect(detail.getByTestId('integrated-replica-state')).toContainText('覆盖落后于复制推进')
+  await expect(detail.getByTestId('integrated-replica-state')).toContainText('覆盖确认时点不代表最后变更时间')
+  await detail.getByRole('button', { name: '加载副本数据', exact: true }).click()
+  const rows = detail.getByTestId('integrated-source-rows')
+  await expect(rows).toBeVisible()
+  await expect(rows).toContainText('副本可能滞后（标注读取）')
+  expect(requests.filter(request => request.path.includes('/sources/'))).toHaveLength(0)
+})
+
+test('其他事务 applied_at 前进但覆盖未过写入基线时保持等待提示', async ({ page }) => {
+  const requests = await mockIntegrated(page, {
+    // Source commit receipt persisted at 08:00:10. A later unrelated applied_at
+    // (08:00:30) proves nothing about this write; coverage is still 08:00:05.
+    receiptAppliedAt: '2026-10-24T08:00:10Z',
+    replicaAppliedAt: '2026-10-24T08:00:30Z',
+    replicaCoverageAt: '2026-10-24T08:00:05Z',
+  })
+  await page.goto(deepLink)
+  const replicaReads = () => requests.filter(request =>
+    /\/integrated-datasets\/[^/]+\/replica$/.test(request.path) && request.method === 'GET').length
+  const readsBeforeWrite = replicaReads()
+  await page.getByRole('button', { name: '新增源记录', exact: true }).click()
+  await page.getByLabel('源记录值 JSON').fill('{"id":2,"amount":{"$decimal":"1.20"},"note":"pending-sync"}')
+  await page.getByRole('button', { name: '确认写入源表' }).click()
+  const note = page.getByTestId('integrated-replica-pending-sync')
+  await expect(note).toBeVisible()
+  // Wait for actual status polls: applied_at advances, but the note must stay.
+  await expect.poll(replicaReads, { timeout: 12000 }).toBeGreaterThan(readsBeforeWrite + 1)
+  await expect(note).toBeVisible()
+})
+
+test('后继覆盖 cut 越过写入基线后才撤下等待提示', async ({ page }) => {
+  await mockIntegrated(page, {
+    receiptAppliedAt: '2026-10-24T08:00:10Z',
+    replicaAppliedAt: '2026-10-24T08:00:20Z',
+    // A confirmed coverage cut after the write baseline proves inclusion.
+    replicaCoverageAt: '2026-10-24T08:00:30Z',
+  })
+  await page.goto(deepLink)
+  await page.getByRole('button', { name: '新增源记录', exact: true }).click()
+  await page.getByLabel('源记录值 JSON').fill('{"id":2,"amount":{"$decimal":"1.20"},"note":"covered"}')
+  await page.getByRole('button', { name: '确认写入源表' }).click()
+  const note = page.getByTestId('integrated-replica-pending-sync')
+  await expect(note).toBeVisible()
+  await expect(note).toHaveCount(0, { timeout: 12000 })
+})
+
+test('停止本地副本围栏读取并保留受控重建入口', async ({ page }) => {
+  const requests = await mockIntegrated(page)
+  await page.goto(deepLink)
+  const detail = page.getByTestId('integrated-asset-detail')
+  await detail.getByRole('button', { name: '停止本地副本', exact: true }).click()
+  const confirm = page.getByRole('dialog', { name: '停止本地副本' })
+  await expect(confirm).toContainText('立即让当前副本不可读')
+  await confirm.getByRole('button', { name: '确认停止', exact: true }).click()
+  await expect(detail.getByTestId('integrated-replica-state')).toContainText('本地副本：已停止')
+  await expect(detail.getByTestId('integrated-replica-state')).toContainText('重建后可恢复读取')
+  await expect(detail.getByRole('button', { name: '停止本地副本', exact: true })).toBeDisabled()
+  await detail.getByRole('button', { name: '加载副本数据', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '本地副本读取失败' })).toContainText('replica_not_ready')
+  await expect(detail.getByRole('button', { name: '重建本地副本', exact: true })).toBeEnabled()
+  expect(requests.filter(request => request.path.endsWith('/replica/stop') && request.method === 'POST')).toHaveLength(1)
+  expect(requests.filter(request => request.path.includes('/sources/'))).toHaveLength(0)
+})
+
+test('源复制预检失败与围栏重建分别显示稳定错误码和初始化状态', async ({ page }) => {
+  const requests = await mockIntegrated(page, {
+    replicaPreflight: { ok: false, code: 'REPLICA_LOG_NOT_CONFIGURED' },
+  })
+  await page.goto(deepLink)
+  const detail = page.getByTestId('integrated-asset-detail')
+  await detail.getByRole('button', { name: '源复制预检', exact: true }).click()
+  await expect(detail.getByTestId('integrated-replica-state')).toContainText('预检未通过：REPLICA_LOG_NOT_CONFIGURED')
+  await detail.getByRole('button', { name: '重建本地副本', exact: true }).click()
+  await expect(detail.getByTestId('integrated-replica-state')).toContainText('本地副本：初始化中')
+  await expect(detail.getByRole('button', { name: '重建本地副本', exact: true })).toBeDisabled()
+  expect(requests.filter(request => request.path.endsWith('/replica/preflight') && request.method === 'POST')).toHaveLength(1)
+  expect(requests.filter(request => request.path.endsWith('/replica/rebuild') && request.method === 'POST')).toHaveLength(1)
 })
 
 test('DBX 503 is an explicit discovery error rather than invented source success', async ({ page }) => {
@@ -1004,7 +1190,9 @@ test('non-owner editor is read-only for this asset while sync remains available'
   await openAdvancedOperations(page)
   await expect(detail.getByRole('button', { name: '完整同步到版本', exact: true })).toBeEnabled()
   await expect(detail.getByRole('button', { name: '新增源记录', exact: true })).toBeDisabled()
-  await detail.getByRole('button', { name: '加载源数据', exact: true }).click()
+  // 非 owner editor 可以同步/重建，但服务端仅允许 owner/admin 停止复制。
+  await expect(detail.getByRole('button', { name: '停止本地副本', exact: true })).toHaveCount(0)
+  await detail.getByRole('button', { name: '加载副本数据', exact: true }).click()
   await expect(detail.getByRole('button', { name: '编辑源记录 1', exact: true })).toBeDisabled()
   await expect(detail.getByRole('button', { name: '删除源记录 1', exact: true })).toBeDisabled()
   await expect(detail).toContainText('写入未启用或当前角色无该资产写权限')

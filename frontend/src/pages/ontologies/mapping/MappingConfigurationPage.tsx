@@ -104,7 +104,7 @@ function DatasetCanvasNode({ data }: NodeProps<Node<DatasetNodeData>>) {
   const isRemote = dataset.source === 'remote'
   const remoteTableLabel = dataset.remoteTable
     ? `${dataset.remoteTable.schemaName}.${dataset.remoteTable.tableName}`
-    : '查询时读取'
+    : '读本地副本'
   return (
     <div
       className={`dmc-node dmc-node--dataset${isRemote ? ' dmc-node--remote' : ''}`}
@@ -1142,7 +1142,7 @@ export function MappingWorkspace({ ontologyId, versionId, focus, onBack, onOpenM
   }
   const closeTutorial = () => { localStorage.setItem(`mapping-tutorial:${ontologyId}`, 'seen'); setTutorialStep(null) }
   const tutorial = [
-    { icon: Database, title: '从左侧选择数据资产', text: '这里展示数据资产湖中已启用的成品数据集、人工数据集，以及已登记的远程数据资产（只读绑定，查询时读取）。点击“+”把需要配置的数据集放到画布。' },
+    { icon: Database, title: '从左侧选择数据资产', text: '这里展示数据资产湖中已启用的成品数据集、人工数据集，以及已登记的远程数据资产（只读绑定，读本地副本）。点击“+”把需要配置的数据集放到画布。' },
     { icon: Boxes, title: '从右侧选择本体元素', text: '对象实体与实体关系会分别标识配置进度。把需要维护的元素加入画布即可查看全部属性。' },
     { icon: Link2, title: '拖动端点建立字段连线', text: '从数据字段右侧圆点拖到本体属性左侧圆点。点击节点可聚焦相关映射，悬停或点击连线可查看字段去向。' },
     { icon: Eye, title: '预览数据，最后统一保存', text: '点击数据集的眼睛可在底部核对实例。所有操作先保存在当前前端草稿，只有右上角“保存配置”才会写入数据库。' },
@@ -1257,7 +1257,7 @@ export function MappingWorkspace({ ontologyId, versionId, focus, onBack, onOpenM
                         <button onClick={() => setExpandedAssets(current => { const next = new Set(current); if (expanded) next.delete(dataset.id); else next.add(dataset.id); return next })} title={expanded ? '收起字段' : '展开字段'}>{expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}</button>
                         <span className="dmc-asset-icon dmc-asset-icon--remote"><Cloud size={13} /></span>
                         <span><b>{dataset.name}</b><small>{tableLabel ? `${tableLabel} · ` : ''}只读 · {dataset.columns.length} 字段</small></span>
-                        <button className="dmc-eye" data-active={selectedDatasetId === dataset.id} aria-pressed={selectedDatasetId === dataset.id} onClick={() => toggleDatasetPreview(dataset.id)} title={selectedDatasetId === dataset.id ? '收起预览' : '预览远程数据（查询时从源读取）'}><Eye size={12} /></button>
+                        <button className="dmc-eye" data-active={selectedDatasetId === dataset.id} aria-pressed={selectedDatasetId === dataset.id} onClick={() => toggleDatasetPreview(dataset.id)} title={selectedDatasetId === dataset.id ? '收起预览' : '预览远程数据（读平台本地副本）'}><Eye size={12} /></button>
                         <button className="dmc-add" disabled={!editable || added} onClick={() => addDatasetNode(dataset)} title={!editable ? '只读快照不可添加节点' : '加入画布建立远程只读绑定'}>{added ? <Check size={12} /> : <Plus size={12} />}</button>
                       </div>
                       {expanded && <div className="dmc-asset-columns">{dataset.columns.map(column => <span key={column.name}>{dataset.primaryKeyColumns.includes(column.name) ? <KeyRound size={9} /> : <i />}<b title={column.name}>{column.name}</b><em>{typeLabel(column.type)}</em></span>)}</div>}
@@ -1309,7 +1309,7 @@ export function MappingWorkspace({ ontologyId, versionId, focus, onBack, onOpenM
             <div className="dmc-canvas-stats">节点 <b>{nodes.length}</b><span />字段映射 <b>{edges.length}</b><span />{dirty ? <em>有未保存更改</em> : <i>已与数据库同步</i>}</div>
           </ReactFlow>
 
-          {selectedDatasetId && <section className="dmc-preview-panel" data-testid="mapping-dataset-preview"><header><div><Eye size={14} /><span><b>{selectedDataset?.name}</b><small>{selectedDatasetIsRemote ? '远程数据预览 · 查询时从源读取 · 仅用于映射核对' : '实例数据预览 · 仅用于映射核对'}</small></span></div><button onClick={() => setSelectedDatasetId(null)} aria-label="关闭数据预览"><X size={14} /></button></header>{previewQuery.isLoading ? <div className="dmc-preview-loading"><Loader2 className="animate-spin" />正在读取数据…</div> : previewQuery.isError ? <div className="dmc-preview-loading"><AlertCircle />{selectedDatasetIsRemote ? '远程数据读取失败，请检查资产登记与源连接状态。' : '数据读取失败，请稍后重试。'}</div> : previewQuery.data?.columns?.length ? <div className="dmc-preview-table"><table><thead><tr>{previewQuery.data.columns.map(column => <th key={column} title={column}>{datasetColumnLabelByName(selectedDataset, column)}</th>)}</tr></thead><tbody>{previewQuery.data.rows.map((row, index) => <tr key={index}>{previewQuery.data!.columns.map(column => <td key={column} title={String(row[column] ?? '')}>{row[column] == null || row[column] === '' ? '—' : typeof row[column] === 'object' ? JSON.stringify(row[column]) : String(row[column])}</td>)}</tr>)}</tbody></table><p>{selectedDatasetIsRemote ? `显示 ${previewQuery.data.rows.length} 行 · 远程只读实时读取，非全量` : `显示 ${previewQuery.data.rows.length} 行 · 共 ${previewQuery.data.total_rows?.toLocaleString() || 0} 行`}</p></div> : <div className="dmc-preview-loading"><AlertCircle />当前数据集暂无可预览数据</div>}</section>}
+          {selectedDatasetId && <section className="dmc-preview-panel" data-testid="mapping-dataset-preview"><header><div><Eye size={14} /><span><b>{selectedDataset?.name}</b><small>{selectedDatasetIsRemote ? '远程数据预览 · 读本地副本（最近覆盖时点） · 仅用于映射核对' : '实例数据预览 · 仅用于映射核对'}</small></span></div><button onClick={() => setSelectedDatasetId(null)} aria-label="关闭数据预览"><X size={14} /></button></header>{previewQuery.isLoading ? <div className="dmc-preview-loading"><Loader2 className="animate-spin" />正在读取数据…</div> : previewQuery.isError ? <div className="dmc-preview-loading"><AlertCircle />{selectedDatasetIsRemote ? '远程数据读取失败，请检查资产登记与本地副本状态。' : '数据读取失败，请稍后重试。'}</div> : previewQuery.data?.columns?.length ? <div className="dmc-preview-table"><table><thead><tr>{previewQuery.data.columns.map(column => <th key={column} title={column}>{datasetColumnLabelByName(selectedDataset, column)}</th>)}</tr></thead><tbody>{previewQuery.data.rows.map((row, index) => <tr key={index}>{previewQuery.data!.columns.map(column => <td key={column} title={String(row[column] ?? '')}>{row[column] == null || row[column] === '' ? '—' : typeof row[column] === 'object' ? JSON.stringify(row[column]) : String(row[column])}</td>)}</tr>)}</tbody></table><p>{selectedDatasetIsRemote ? `显示 ${previewQuery.data.rows.length} 行 · 本地副本读取，非全量` : `显示 ${previewQuery.data.rows.length} 行 · 共 ${previewQuery.data.total_rows?.toLocaleString() || 0} 行`}</p></div> : <div className="dmc-preview-loading"><AlertCircle />当前数据集暂无可预览数据</div>}</section>}
         </main>
 
         <aside className="dmc-sidebar dmc-sidebar--right">

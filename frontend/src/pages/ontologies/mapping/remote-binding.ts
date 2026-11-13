@@ -17,7 +17,8 @@ import type {
 } from '@/api/v2/integrated-datasets'
 
 /** 远程只读绑定的持久披露口径（侧栏分组、节点与保存提示共用同一句话）。 */
-export const REMOTE_BINDING_DISCLOSURE = '仅冻结绑定定义：数据在查询时从源读取，不物化、不做全量质量校验。'
+export const REMOTE_BINDING_DISCLOSURE =
+  '仅冻结绑定定义：查询读取平台本地副本（按各资产副本最近确认覆盖时点），不直连源库、不做全量质量校验。'
 
 export function isRemoteMappingDataset(dataset: MappingDataset | undefined | null): boolean {
   return dataset?.source === 'remote'
@@ -51,7 +52,7 @@ function buildRemoteDataset(input: RemoteDatasetInput): MappingDataset {
     id: input.datasetId,
     assetId: input.assetId,
     name: input.name,
-    // 远程绑定不物化：行数/质量分不可宣称，画布上以“查询时读取”披露。
+    // 远程绑定不物化为湖版本：行数/质量分不可宣称，画布上以“本地副本读取”披露。
     rows: null,
     quality: null,
     primaryKeyColumns: [...input.primaryKey],
@@ -152,8 +153,8 @@ export interface RemotePreviewResult {
 }
 
 /**
- * integrated rows API 响应 → 画布预览面板形状。远程读取按 limit 有界，
- * total_rows 不宣称全量；面板文案对远程固定披露“查询时实时读取”。
+ * integrated rows API 响应 → 画布预览面板形状。副本读取按 limit 有界，
+ * total_rows 不宣称全量；面板文案对远程固定披露“本地副本读取”。
  */
 export function integratedRowsToPreview(rows: IntegratedRows): RemotePreviewResult {
   const bounded = rows.rows || []

@@ -746,6 +746,48 @@ services:
       retries: 3
       start_period: 20s
 
+  # 集成副本执行器：与生产同一服务形态（backend/Dockerfile.cdc 镜像，含
+  # replica-smt.jar），随标准本地栈自动启动（无 profile/opt-in）；资源口径
+  # 与偏移语义见 docs/operations/deployment.md 的「集成副本执行器」一节。
+  integrated_replica_executor:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.cdc
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://ontoprompt:ontoprompt@db:5432/ontoprompt}
+      SECRET_KEY: ${SECRET_KEY:-}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
+      APP_LOG_LEVEL: ${APP_LOG_LEVEL:-INFO}
+      # 单宿主共享状态卷；每个 capture 由 SourceLease 单写者围栏。此上限是
+      # 每个 executor 实例的并发捕获数（默认 2），数百源需增加实例/资源。
+      REPLICA_STATE_ROOT: /var/lib/openontology-replicas
+      REPLICA_MAX_CAPTURES: ${REPLICA_MAX_CAPTURES:-2}
+      REPLICA_RECONCILE_INTERVAL_SECONDS: ${REPLICA_RECONCILE_INTERVAL_SECONDS:-0.5}
+      REPLICA_HEARTBEAT_FILE: /tmp/integrated_replica_executor.heartbeat
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # ./backend 源码 bind mount 会盖掉镜像 venv，原因同 migrate/backend 服务。
+    volumes:
+      - integrated_replica_state:/var/lib/openontology-replicas
+      - ./backend:/app
+      - /app/.venv
+    command: python -m app.data_channel.integrated.replica_executor
+    mem_limit: ${REPLICA_EXECUTOR_MEM_LIMIT:-3g}
+    cpus: ${REPLICA_EXECUTOR_CPUS:-2.0}
+    pids_limit: 1024
+    stop_grace_period: 45s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,time,sys; sys.exit(0 if time.time()-os.path.getmtime('/tmp/integrated_replica_executor.heartbeat')<30 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
   # 任务实例 agent 执行体（opt-in：--profile task-agent 启用）。
   # 挂载宿主 docker.sock，为每个 agent 节点起 openontology-task-agent 容器；
   # 镜像需先构建：docker build -t openontology-task-agent:local docker/task-agent
@@ -800,6 +842,9 @@ volumes:
   weknora_ssl_certs:
   hindsight_postgres_data:
   hindsight_model_cache:
+  # integrated_replica_executor 的偏移/模式历史专用卷（单宿主共享，
+  # 每 capture 由 SourceLease 单写者围栏）。
+  integrated_replica_state:
 
 networks:
   kaneo_internal:

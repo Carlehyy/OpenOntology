@@ -8,6 +8,8 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, text
 
+from tests.migrations.latest_head import LATEST_HEAD
+
 
 def _alembic_config(backend: Path, db_path: Path) -> Config:
     cfg = Config(str(backend / "alembic.ini"))
@@ -113,4 +115,4 @@ def test_head_is_single_and_follows_token_version(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     heads = ScriptDirectory.from_config(cfg).get_heads()
     # 0094 palace folders 在本迁移之后线性追加，head 随之演进
-    assert heads == ["0146_integrated_cdc"]
+    assert heads == [LATEST_HEAD]

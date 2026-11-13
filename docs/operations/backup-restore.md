@@ -15,6 +15,9 @@
 - 启用 Hindsight 记忆 profile 时，其 `hindsight_postgres_data` 卷与 `.env` 中
   的 `HINDSIGHT_API_KEY`/`HINDSIGHT_SERVICE_TOKEN` 同恢复点保存
   （`hindsight_model_cache` 仅是模型缓存，可重新下载/预填，不属于恢复权威）；
+- 集成副本执行器（标准栈自动启动）的偏移卷 `integrated_replica_state` 与
+  PostgreSQL（副本表与控制面所在库）必须同一恢复点保存（启用 CDC 覆盖层时
+  `integrated_cdc_state` 同理）；
 - 服务器 `.env` 与部署所需非秘密配置；
 - 当前镜像 digest/版本和 Compose 配置。
 
@@ -42,6 +45,19 @@ Kaneo 的 `kaneo_postgres_data` 必须与服务器 `.env` 中的
 n8n、MinIO、浏览器源、分享令牌、MCP 和 W3 密文的解密权威；只恢复数据而丢失
 对应密钥，等价于不可恢复。备份副本必须在受控位置以最小权限保存，不得放入
 Git、CI artifact、聊天或应用目录内的普通源码备份。
+
+集成副本（及启用覆盖层时的 CDC）的偏移卷与数据库没有独立价值，必须与同目标
+SQL 一致：副本表与控制面状态在 PostgreSQL 里，Debezium 偏移/模式历史在
+`integrated_replica_state` 卷里，二者只还原其一会造成“库声称已覆盖、偏移却
+缺失/超前”的不一致态。执行器对该态 fail-closed：不静默重快照、不从当前位点
+续流，对应连接被阻塞，只能由管理员显式 rebuild（重建捕获代、全量重锚）。因
+此备份窗口内必须先停对应执行器（或接受阻塞态为恢复结果），并把 PostgreSQL
+与偏移卷作为同一恢复点一起还原；`integrated_cdc_state` 同口径。
+
+副本 capture 行里的 `coverage_probe`（pending/confirmed 覆盖证明）随平台库
+一起备份，和副本表、偏移卷属于同一恢复点；源端 PostgreSQL 的受管 WAL 逻辑
+消息不属于平台备份内容，恢复后由执行器按新 capture 重新确认。不要把源端
+WAL 逻辑消息误认为业务表写入，也不要在备份说明中宣称副本链路源端零写。
 
 API Hub 使用 SQLite WAL。运行中只复制 `app.db` 不能证明得到一致备份；应先停止
 API Hub 写入，再备份整个 `api_hub_data` volume（包括 WAL/SHM 和会话文件），或

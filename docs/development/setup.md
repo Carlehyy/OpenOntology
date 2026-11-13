@@ -212,6 +212,29 @@ API 仅 loopback `18888`，管理 UI 仅 loopback `19999`，都不对外。服�
 会话 cookie），中继未就绪时回落为控制台密钥登录（详见
 [operations/configuration.md](../operations/configuration.md#hindsight-长期记忆生产默认启用)）。
 
+## 集成副本执行器
+
+集成数据集的副本捕获执行器随标准本地栈自动启动（无 profile/opt-in，首次
+启动会构建 `backend/Dockerfile.cdc` 镜像并拉取固定摘要 Debezium 基础镜像），
+在 `migrate` 完成后与 backend 同时拉起：
+
+```bash
+docker compose -f docker-compose.local.yml up -d
+docker compose -f docker-compose.local.yml ps integrated_replica_executor
+```
+
+镜像与 CDC 执行器同源（构建时离线编译 `replica-smt.jar`），状态卷
+`integrated_replica_state` 独立；不发布端口、不挂载 docker.sock。源端协议
+按固定 Debezium Server 3.7.1.Final + PostgreSQL 14+：PG 会收到受管
+prefix/token 的 nontransactional WAL 逻辑消息（初始/恢复切换 cut，以及约
+10 秒一次的轻量覆盖确认），不写业务表但会产生 WAL 副作用；PG<14 预检阻塞
+`REPLICA_PG_VERSION_UNSUPPORTED`。MySQL 只读查询 binlog 状态并以 heartbeat
+offset 作为覆盖证明。容量口径（每实例默认 2 个并发捕获 + 3g/2cpu；扩大容量
+前必须在目标资源隔离环境完成对应分档验收，证据保存到 `.artifacts/` 或 CI
+artifact；数百源需增加同一宿主机上的 executor 实例并同步提升资源，不能依赖
+默认值）、偏移丢失的 blocked/rebuild 语义与备份一致性要求见
+[operations/deployment.md](../operations/deployment.md#集成副本执行器integrated_replica_executor)。
+
 ## 最小验证
 
 改动后先跑受影响范围，再执行 [AGENTS.md](../../AGENTS.md) 第 5 节完整门禁：

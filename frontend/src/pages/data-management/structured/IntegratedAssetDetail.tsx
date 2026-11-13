@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Table } from 'antd'
-import { Loader2, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
+import { CircleStop, DatabaseZap, Loader2, Pencil, Plus, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { v4 as uuid } from 'uuid'
 import {
   cdcCardLabel, cdcFactsDetail, cdcSubscriptionSummary, integratedDatasetsApi, isIntegratedCdcStatus,
-  type IntegratedAsset, type IntegratedCdcStatus, type IntegratedRow, type IntegratedRows, type IntegratedSchema,
+  type IntegratedAsset, type IntegratedCdcStatus, type IntegratedReplica, type IntegratedReplicaPreflightResult,
+  type IntegratedRow, type IntegratedRows, type IntegratedSchema,
   type IntegratedSyncRun, type IntegratedVersion, type MutationReceipt,
 } from '@/api/v2/integrated-datasets'
 import { Alert } from '@/components/ui/Alert'
@@ -14,10 +15,13 @@ import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import {
-  backendsLabel, dbxStateDetail, dbxStateLabel, integratedCell, integratedColumnLabel, integratedError,
-  latestVersionStateLabel, parseObject, primaryKeyOf, receiptNeedsReconciliation, receiptStatusLabel,
-  sourceMutationPayload, sourceReadDetail, sourceReadLabel, syncIsActive, syncIsSealed, syncStatusLabel,
-  versionStateLabel,
+  REPLICA_PENDING_SYNC_NOTE, backendsLabel, dbxStateDetail, dbxStateLabel, integratedCell,
+  integratedColumnLabel, integratedError, isReplicaStatusPayload, latestVersionStateLabel,
+  parseObject, primaryKeyOf,
+  receiptNeedsReconciliation, receiptStatusLabel, replicaCoversWrite, replicaFactsDetail,
+  replicaReadable, replicaNotRegistered, replicaStale, replicaStatusLabel, replicaSyncBaseline,
+  sourceMutationPayload, sourceReadDetail, sourceReadLabel, syncIsActive, syncIsSealed,
+  syncStatusLabel, versionStateLabel,
 } from './integratedModel'
 
 type EditIntent = { mode: 'insert' | 'update' | 'delete'; row?: IntegratedRow; idempotencyKey: string }
@@ -29,7 +33,7 @@ type FailurePayload = {
 
 function terminalReceiptGuidance(status: MutationReceipt['status']): string {
   if (status === 'failed') return '写入已明确失败；当前幂等键已结算，请使用新幂等键重试。'
-  if (status === 'conflict') return '源记录已发生冲突；当前幂等键已结算，请取消并重新加载源数据。'
+  if (status === 'conflict') return '源记录已发生冲突；当前幂等键已结算，请取消并重新加载副本数据。'
   return '写入未确认成功，请先核查回执，不要重复提交。'
 }
 
@@ -75,6 +79,20 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
   // 离线快照折叠区默认收起（整表同步退出常规路径）；进行中的同步运行必须可见，
   // 因此 activeSync 时自动展开——用户仍可手动收起（不强行抢回）。
   const [advancedOpen, setAdvancedOpen] = useState(false)
+  // 本地副本控制面：状态轮询 + 重建/预检动作。状态是服务端事实，失败或
+  // 形态不符一律显示不可核验，绝不沿用上次健康态。
+  const [replica, setReplica] = useState<IntegratedReplica | null>(null)
+  const [replicaUnverified, setReplicaUnverified] = useState(false)
+  const [rebuilding, setRebuilding] = useState(false)
+  const [preflighting, setPreflighting] = useState(false)
+  const [preflight, setPreflight] = useState<IntegratedReplicaPreflightResult | null>(null)
+  const [stopping, setStopping] = useState(false)
+  const [stopOpen, setStopOpen] = useState(false)
+  const [sourceWritePendingSync, setSourceWritePendingSync] = useState(false)
+  // 写入成功后的副本追平基线：轮询看到 applied_at 前进才撤下"等待同步"说明，
+  // 不能用固定超时假装副本已包含该写入。
+  const pendingSync = useRef(false)
+  const pendingSyncBaseline = useRef<string | null>(null)
   const [cdcPoll, setCdcPoll] = useState<CdcPollState>({ phase: 'checking' })
   const alive = useRef(true)
   useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
@@ -153,6 +171,59 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
     return () => { current = false; controller.abort(); clearTimeout(timer) }
   }, [asset.id])
 
+  // 本地副本状态轮询：与资产详情同读授权、无源端 IO；固定间隔即可（就绪
+  // 与初始化推进都可见）。失败、形态不符或不属于当前资产一律不可核验，
+  // 绝不沿用上次健康态。
+  useEffect(() => {
+    setReplica(asset.replica ?? null)
+    setReplicaUnverified(false)
+    pendingSync.current = false
+    pendingSyncBaseline.current = null
+    setSourceWritePendingSync(false)
+    let current = true
+    const controller = new AbortController()
+    let timer: ReturnType<typeof setTimeout>
+    const poll = async () => {
+      try {
+        const payload = await integratedDatasetsApi.replica(asset.id, controller.signal)
+        if (!current) return
+        if (!isReplicaStatusPayload(payload, asset.id)) {
+          setReplicaUnverified(true)
+          return
+        }
+        setReplica({
+          status: payload.status, complete: payload.complete,
+          stale: payload.stale ?? (payload.complete && payload.status !== 'ready'),
+          row_count: payload.row_count, applied_at: payload.applied_at,
+          coverage_confirmed_at: payload.coverage_confirmed_at,
+          last_error_code: payload.last_error_code,
+          generation: payload.generation, run_id: payload.run_id,
+        })
+        setReplicaUnverified(false)
+        // 只有服务端确认的覆盖 cut 严格越过写入基线，才证明本次写已进入副本。
+        // payload.applied_at 前进可能只是其他/更早 TX，不能作为撤提示依据。
+        if (pendingSync.current
+            && replicaCoversWrite(payload.coverage_confirmed_at, pendingSyncBaseline.current)) {
+          pendingSync.current = false
+          setSourceWritePendingSync(false)
+        }
+      } catch (failure) {
+        if (!current) return
+        if (replicaNotRegistered(failure)) {
+          // 历史资产可能没有副本行：这是明确的"未初始化"，不是状态查询故障。
+          setReplica(null)
+          setReplicaUnverified(false)
+          return
+        }
+        setReplicaUnverified(true)
+      } finally {
+        if (current) timer = setTimeout(poll, 3000)
+      }
+    }
+    void poll()
+    return () => { current = false; controller.abort(); clearTimeout(timer) }
+  }, [asset.id])
+
   // Poll only server-persisted queued/starting/loading state. A failed run is
   // never retried automatically; the explicit recovery button only re-reads it.
   useEffect(() => {
@@ -184,9 +255,75 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
       const response = await integratedDatasetsApi.rows(asset.id, 100)
       if (alive.current) setRows(response)
     } catch (failure) {
-      if (alive.current) setRowsError(`源直读失败：${integratedError(failure)}`)
+      if (alive.current) setRowsError(`本地副本读取失败：${integratedError(failure)}`)
     } finally {
       if (alive.current) setLoadingRows(false)
+    }
+  }
+
+  const rebuildReplica = async () => {
+    setRebuilding(true)
+    setError('')
+    try {
+      await integratedDatasetsApi.rebuildReplica(asset.id)
+      if (!alive.current) return
+      toast.success('已请求重建本地副本；初始化完成后可读')
+      const payload = await integratedDatasetsApi.replica(asset.id)
+      if (alive.current && isReplicaStatusPayload(payload, asset.id)) {
+        setReplica({
+          status: payload.status, complete: payload.complete,
+          stale: payload.stale ?? (payload.complete && payload.status !== 'ready'),
+          row_count: payload.row_count, applied_at: payload.applied_at,
+          coverage_confirmed_at: payload.coverage_confirmed_at,
+          last_error_code: payload.last_error_code,
+          generation: payload.generation, run_id: payload.run_id,
+        })
+      }
+      onChanged()
+    } catch (failure) {
+      if (alive.current) setError(`副本重建请求失败：${integratedError(failure)}`)
+    } finally {
+      if (alive.current) setRebuilding(false)
+    }
+  }
+
+  const stopReplica = async () => {
+    setStopping(true)
+    setError('')
+    try {
+      await integratedDatasetsApi.stopReplica(asset.id)
+      if (!alive.current) return
+      setStopOpen(false)
+      toast.success('已停止本地副本复制；重建前本地查询不可用')
+      const payload = await integratedDatasetsApi.replica(asset.id)
+      if (alive.current && isReplicaStatusPayload(payload, asset.id)) {
+        setReplica({
+          status: payload.status, complete: payload.complete,
+          stale: payload.stale ?? (payload.complete && payload.status !== 'ready'),
+          row_count: payload.row_count, applied_at: payload.applied_at,
+          coverage_confirmed_at: payload.coverage_confirmed_at,
+          last_error_code: payload.last_error_code,
+          generation: payload.generation, run_id: payload.run_id,
+        })
+      }
+      onChanged()
+    } catch (failure) {
+      if (alive.current) setError(`停止本地副本失败：${integratedError(failure)}`)
+    } finally {
+      if (alive.current) setStopping(false)
+    }
+  }
+
+  const runPreflight = async () => {
+    setPreflighting(true)
+    setPreflight(null)
+    try {
+      const result = await integratedDatasetsApi.replicaPreflight(asset.id)
+      if (alive.current) setPreflight(result)
+    } catch (failure) {
+      if (alive.current) setPreflight({ ok: false, code: integratedError(failure) })
+    } finally {
+      if (alive.current) setPreflighting(false)
     }
   }
 
@@ -291,6 +428,12 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
       setReceipt(response)
       if (response.status === 'applied') {
         toast.success(`源表写入已应用（影响 ${response.affected_rows} 行）`)
+        // 源写立即生效，但本地副本要等复制追平；以成功回执的平台 applied_at
+        // 为基线（缺失时用客户端收到成功响应的时刻），只有覆盖确认 cut 严格
+        // 越过基线才撤提示——不按定时器猜测，也不复用无关副本 applied_at。
+        pendingSyncBaseline.current = replicaSyncBaseline(response.applied_at)
+        pendingSync.current = true
+        setSourceWritePendingSync(true)
         setIntent(null)
         await loadRows()
         onChanged()
@@ -377,6 +520,7 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
   // owner/admin and reports ASSET_OWNER_REQUIRED for a non-owner editor.
   const canRefresh = canManage
   const canSync = canManage && asset.capabilities.sync
+  const canStop = canSync && (asset.capabilities.stop ?? true)
   const activeSync = syncIsActive(sync)
   useEffect(() => {
     if (activeSync) setAdvancedOpen(true)
@@ -387,8 +531,30 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
       ? `${cdcSubscriptionSummary(cdcPoll.status.subscriptions)} · ${cdcFactsDetail(cdcPoll.status)}`
       : '尚无已发布的远程对象映射订阅本表；远程映射发布后自动开启订阅。'
     : cdcPoll.phase === 'checking'
-      ? '正在核验服务端订阅状态。'
-      : '订阅状态查询失败，不代表订阅正常；详情打开期间会自动重试。'
+    ? '正在核验服务端订阅状态。'
+    : '订阅状态查询失败，不代表订阅正常；详情打开期间会自动重试。'
+  const replicaCardLabel = replicaUnverified ? '不可核验' : replicaStatusLabel(replica?.status)
+  const replicaCanRead = !replicaUnverified && replicaReadable(replica)
+  const replicaCardDetail = replicaUnverified
+    ? '副本状态查询失败，不代表副本正常；详情打开期间会自动重试。'
+    : replicaFactsDetail(replica)
+  const replicaInitializing = !replicaUnverified
+    && !!replica && ['pending', 'initializing', 'catching_up'].includes(replica.status)
+  const replicaStopped = !replicaUnverified && replica?.status === 'stopped'
+  const replicaBlocked = !replicaUnverified
+    && !!replica && ['rebuild_required', 'blocked'].includes(replica.status)
+  const replicaIsStale = !replicaUnverified && replicaStale(replica)
+  const replicaHint = replicaUnverified
+    ? '状态查询失败期间不宣称副本可读；详情打开期间会自动重试，重建与停止仍以服务端裁决为准。'
+    : replicaCanRead && replicaIsStale
+      ? `查询读取平台本地副本，但副本未完全就绪（${replicaCardLabel}）：覆盖落后于复制推进，覆盖确认时点不代表最后变更时间；不直连源库，源网不可达不阻断本地读取。`
+      : replicaCanRead
+        ? '查询与预览读取平台本地副本（覆盖确认时点，不是最后变更时间），不直连源库；源网不可达不阻断本地读取。'
+        : replicaStopped
+          ? '副本已停止：本地查询被拒绝，源表不受影响；重建后可恢复读取。'
+          : replicaBlocked
+            ? '副本不可读：需先重建（或先做源复制预检）；不会回退为远端源直读。'
+            : '初始化未完成前本地查询不可用；可重建副本或先做源复制能力预检。'
 
   return (
     <section data-testid="integrated-asset-detail" className="flex h-full min-h-0 flex-col">
@@ -416,7 +582,7 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
         </div>
         <div className="rounded-lg bg-muted p-3">
           快照版本：<strong>{latestVersionStateLabel(asset, versions)}</strong>
-          <p className="mt-1 text-muted-foreground">「完整同步到版本」会把整张源表封存成快照，仅用于精确离线查询；活映射仍实时读取源当前数据，不以快照为前提。</p>
+          <p className="mt-1 text-muted-foreground">「完整同步到版本」会把整张源表封存成离线快照，仅用于精确对账；日常查询读本地副本，不依赖该快照。</p>
         </div>
         <div
           className="rounded-lg bg-muted p-3"
@@ -428,11 +594,67 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
           <p className="mt-1 break-words text-muted-foreground">{cdcCardDetailLine}</p>
           <p className="mt-1 text-muted-foreground">订阅随已发布的远程映射自动开启与停止，无手动开关；仅同步开启后的增量变更，不回补历史数据。</p>
         </div>
+        <div
+          className="rounded-lg bg-muted p-3"
+          role="status"
+          aria-label={`本地副本状态：${replicaCardLabel}`}
+          data-testid="integrated-replica-state"
+        >
+          本地副本：<strong>{replicaCardLabel}</strong>
+          <p className="mt-1 break-words text-muted-foreground">{replicaCardDetail}</p>
+          <p className="mt-1 text-muted-foreground">{replicaHint}</p>
+          {canSync && (
+            <div className="mt-2 flex flex-wrap gap-2">
+              <Button
+                type="button" variant="outline" size="sm"
+                disabled={rebuilding || replicaInitializing}
+                title={replicaInitializing ? '初始化进行中；如需强制换代仍可稍后重试' : '重建会整体替换当前副本（围栏运行，不生成数据集版本）'}
+                onClick={rebuildReplica}
+              >
+                {rebuilding ? <Loader2 size={13} className="animate-spin" /> : <DatabaseZap size={13} />}重建本地副本
+              </Button>
+              <Button
+                type="button" variant="outline" size="sm"
+                disabled={preflighting}
+                title="对源做复制能力预检（binlog/WAL/权限），只返回稳定错误码"
+                onClick={runPreflight}
+              >
+                {preflighting && <Loader2 size={13} className="animate-spin" />}
+                <ShieldCheck size={13} />源复制预检
+              </Button>
+              {canStop && (
+                <Button
+                  type="button" variant="outline" size="sm"
+                  disabled={stopping || replicaStopped}
+                  title={replicaStopped
+                    ? '副本已停止；重建后可恢复本地查询'
+                    : '停止复制并取消在飞运行；当前副本立即不可读，源表不受影响'}
+                  onClick={() => setStopOpen(true)}
+                >
+                  {stopping ? <Loader2 size={13} className="animate-spin" /> : <CircleStop size={13} />}停止本地副本
+                </Button>
+              )}
+            </div>
+          )}
+          {preflight && (
+            <p className="mt-1 break-words text-muted-foreground" role="status">
+              {preflight.ok
+                ? '预检通过：源具备复制所需能力。'
+                : `预检未通过：${preflight.code ?? '未知错误码'}；请按错误码修正源配置后重试。`}
+            </p>
+          )}
+        </div>
       </div>
+
+      {sourceWritePendingSync && (
+        <p className="text-xs text-muted-foreground" role="status" data-testid="integrated-replica-pending-sync">
+          {REPLICA_PENDING_SYNC_NOTE}
+        </p>
+      )}
 
       <div className="flex flex-wrap gap-2">
         <Button type="button" variant="outline" size="sm" onClick={loadRows} disabled={loadingRows || !asset.capabilities.read}>
-          {loadingRows ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}加载源数据
+          {loadingRows ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}加载副本数据
         </Button>
         <Button
           type="button" variant="outline" size="sm"
@@ -468,7 +690,7 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
 
       {!canWrite && (
         <p className="text-xs text-muted-foreground">
-          写入未启用或当前角色无该资产写权限；源数据直读仍可用，完整同步在下方「离线快照与高级操作」折叠区。
+          写入未启用或当前角色无该资产写权限；本地副本读取仍可用，完整同步在下方「离线快照与高级操作」折叠区。
           写权限由服务端按资产 owner/管理员与资产配置逐动作裁决。
         </p>
       )}
@@ -504,7 +726,8 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
       {rows && (
         <div className="space-y-2" data-testid="integrated-source-rows">
           <p className="text-xs text-muted-foreground">
-            源直读预览：最多 {rows.limit ?? 100} 行，不是总行数。读取时点 {rows.source_state.started_at} · 快照模式 {rows.source_state.kind}。
+            本地副本预览：最多 {rows.limit ?? 100} 行，不是总行数。覆盖确认时点 {rows.source_state.coverage_confirmed_at ?? rows.source_state.started_at}（非最后变更时间） · 读取模式 {rows.source_state.kind}
+            {rows.stale || rows.source_state.stale ? ' · 副本可能滞后（标注读取）' : ''}。
           </p>
           <Table<IntegratedRow>
             size="small"
@@ -558,7 +781,8 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
         <summary className="cursor-pointer text-sm font-medium">离线快照与高级操作</summary>
         <div className="mt-2 space-y-3">
           <p className="text-xs text-muted-foreground">
-            完整同步把源表整体快照为封存版本，只用于精确离线查询；活映射不依赖它，日常查询直接读源当前数据。
+            日常查询读取平台本地副本（按最近确认覆盖时点，副本滞后如实标注）；受控写入仍直写源库并等待副本追平。
+            完整同步把源表整体快照为封存版本，仅用于精确离线对账，不参与日常查询路径。
           </p>
           <div className="flex flex-wrap gap-2">
             <Button
@@ -653,7 +877,9 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
             </label>
           )}
           <p className="mt-2 text-xs text-muted-foreground">
-            主键变更由服务端拒绝；更新/删除必须携带最近一次源读取得到的行令牌。发生冲突请取消并重新加载源数据，再基于最新记录编辑。
+            主键变更由服务端拒绝；更新/删除必须携带最近一次本地副本读取得到的行令牌，并在源库当前行上做乐观并发检查（CAS）。
+            副本滞后期间源行可能已变化，此时会以 ROW_CONFLICT 拒绝；请取消并重新加载副本数据后再编辑。
+            写入成功后立即作用于源库，本地副本追平前预览仍可能显示旧值。
           </p>
           {mutationError && (
             <Alert variant="danger" role="alert" className="mt-3">
@@ -662,7 +888,7 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
                 {receipt?.status === 'failed'
                   ? '写入失败不是未知结果；请使用新幂等键重试，当前编辑内容会保留。'
                   : receipt?.status === 'conflict'
-                    ? '源记录已变化；请取消并重新加载源数据，不能重放当前幂等键。'
+                    ? '源记录已变化；请取消并重新加载副本数据，不能重放当前幂等键。'
                     : '冲突或未确认结果都不是成功；结果未知时不要重复提交或换新幂等键，请先核查回执。'}
               </p>
               {/* 结算后的恢复动作必须放在弹窗内：模态层会挡住页面上的任何按钮。 */}
@@ -673,7 +899,7 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
               )}
               {receipt?.status === 'conflict' && (
                 <Button type="button" variant="link" size="sm" className="ml-2 h-auto px-1" disabled={saving} onClick={() => void reloadAfterConflict()}>
-                  <RefreshCw size={13} />取消并重新加载源数据
+                  <RefreshCw size={13} />取消并重新加载副本数据
                 </Button>
               )}
             </Alert>
@@ -700,6 +926,28 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDialog
+        open={stopOpen}
+        title="停止本地副本"
+        description={
+          <>
+            <p>
+              确认停止「{asset.name}」的本地副本复制？停止会取消在飞运行并立即让当前副本不可读，
+              本地查询将被服务端拒绝，且不会回退为远端源直读。
+            </p>
+            <p className="mt-1 text-xs text-[var(--color-text-tertiary)]">
+              源表与已封存版本不受影响；需要恢复本地查询时请重建副本。
+            </p>
+          </>
+        }
+        confirmText={stopping ? '停止中...' : '确认停止'}
+        variant="danger"
+        loading={stopping}
+        layer="nested"
+        onConfirm={stopReplica}
+        onClose={() => { if (!stopping) setStopOpen(false) }}
+      />
 
       <ConfirmDialog
         open={decommissionOpen}

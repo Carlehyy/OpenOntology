@@ -7,11 +7,11 @@ from dataclasses import fields
 from datetime import datetime, timezone
 
 import sqlalchemy as sa
+from fastapi import HTTPException
 
 from .contracts import Binding, ColumnSpec, QueryError, Relation
 from sqlalchemy.orm import Session
 from app.auth.models import User
-from app.data_channel.connections.models import Connection
 
 
 def column_spec(column: dict) -> ColumnSpec:
@@ -21,89 +21,86 @@ def column_spec(column: dict) -> ColumnSpec:
     return ColumnSpec(**values)
 
 
+def integrated_auth_fingerprint(auth_fingerprint: str, run_id: str) -> str:
+    """Pin the authorization context *and* the active replica run identity.
+
+    Authorization/schema fingerprints stay unchanged across a replica rebuild,
+    so a memory handle (or persisted snapshot) keyed only by them could accept
+    page 2 from a replacement run — mixing generations. Folding the run id into
+    the existing auth fingerprint makes run replacement a context change while
+    leaving the raw ``resolve_metadata`` authorization revision contract (and
+    its source-config revision) untouched.
+    """
+    from app.data_channel.integrated.contracts import digest
+    return digest({"authorization": auth_fingerprint, "replica_run": run_id})
+
+
 def resolve_integrated(db, user, bindings: list[tuple[str, Binding]], limits, stack: ExitStack,
                        *, recheck_only: bool = False, execution_budget=None):
-    # Accessed through the module so deferred recheck closures stay late-bound
-    # to the current native surface (the same seam tests patch).
-    from app.data_channel.integrated import native
+    """Resolve integrated assets as platform-local replica relations.
+
+    Reads compile typed SQL against the current replica's ``lake_ir_*`` table
+    on the platform database: ``platform=True``, ``connection_key='platform'``
+    and no bounded stream (no staging copy of source tables). Resolution and
+    page rechecks touch platform rows only — an unreachable source network can
+    never fail a local read, and there is deliberately no remote probe and no
+    silent fallback to a source read.
+    """
+    from app.data_channel.integrated import native, replica_control, replica_read
+    from app.data_channel.integrated.replica_store import ReplicaStoreError
 
     metadata = native.resolve_metadata(db, user, [binding.asset_id for _, binding in bindings])
     grouped = defaultdict(list)
     for alias, binding in bindings:
         grouped[metadata[binding.asset_id]["connection_id"]].append((alias, binding))
-    # "error" is the only explicit negative lifecycle state (failed test) and
-    # rejects new reads and in-flight handles up front. "inactive" is the
-    # creation/config-rotation default, not a disable: it stays readable, and
-    # any lifecycle change is fenced by the status input in the auth
-    # fingerprint. Registration/discovery lanes do not pass through this gate.
-    for connection_id, members in grouped.items():
-        statuses = {metadata[binding.asset_id]["connection_status"] for _, binding in members}
-        if "error" in statuses:
-            raise QueryError(409, "source_connection_error",
-                             "Source connection failed its last test; retest before querying",
-                             aliases=[alias for alias, _ in members])
+    # Connection lifecycle states (even a failed-test "error") are source-side
+    # facts: they gate nothing here. Reads serve the local replica, so an
+    # offline/unreachable/failed source never blocks them; lifecycle changes
+    # still fence in-flight pages through the status input in the auth
+    # fingerprint (recheck below fails closed on rotation).
     result = {}
-    # Cursor paging proves physical availability with one bounded SELECT 1 per
-    # unique source per page fetch. The closures below share this cell, so N
-    # assets on one connection still cost a single probe; the probe never
-    # reflects schema and never reads source rows.
-    probed: dict[str, bool] = {}
     for connection_id, members in grouped.items():
-        # The whole-logical-query ledger is forwarded only when one exists
-        # (None is the target's default), so the native scope discloses its
-        # internal EOF-proof COUNT plus SET/reflect control round trips on
-        # that account; without a ledger the call shape is unchanged.
-        scope_kwargs = {"statement_timeout_ms": limits.statement_timeout_ms}
-        if execution_budget is not None:
-            scope_kwargs["execution_budget"] = execution_budget
-        scope = None if recheck_only else stack.enter_context(
-            native.open_read_scope(db, user, [b.asset_id for _, b in members],
-                                   **scope_kwargs))
-
-        def batches(statement, params, batch_size, scope=scope):
-            if scope is None:
-                raise QueryError(503, "query_provider_invalid", "Source stream is unavailable during cursor revalidation")
-            # The native reader fetches single driver rows and bounds each
-            # yielded batch by encoded bytes as well as this row count.
-            yield from scope.iter_batches(statement, params, batch_size=min(batch_size, 1000))
-            if scope.completion.get("complete") is not True:
-                raise QueryError(409, "source_incomplete", "Source stream ended without complete EOF evidence")
-
         for alias, binding in members:
-            meta = scope.meta[binding.asset_id] if scope is not None else metadata[binding.asset_id]
-            columns = {c["name"]: column_spec(c) for c in meta["columns"]}
-            if scope is not None:
-                table = scope.tables[binding.asset_id].alias(alias)
-                as_of = scope.provenance["started_at"]
-                snapshot_id = scope.provenance["id"]
-            else:
-                # Cursor paging reads already materialized platform rows. Rebuild
-                # only a typed SQLAlchemy shape from registered schema metadata;
-                # this branch must not connect to, reflect, or probe the source
-                # at resolution time (availability is rechecked per page).
-                physical = sa.table(
-                    "integrated_" + binding.asset_id,
-                    *(sa.column(name, spec.sql_type()) for name, spec in columns.items()),
-                )
-                table = physical.alias(alias)
-                as_of = None
-                snapshot_id = None
+            asset = native.get_asset(db, user, binding.asset_id)
+            try:
+                replica, run, schema, physical = replica_read.open_readable(db, asset)
+            except replica_control.ReplicaControlError as exc:
+                current = db.get(replica_control.IntegratedReplica, asset.id)
+                replica_read._fail_query(
+                    exc.code, current.status if current is not None else None)
+            except ReplicaStoreError:
+                replica_read._fail_query("ACTIVE_REPLICA_MISSING")
+            except HTTPException as exc:
+                detail = exc.detail if isinstance(exc.detail, dict) else {}
+                raise QueryError(exc.status_code, detail.get("code", "replica_inconsistent"),
+                                 detail.get("message", "The local replica cannot be read")) from None
+            meta = metadata[binding.asset_id]
             expected_auth = meta["auth_fingerprint"]
             expected_schema = meta["schema_fingerprint"]
-            # Configured assets expose only their logical view: expressions
-            # bind logical names to the authorized physical source columns, so
-            # unmapped columns stay invisible to the compiler.  The pinned
-            # fingerprints above remain physical in both cases.
+            # Expressions bind through schema.column_map onto the ALIASED
+            # physical replica table (physical names are sanitized; a source
+            # name must never be used to index the physical columns). JSON
+            # columns keep their CAST to stored text so exact JSON survives.
+            table = physical.alias(alias)
+            mapping = schema.column_map
+
+            def physical_expression(source_name: str):
+                expression = table.c[mapping[source_name]]
+                if schema.column(source_name).spec.type == "json":
+                    expression = expression.cast(sa.Text())
+                return expression
+
             projection = meta.get("projection")
             if projection is not None:
                 columns = {c["name"]: column_spec(c) for c in projection["columns"]}
-                expressions = {name: table.c[physical] for name, physical
-                               in projection["logical_to_physical"].items()}
+                expressions = {name: physical_expression(source).label(name)
+                               for name, source in projection["logical_to_physical"].items()}
             else:
                 columns = {c["name"]: column_spec(c) for c in meta["columns"]}
-                expressions = {}
+                expressions = {name: physical_expression(name).label(name)
+                               for name in mapping}
             # Complete structural primary key for deterministic keyset paging.
-            # Logical names under a configured projection, physical names
+            # Logical names under a configured projection, source names
             # otherwise. Column visibility is never widened: a key outside the
             # authorized columns stays unset and lazy continuation is
             # ineligible for that relation (bounded materialization instead).
@@ -112,62 +109,75 @@ def resolve_integrated(db, user, bindings: list[tuple[str, Binding]], limits, st
             else:
                 unique = [str(name) for name in meta.get("primary_key") or []]
             unique = unique if unique and all(name in columns for name in unique) else None
+            coverage = replica.coverage_confirmed_at or replica.applied_at
 
-            if scope is not None:
-                def recheck(asset_id=binding.asset_id, auth=expected_auth, schema=expected_schema):
-                    with Session(bind=db.get_bind(), autoflush=False) as fresh_db:
-                        fresh_user = fresh_db.get(User, user.id)
-                        current = native.resolve_metadata(fresh_db, fresh_user, [asset_id])[asset_id]
+            def recheck(asset_id=binding.asset_id, auth=expected_auth, schema=expected_schema,
+                        run_id=run.id):
+                # Fingerprint drift (auth/schema/lifecycle status) fails closed
+                # first; the active run identity is then re-read from durable
+                # platform rows so a page can never serve a replica that was
+                # published over, retired or made unreadable. The run id is the
+                # cursor: a merely REQUESTED rebuild (generation bump) does not
+                # invalidate pages still served by the current active table.
+                # No remote probe, no silent source fallback.
+                with Session(bind=db.get_bind(), autoflush=False) as fresh_db:
+                    fresh_user = fresh_db.get(User, user.id)
+                    current = native.resolve_metadata(fresh_db, fresh_user, [asset_id])[asset_id]
                     if current["auth_fingerprint"] != auth or current["schema_fingerprint"] != schema:
-                        raise QueryError(409, "query_context_changed", "Source authorization/schema changed")
-            else:
-                def recheck(asset_id=binding.asset_id, auth=expected_auth, schema=expected_schema,
-                            source_id=connection_id, probe_cell=probed):
-                    # Fingerprint drift (auth/schema/lifecycle status) fails
-                    # closed first; then one bounded SELECT 1 per unique source
-                    # per page fetch proves physical availability. No schema
-                    # reflection, no source rows.
-                    with Session(bind=db.get_bind(), autoflush=False) as fresh_db:
-                        fresh_user = fresh_db.get(User, user.id)
-                        current = native.resolve_metadata(fresh_db, fresh_user, [asset_id])[asset_id]
-                        source_row = fresh_db.get(Connection, source_id)
-                    if current["auth_fingerprint"] != auth or current["schema_fingerprint"] != schema:
-                        raise QueryError(409, "query_context_changed", "Source authorization/schema changed")
-                    if not probe_cell.get(source_id):
-                        if source_row is None:
-                            raise QueryError(404, "source_connection_missing",
-                                             "Source connection row disappeared; cursor delivery fails closed")
-                        control_layer = f"native:{source_id}:control"
-                        if execution_budget is not None:
-                            # Refuse BEFORE the probe: an exhausted whole-query
-                            # statement budget must never pay one more SELECT 1
-                            # just to learn it is over (the page is refused
-                            # with no further source work).
-                            execution_budget.ensure_statement_room(control_layer)
-                        native.probe_source(source_row)
-                        probe_cell[source_id] = True
-                        if execution_budget is not None:
-                            # The liveness probe is a real source round trip
-                            # (one bounded SELECT 1 per unique source per
-                            # fetch); disclose it as one control statement on
-                            # the whole-logical-query ledger. It returns one
-                            # row to the driver; that control overhead is
-                            # disclosed as a statement only — no rows and no
-                            # bytes are ever invented for it.
-                            execution_budget.charge_statement(control_layer)
+                        raise QueryError(409, "query_context_changed",
+                                         "Source authorization/schema changed")
+                    try:
+                        _, fresh_run, _ = replica_read.replica_cursor(fresh_db, asset_id)
+                    except replica_control.ReplicaControlError as exc:
+                        row = fresh_db.get(replica_control.IntegratedReplica, asset_id)
+                        replica_read._fail_query(
+                            exc.code, row.status if row is not None else None)
+                    except ReplicaStoreError:
+                        replica_read._fail_query("ACTIVE_REPLICA_MISSING")
+                    if fresh_run.id != run_id:
+                        raise QueryError(409, "query_context_changed",
+                                         "The local replica was rebuilt; rerun the query")
 
             result[alias] = Relation(
                 alias=alias, table=table, columns=columns,
                 state={"alias": alias, "kind": "integrated", "id": binding.asset_id,
-                       "versionId": None, "asOf": as_of,
-                       "consistency": "repeatable_read", "completeness": "complete",
-                       "dialect": meta["dialect"], "snapshotId": snapshot_id,
-                       "uniqueKey": unique},
-                auth_fingerprint=expected_auth, schema_fingerprint=expected_schema,
-                connection_key="source:" + connection_id,
-                batches=batches if scope is not None else None, recheck=recheck,
-                source_group=scope, expressions=expressions)
+                       "versionId": None,
+                       # A replica read serves its last confirmed coverage
+                       # instant — not remote live, not an immutable version.
+                       "asOf": replica_read._utc_iso(coverage),
+                       "consistency": "replica_snapshot", "completeness": "complete",
+                       "dialect": db.get_bind().dialect.name, "snapshotId": run.id,
+                       "uniqueKey": unique, "replicaStatus": replica.status,
+                       # Anything except a clean ready is readable-but-stale:
+                       # initializing/catching_up keep serving the previous
+                       # active run while coverage lags the replication cut.
+                       "stale": replica.status != "ready",
+                       "generation": replica.generation},
+                auth_fingerprint=integrated_auth_fingerprint(expected_auth, run.id),
+                schema_fingerprint=expected_schema,
+                connection_key="platform",
+                batches=None, recheck=recheck,
+                platform=True, expressions=expressions)
     return result
+
+
+def composed_consistency(source_states: list[dict], connection_keys: set[str]) -> str:
+    """Whole-result consistency vocabulary across leaf source states.
+
+    Replica reads add ``replica_snapshot`` leaves: each serves its own last
+    confirmed coverage instant, so an all-replica result is labeled
+    ``replica_snapshots`` (per-leaf coverage, no shared source-side instant),
+    and any replica leaf mixed with other sources is honestly
+    ``cross_source_non_atomic`` rather than a single-source snapshot.
+    """
+    consistencies = {state.get("consistency") for state in source_states}
+    if consistencies == {"replica_snapshot"}:
+        return "replica_snapshots"
+    if "replica_snapshot" in consistencies:
+        return "cross_source_non_atomic"
+    return ("immutable_versions" if consistencies == {"immutable_version"}
+            else "single_source_snapshot" if len(connection_keys) == 1
+            else "cross_source_non_atomic")
 
 
 def resolve_dataset(db, user, alias, binding, limits):

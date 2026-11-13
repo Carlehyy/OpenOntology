@@ -249,7 +249,19 @@ def test_source_crud_bound_values_conflicts_and_receipts(db, admin_user, monkeyp
         body = RowMutation(key={"id": {"$integer": "9007199254740993"}}, values={"name": payload}, idempotency_key="insert")
         inserted = service.mutate_row(db, admin_user, asset.id, "insert", body)
         assert inserted["status"] == "applied"
-        assert service.mutate_row(db, admin_user, asset.id, "insert", body)["replayed"] is True
+        # The receipt carries the platform persistence time (after the source
+        # commit) as an aware UTC instant; the frontend uses it as the replica
+        # coverage baseline so a skewed client clock cannot clear the note.
+        applied_at = datetime.fromisoformat(inserted["applied_at"])
+        assert applied_at.tzinfo is not None and applied_at.utcoffset().total_seconds() == 0
+        record = db.get(IntegratedMutation, inserted["id"])
+        completed = record.completed_at
+        if completed.tzinfo is None:
+            completed = completed.replace(tzinfo=timezone.utc)
+        assert applied_at == completed.astimezone(timezone.utc)
+        replayed = service.mutate_row(db, admin_user, asset.id, "insert", body)
+        assert replayed["replayed"] is True
+        assert replayed["applied_at"] == inserted["applied_at"]
         with engine.connect() as conn:
             assert conn.execute(sa.select(table.c.name)).scalar_one() == payload
         update = RowMutation(key=body.key, values={"name": "updated"}, expected_row_token=inserted["row_token"], idempotency_key="update")
@@ -258,6 +270,9 @@ def test_source_crud_bound_values_conflicts_and_receipts(db, admin_user, monkeyp
         with pytest.raises(HTTPException) as exc:
             service.mutate_row(db, admin_user, asset.id, "update", update.model_copy(update={"idempotency_key": "stale"}))
         assert exc.value.detail["code"] == "ROW_CONFLICT"
+        conflict_receipt = exc.value.detail["mutation"]
+        assert conflict_receipt["status"] == "conflict"
+        assert datetime.fromisoformat(conflict_receipt["applied_at"]).tzinfo is not None
         deletion = RowMutation(key=body.key, expected_row_token=updated["row_token"], idempotency_key="delete")
         assert service.mutate_row(db, admin_user, asset.id, "delete", deletion)["status"] == "applied"
         with engine.connect() as conn:

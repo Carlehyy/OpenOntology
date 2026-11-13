@@ -7,8 +7,9 @@ import decimal
 import hashlib
 import json
 import math
+import struct
 import uuid
-from typing import Any
+from typing import Any, Iterable
 
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -177,5 +178,156 @@ def digest(value: Any) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
-def row_token(row: dict, schema_fingerprint: str) -> str:
-    return digest({"schema": schema_fingerprint, "row": row})
+class _JsonObject:
+    """Parsed JSON object retaining duplicate keys for exact CAS hashing."""
+
+    __slots__ = ("pairs",)
+
+    def __init__(self, pairs):
+        self.pairs = pairs
+
+
+def _reject_json_constant(_value):
+    raise ValueError()
+
+
+def _canonical_json_number(value) -> str:
+    # Decimal(str(float)) is only used for Python-native dict/list fixtures;
+    # production JSON text always parses through parse_float=Decimal, so no
+    # binary float ever enters this path.
+    number = (value if isinstance(value, decimal.Decimal)
+              else decimal.Decimal(str(value)) if isinstance(value, float)
+              else decimal.Decimal(value))
+    if not number.is_finite():
+        raise ValueError()
+    # str(Decimal) preserves every significant digit, trailing zeroes and the
+    # source's numeric scale (so JSON 1 and 1.0 stay distinct). It never rounds
+    # or routes a digit through binary float; whitespace and key order are the
+    # only representations canonicalization removes.
+    return str(number)
+
+
+def _canonical_json_node(value) -> str:
+    if value is None:
+        return "null"
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, _JsonObject):
+        pairs = value.pairs
+    elif isinstance(value, dict):
+        pairs = list(value.items())
+    else:
+        pairs = None
+    if pairs is not None:
+        members = [
+            (json.dumps(str(key), ensure_ascii=False), _canonical_json_node(member))
+            for key, member in pairs
+        ]
+        # Stable sort by key only: object key order is irrelevant, but the
+        # relative order of duplicate keys is source-visible and must remain
+        # part of the token ({"a":1,"a":2} != {"a":2,"a":1}).
+        members.sort(key=lambda pair: pair[0])
+        return "{" + ",".join(f"{key}:{member}" for key, member in members) + "}"
+    if isinstance(value, (list, tuple)):
+        return "[" + ",".join(_canonical_json_node(member) for member in value) + "]"
+    if isinstance(value, (int, float, decimal.Decimal)):
+        return _canonical_json_number(value)
+    raise ValueError()
+
+
+def canonical_json_text(value: Any) -> str:
+    """Canonical JSON text used only for typed JSON columns in row tokens.
+
+    Whitespace and object key order are removed; all numbers are parsed as
+    Decimal and never through binary float, so large integers and high-precision
+    decimals keep every digit. JSON literal ``null`` is the text ``"null"`` while
+    SQL NULL remains ``None``. Ordinary string columns are never passed here.
+    """
+    if isinstance(value, JsonText):
+        raw = str(value)
+    elif isinstance(value, str):
+        raw = value
+    elif isinstance(value, (bytes, bytearray, memoryview)):
+        try:
+            raw = bytes(value).decode("utf-8", "strict")
+        except UnicodeDecodeError:
+            fail(422, "INVALID_COLUMN_VALUE", "Invalid UTF-8 JSON value")
+    elif isinstance(value, (dict, list, tuple, _JsonObject)):
+        try:
+            return _canonical_json_node(value)
+        except (ValueError, TypeError):
+            fail(422, "INVALID_COLUMN_VALUE", "Invalid JSON value for row token")
+    else:
+        fail(422, "INVALID_COLUMN_VALUE", "Invalid JSON value for row token")
+    try:
+        parsed = json.loads(
+            raw, parse_int=decimal.Decimal, parse_float=decimal.Decimal,
+            parse_constant=_reject_json_constant, object_pairs_hook=_JsonObject)
+        return _canonical_json_node(parsed)
+    except (ValueError, TypeError):
+        fail(422, "INVALID_COLUMN_VALUE", "Invalid JSON value for row token")
+
+
+def _canonical_float32(value: Any) -> float:
+    """Exact IEEE-754 single-precision value, widened losslessly to a Python float.
+
+    This is the source column's real precision, not a 6-digit display rounding:
+    two different float32 values stay different. It makes a Debezium short
+    decimal (e.g. 1.234567) hash identically to the source's exact float32 bits
+    (1.2345670461654663) without lowering CAS precision.
+    """
+    if isinstance(value, bool):
+        fail(422, "INVALID_COLUMN_VALUE", "Invalid single-precision value")
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        fail(422, "INVALID_COLUMN_VALUE", "Invalid single-precision value")
+    if not math.isfinite(number):
+        fail(422, "INVALID_COLUMN_VALUE", "Non-finite single-precision value")
+    try:
+        widened = struct.unpack("<f", struct.pack("<f", number))[0]
+    except (OverflowError, struct.error):
+        fail(422, "INVALID_COLUMN_VALUE", "Single-precision value out of range")
+    if not math.isfinite(widened):
+        fail(422, "INVALID_COLUMN_VALUE", "Single-precision value out of range")
+    return widened
+
+
+def _canonical_token_row(row: dict, json_columns: Iterable[str],
+                         float32_columns: Iterable[str]) -> dict:
+    json_set = set(json_columns)
+    float32_set = set(float32_columns)
+    result = {}
+    for name, value in row.items():
+        if value is None:
+            # SQL NULL is distinct from JSON literal null (which canonicalizes
+            # to the text "null" below).
+            result[name] = None
+        elif name in json_set:
+            result[name] = canonical_json_text(value)
+        elif name in float32_set:
+            result[name] = _canonical_float32(value)
+        else:
+            # Text/varchar values that merely look like JSON, DECIMAL, big
+            # integers and all other columns keep their exact wire value.
+            result[name] = value
+    return result
+
+
+def row_token(row: dict, schema_fingerprint: str, *,
+              json_columns: Iterable[str] = (),
+              float32_columns: Iterable[str] = ()) -> str:
+    """Hash the full physical row in the source read/token namespace.
+
+    ``json_columns`` and ``float32_columns`` must come from typed source/replica
+    metadata (never from value sniffing). Changing this canonicalization
+    invalidates previously issued tokens: CAS rejects them with an explicit
+    conflict; there is no dual-token fallback.
+    """
+    return digest({"schema": schema_fingerprint,
+                   "row": _canonical_token_row(
+                       row, json_columns, float32_columns)})

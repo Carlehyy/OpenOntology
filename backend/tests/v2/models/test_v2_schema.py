@@ -111,6 +111,12 @@ def test_all_v2_tables_registered():
         "v2_integrated_cdc_subscriptions",
         "v2_integrated_sync_runs",
         "v2_integrated_sync_recoveries",
+        "v2_integrated_replicas",
+        "v2_integrated_replica_runs",
+        "v2_integrated_replica_captures",
+        "v2_integrated_replica_transactions",
+        "v2_integrated_replica_receipts",
+        "v2_integrated_replica_snapshot_batches",
         "v2_unified_query_rows",
         "v2_unified_query_snapshots",
     }

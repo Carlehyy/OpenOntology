@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import type { IntegratedAsset, IntegratedRows, IntegratedVersion } from '../../../api/v2/integrated-datasets.ts'
+import type { IntegratedAsset, IntegratedReplica, IntegratedRows, IntegratedVersion } from '../../../api/v2/integrated-datasets.ts'
 import {
   backendsLabel, dbxState, dbxStateDetail, dbxStateLabel,
   integratedCell, integratedError, latestVersionStateLabel, parseObject, primaryKeyOf,
   receiptNeedsReconciliation, receiptStatusLabel, sourceMutationPayload,
   sourceReadDetail, sourceReadLabel, syncIsActive, syncIsSealed, syncStatusLabel, validateResourceName,
+  REPLICA_PENDING_SYNC_NOTE, isReplicaStatusPayload, replicaCoversWrite, replicaFactsDetail,
+  replicaNotRegistered, replicaReadable, replicaStale, replicaStatusLabel, replicaSyncBaseline,
   versionStateLabel,
 } from '../../../pages/data-management/structured/integratedModel.ts'
 
@@ -116,16 +118,23 @@ describe('integrated source/query presentation contracts', () => {
     assert.match(backendsLabel(configured), /快照 native · 写入 native · 元数据 dbx/)
     assert.match(backendsLabel({ ...configured, backends: undefined }), /可用性见 DBX 状态/)
   })
-  it('labels source reads and receipts without inventing success', () => {
+  it('labels replica reads and receipts without inventing success', () => {
     const rows: IntegratedRows = {
       rows: [], columns: [],
-      source_state: { kind: 'repeatable_read', started_at: '2026-10-24T08:00:00Z', complete: false, limit: 100 } as IntegratedRows['source_state'],
+      source_state: { kind: 'replica_snapshot', started_at: '2026-10-24T08:00:00Z',
+        complete: true, coverage_confirmed_at: '2026-10-24T07:59:00Z' } as IntegratedRows['source_state'],
       limit: 100,
     }
+    const stale: IntegratedRows = {
+      ...rows, stale: true,
+      source_state: { ...rows.source_state, stale: true },
+    }
     assert.equal(sourceReadLabel(null), '未核验')
-    assert.equal(sourceReadLabel(rows), '最近源读取已核验')
-    assert.match(sourceReadDetail(null), /登记不等于当前连通/)
-    assert.match(sourceReadDetail(rows), /读取完整性 未完整（预览为有界读取） · 预览最多 100 行，不是总行数/)
+    assert.equal(sourceReadLabel(rows), '副本读取已核验')
+    assert.equal(sourceReadLabel(stale), '副本可读（可能滞后）')
+    assert.match(sourceReadDetail(null), /登记不等于副本可读/)
+    assert.match(sourceReadDetail(rows), /副本覆盖确认时点 2026-10-24T07:59:00Z（非最后变更时间） · 读取完整性 完整 · 预览最多 100 行，不是总行数$/)
+    assert.match(sourceReadDetail(stale), /副本可能滞后/)
     assert.equal(receiptNeedsReconciliation({ status: 'unknown' }), true)
     assert.equal(receiptNeedsReconciliation({ status: 'pending' }), true)
     assert.equal(receiptNeedsReconciliation({ status: 'conflict' }), false)
@@ -134,5 +143,72 @@ describe('integrated source/query presentation contracts', () => {
     assert.equal(receiptStatusLabel('conflict'), '冲突')
     assert.equal(receiptStatusLabel('failed'), '失败')
     assert.equal(receiptStatusLabel('unknown'), '结果未知')
+  })
+  it('labels replica lifecycle states and never renders unknown as healthy', () => {
+    assert.equal(replicaStatusLabel(undefined), '未初始化')
+    assert.equal(replicaStatusLabel('pending'), '等待初始化')
+    assert.equal(replicaStatusLabel('initializing'), '初始化中')
+    assert.equal(replicaStatusLabel('catching_up'), '追平增量中')
+    assert.equal(replicaStatusLabel('ready'), '已就绪')
+    assert.equal(replicaStatusLabel('stale'), '已滞后（可读）')
+    assert.equal(replicaStatusLabel('rebuild_required'), '需重建')
+    assert.equal(replicaStatusLabel('blocked'), '被阻塞')
+    assert.equal(replicaStatusLabel('stopped'), '已停止')
+    assert.equal(replicaStatusLabel('mystery'), '未核验')
+    const base: IntegratedReplica = {
+      status: 'ready', complete: true, row_count: 12,
+      applied_at: '2026-11-11T08:00:00Z', coverage_confirmed_at: '2026-11-11T08:00:01Z',
+      last_error_code: null, generation: 3, run_id: 'run-1',
+    }
+    assert.equal(replicaReadable(base), true)
+    assert.equal(replicaReadable({ ...base, complete: false }), false)
+    assert.equal(replicaReadable(null), false)
+    assert.equal(replicaStale(base), false)
+    assert.equal(replicaStale({ ...base, status: 'initializing' }), true)
+    assert.equal(replicaStale({ ...base, status: 'catching_up' }), true)
+    assert.equal(replicaStale({ ...base, status: 'stale' }), true)
+    assert.equal(replicaStale({ ...base, complete: false, status: 'stopped' }), false)
+    assert.match(replicaFactsDetail(base), /覆盖确认 .+（非最后变更时间） · 行数 12 · 第 3 代$/)
+    assert.match(replicaFactsDetail({ ...base, status: 'catching_up' }), /可读但可能滞后/)
+    assert.match(replicaFactsDetail({ ...base, last_error_code: 'SOURCE_UNREACHABLE' }), /最近错误码 SOURCE_UNREACHABLE/)
+    assert.match(replicaFactsDetail(null), /尚未登记本地副本/)
+    assert.match(REPLICA_PENDING_SYNC_NOTE, /^源库已写入，等待副本同步/)
+  })
+  it('accepts only a complete status payload for the current asset', () => {
+    const payload = {
+      ...{ status: 'stopped', complete: false, row_count: null, applied_at: null,
+        coverage_confirmed_at: null, last_error_code: 'REPLICA_STOP_REQUESTED',
+        generation: 2, run_id: null },
+      asset_id: 'asset-1',
+    }
+    assert.equal(isReplicaStatusPayload(payload, 'asset-1'), true)
+    assert.equal(isReplicaStatusPayload(payload, 'asset-2'), false)
+    assert.equal(isReplicaStatusPayload({ ...payload, status: 'mystery' }, 'asset-1'), false)
+    assert.equal(isReplicaStatusPayload({ ...payload, complete: 'yes' }, 'asset-1'), false)
+    assert.equal(isReplicaStatusPayload({ ...payload, generation: null }, 'asset-1'), false)
+    assert.equal(isReplicaStatusPayload(null, 'asset-1'), false)
+    assert.equal(replicaNotRegistered({ status: 404, detail: { code: 'REPLICA_NOT_REGISTERED' } }), true)
+    assert.equal(replicaNotRegistered({ status: 503, detail: { code: 'REPLICA_NOT_REGISTERED' } }), false)
+    assert.equal(replicaNotRegistered(new Error('offline')), false)
+  })
+  it('clears the pending-sync note only for a coverage cut after the write baseline', () => {
+    // Receipt applied_at (platform persistence after source commit) wins,
+    // even when the client clock is skewed far ahead of the platform clock.
+    assert.equal(replicaSyncBaseline('2026-11-11T08:00:10Z'), '2026-11-11T08:00:10Z')
+    assert.equal(replicaSyncBaseline(
+      '2026-11-11T08:00:10Z', new Date('2027-01-01T00:00:00Z')), '2026-11-11T08:00:10Z')
+    // No receipt timestamp: use the moment the successful response was received.
+    const received = new Date('2026-11-11T08:00:20Z')
+    assert.equal(replicaSyncBaseline(null, received), '2026-11-11T08:00:20.000Z')
+    assert.equal(replicaSyncBaseline('  ', received), '2026-11-11T08:00:20.000Z')
+    const baseline = '2026-11-11T08:00:10Z'
+    // An unrelated applied_at advancing proves nothing by itself; only the
+    // confirmed coverage cut can clear the note, and strictly after baseline.
+    assert.equal(replicaCoversWrite('2026-11-11T08:00:09Z', baseline), false)
+    assert.equal(replicaCoversWrite('2026-11-11T08:00:10Z', baseline), false)
+    assert.equal(replicaCoversWrite('2026-11-11T08:00:11Z', baseline), true)
+    assert.equal(replicaCoversWrite(null, baseline), false)
+    assert.equal(replicaCoversWrite('not-a-time', baseline), false)
+    assert.equal(replicaCoversWrite('2026-11-11T08:00:11Z', null), false)
   })
 })

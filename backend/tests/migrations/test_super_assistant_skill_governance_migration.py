@@ -8,6 +8,8 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, text
 
+from tests.migrations.latest_head import LATEST_HEAD
+
 
 def _alembic_config(backend: Path, db_path: Path) -> Config:
     cfg = Config(str(backend / "alembic.ini"))
@@ -33,7 +35,7 @@ def test_revision_graph_head_is_single_head(tmp_path, monkeypatch):
 
     # 单头门禁：新迁移必须线性追加（当前 head 见 alembic heads 输出）。
     assert len(heads) == 1
-    assert heads == ["0146_integrated_cdc"]
+    assert heads == [LATEST_HEAD]
 
 def _create_0067_shape_skills_table(db_path: Path) -> None:
     """手工建 0067 形态的 super_assistant_skills（不含治理列）。

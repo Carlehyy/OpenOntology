@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/Button'
 import { Dialog, DialogContent } from '@/components/ui/dialog'
 import IntegratedRegisterDialog from './IntegratedRegisterDialog'
 import IntegratedAssetDetail from './IntegratedAssetDetail'
-import { backendsLabel, dbxState, dbxStateDetail, dbxStateLabel, integratedError } from './integratedModel'
+import { backendsLabel, dbxState, dbxStateDetail, dbxStateLabel, integratedError, replicaFactsDetail, replicaStatusLabel } from './integratedModel'
 
 function CapabilityBadge({ label, enabled }: { label: string; enabled: boolean }) {
   return <Badge variant={enabled ? 'success' : 'secondary'}>{label} {enabled ? '允许' : '未启用'}</Badge>
@@ -85,8 +85,8 @@ export default function IntegratedDatasetsView({ focusDatasetId }: { focusDatase
           <div className="min-w-0">
             <h1 className="flex items-center gap-2 text-sm font-semibold"><Database size={15} />集成数据集</h1>
             <p className="mt-1 max-w-2xl text-xs text-muted-foreground">
-              登记 MySQL / PostgreSQL 源表，直读、完整版本同步与受控源表写入。登记与结构刷新必须由真实 dbx 元数据服务核验；
-              源数据读取与写入走 native 能力，二者不可互相冒充。
+              登记 MySQL / PostgreSQL 源表，本地副本查询、完整版本同步与受控源表写入。登记与结构刷新必须由真实 dbx 元数据服务核验；
+              查询读平台本地副本，写入直写源库并等待副本同步。
             </p>
           </div>
           <div className="ml-auto flex shrink-0 items-center gap-2">
@@ -194,6 +194,11 @@ export default function IntegratedDatasetsView({ focusDatasetId }: { focusDatase
                         {asset.latest_version_id
                           ? <span className="block truncate font-mono text-[11px]" title={asset.latest_version_id}>最新版本 {asset.latest_version_id}（封存状态未核验）</span>
                           : '尚无完整版本'}
+                        {asset.replica && (
+                          <span className="mt-0.5 block truncate" title={replicaFactsDetail(asset.replica)}>
+                            副本 {replicaStatusLabel(asset.replica.status)}
+                          </span>
+                        )}
                       </td>
                       <td className="whitespace-nowrap px-4 py-3 text-center text-xs tabular-nums text-muted-foreground" title={asset.updated_at ?? asset.created_at}>
                         {formatUpdatedAt(asset.updated_at ?? asset.created_at)}

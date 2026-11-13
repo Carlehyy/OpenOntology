@@ -18,6 +18,9 @@ required_paths=(
   "backend/.dockerignore"
   "backend/Dockerfile"
   "backend/Dockerfile.cdc"
+  # 副本执行器 SMT 源码：Dockerfile.cdc 构建时离线编译 replica-smt.jar，
+  # 服务器侧构建两个执行器镜像都需要它。
+  "backend/integrated_runtime"
   "backend/alembic.ini"
   "backend/alembic"
   "backend/app"

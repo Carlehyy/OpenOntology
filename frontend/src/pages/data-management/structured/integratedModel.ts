@@ -1,4 +1,8 @@
-import type { IntegratedAsset, IntegratedRows, IntegratedSyncRun, IntegratedVersion } from '@/api/v2/integrated-datasets'
+import type {
+  IntegratedAsset, IntegratedReplica, IntegratedReplicaStatus, IntegratedReplicaStatusPayload,
+  IntegratedRows, IntegratedSyncRun, IntegratedVersion,
+} from '@/api/v2/integrated-datasets'
+import { formatDateTime } from '../../../utils/datetime.ts'
 
 /** SQL NULL is null; json_text cells are opaque strings, including the JSON literal 'null'. */
 export function integratedCell(value: unknown): string {
@@ -110,16 +114,119 @@ export function latestVersionStateLabel(asset: Pick<IntegratedAsset, 'latest_ver
   return `最新版本 ${version.id} · ${versionStateLabel(version)}`
 }
 
-/** A successful preview proves the source was readable at that instant, not total row count. */
+/** A successful preview proves the local replica was readable at that instant, not total rows. */
 export function sourceReadLabel(rows: IntegratedRows | null | undefined): string {
-  return rows ? '最近源读取已核验' : '未核验'
+  if (!rows) return '未核验'
+  return rows.stale || rows.source_state.stale ? '副本可读（可能滞后）' : '副本读取已核验'
 }
 
 export function sourceReadDetail(rows: IntegratedRows | null | undefined): string {
-  if (!rows) return '登记不等于当前连通'
+  if (!rows) return '登记不等于副本可读；请先核验副本状态'
   const state = rows.source_state
-  const readComplete = state.complete === true ? '完整' : '未完整（预览为有界读取）'
-  return `快照时点 ${state.started_at} · 读取完整性 ${readComplete} · 预览最多 ${rows.limit ?? 100} 行，不是总行数`
+  const coverage = state.coverage_confirmed_at ?? state.started_at
+  const staleNote = rows.stale || state.stale ? ' · 副本可能滞后（源网不可达不阻断本地读取）' : ''
+  return `副本覆盖确认时点 ${coverage ?? '未知'}（非最后变更时间） · 读取完整性 完整 · 预览最多 ${rows.limit ?? 100} 行，不是总行数${staleNote}`
+}
+
+/** Local replica lifecycle labels; unknown values never render as healthy. */
+export const REPLICA_STATUS_LABELS: Record<string, string> = {
+  pending: '等待初始化', initializing: '初始化中', catching_up: '追平增量中',
+  ready: '已就绪', stale: '已滞后（可读）', rebuild_required: '需重建',
+  blocked: '被阻塞', stopped: '已停止',
+}
+
+const REPLICA_STATUSES = new Set<IntegratedReplicaStatus>(
+  Object.keys(REPLICA_STATUS_LABELS) as IntegratedReplicaStatus[])
+
+/** A malformed or foreign-asset status payload is unverifiable, never healthy. */
+export function isReplicaStatusPayload(
+  payload: unknown, assetId: string,
+): payload is IntegratedReplicaStatusPayload {
+  if (!payload || typeof payload !== 'object') return false
+  const value = payload as Record<string, unknown>
+  return value.asset_id === assetId
+    && typeof value.status === 'string'
+    && REPLICA_STATUSES.has(value.status as IntegratedReplicaStatus)
+    && typeof value.complete === 'boolean'
+    && (value.stale === undefined || typeof value.stale === 'boolean')
+    && typeof value.generation === 'number'
+    && (value.row_count === null || typeof value.row_count === 'number')
+    && (value.applied_at === null || typeof value.applied_at === 'string')
+    && (value.coverage_confirmed_at === null || typeof value.coverage_confirmed_at === 'string')
+    && (value.last_error_code === null || typeof value.last_error_code === 'string')
+    && (value.run_id === null || typeof value.run_id === 'string')
+}
+
+export function replicaStatusLabel(status: string | undefined | null): string {
+  if (!status) return '未初始化'
+  return REPLICA_STATUS_LABELS[status] ?? '未核验'
+}
+
+/** A missing replica row is an explicit "not registered" state, not a query failure. */
+export function replicaNotRegistered(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const value = error as { status?: number; detail?: { code?: string } }
+  return value.status === 404 && value.detail?.code === 'REPLICA_NOT_REGISTERED'
+}
+
+/** True only when reads can be served right now (ready or stale-with-active). */
+export function replicaReadable(replica: IntegratedReplica | null | undefined): boolean {
+  return replica?.complete === true
+}
+
+/** Readable but not cleanly ready: coverage lags the replication cut. */
+export function replicaStale(replica: IntegratedReplica | null | undefined): boolean {
+  if (replica?.complete !== true) return false
+  return replica.stale ?? replica.status !== 'ready'
+}
+
+/** One-line card summary: status + last confirmed coverage + row count facts. */
+export function replicaFactsDetail(replica: IntegratedReplica | null | undefined): string {
+  if (!replica) return '尚未登记本地副本；重建后可本地查询。'
+  const parts = [
+    // Confirmed coverage is the verified replication cut, not the last
+    // source-change time; a quiet table keeps the same confirmed instant.
+    `覆盖确认 ${formatDateTime(replica.coverage_confirmed_at, { fallback: '尚未确认' })}（非最后变更时间）`,
+    replica.row_count != null ? `行数 ${replica.row_count}` : '行数未知',
+    `第 ${replica.generation} 代`,
+  ]
+  if (replicaStale(replica)) parts.push('可读但可能滞后')
+  if (replica.last_error_code) parts.push(`最近错误码 ${replica.last_error_code}`)
+  return parts.join(' · ')
+}
+
+/** A source write succeeded but the local replica has not caught up yet. */
+export const REPLICA_PENDING_SYNC_NOTE = '源库已写入，等待副本同步；本地查询暂未包含该写入。'
+
+/**
+ * Baseline for deciding when the replica covers a source write.
+ *
+ * The receipt's platform `applied_at` (persisted after the source commit) is
+ * authoritative. When the receipt carries no timestamp, use the instant the
+ * successful response was received; never reuse an unrelated replica
+ * `applied_at`, which may advance for other transactions.
+ */
+export function replicaSyncBaseline(
+  receiptAppliedAt: string | null | undefined,
+  receivedAt: Date = new Date(),
+): string {
+  const receipt = receiptAppliedAt?.trim()
+  return receipt || receivedAt.toISOString()
+}
+
+/**
+ * A copy is only proven to include the write when its confirmed coverage cut
+ * is strictly after the write baseline. An advanced `applied_at` alone is not
+ * proof: it may belong to another or earlier transaction.
+ */
+export function replicaCoversWrite(
+  coverageConfirmedAt: string | null | undefined,
+  baseline: string | null | undefined,
+): boolean {
+  if (!coverageConfirmedAt || !baseline) return false
+  const coverage = Date.parse(coverageConfirmedAt)
+  const base = Date.parse(baseline)
+  return Number.isFinite(coverage) && Number.isFinite(base) && coverage > base
 }
 
 /** DBX availability is a server fact; a capability flag alone cannot claim usable metadata. */

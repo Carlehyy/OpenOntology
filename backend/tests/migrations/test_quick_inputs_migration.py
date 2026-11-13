@@ -7,6 +7,8 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, text
 
+from tests.migrations.latest_head import LATEST_HEAD
+
 
 def _alembic_config(backend: Path, db_path: Path) -> Config:
     cfg = Config(str(backend / "alembic.ini"))
@@ -64,4 +66,4 @@ def test_head_is_single(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     from alembic.script import ScriptDirectory
     heads = ScriptDirectory.from_config(cfg).get_heads()
-    assert heads == ["0146_integrated_cdc"]
+    assert heads == [LATEST_HEAD]

@@ -919,6 +919,71 @@ services:
       start_period: 20s
     restart: unless-stopped
 
+  # 集成副本执行器：为集成数据集的副本表跑 Debezium 初始快照 + 续流捕获，
+  # 控制面在 backend/app/data_channel/integrated/（replica_control/
+  # replica_runtime/replica_executor）。标准栈自动启动（默认 up/build 均包含，
+  # 无 profile/opt-in）；不在 deploy-prod.sh 的停机核心序列内，数据库迁移
+  # 窗口内如对账失败按执行器自身重试口径恢复。
+  integrated_replica_executor:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.cdc
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
+    # 与 CDC 执行器同镜像同 JVM 依赖（含 /opt/debezium/lib/replica-smt.jar），
+    # 只是入口命令不同。不挂 env_file（.env 里的 WeKnora/Kaneo 凭据不进本
+    # 容器），所需变量逐项显式插值；执行器运行期解密受管连接配置，需要与
+    # backend 相同的 SECRET_KEY/ENCRYPTION_KEY，缺失时由应用侧 fail-closed。
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://ontoprompt:ontoprompt@db:5432/ontoprompt}
+      SECRET_KEY: ${SECRET_KEY:-}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
+      APP_LOG_LEVEL: ${APP_LOG_LEVEL:-INFO}
+      # 每连接的快照/续流偏移与模式历史（专用持久卷）；含密钥的子进程配置只
+      # 落 tmpfs。同一宿主机可运行多个 executor 实例共享该卷；每个 capture
+      # 由 SourceLease 咨询锁单写者围栏。不支持跨主机共享卷或跨主机接管。
+      REPLICA_STATE_ROOT: /var/lib/openontology-replicas
+      # 每个 executor 实例的并发捕获上限（默认 2，与下方 3g 内存上限匹配；
+      # 调大时须同步提高 REPLICA_EXECUTOR_MEM_LIMIT）。默认 2 不满足 200 源，
+      # 数百源需增加同一宿主机上的 executor 实例并同步资源，禁止按源数硬放大。
+      REPLICA_MAX_CAPTURES: ${REPLICA_MAX_CAPTURES:-2}
+      REPLICA_RECONCILE_INTERVAL_SECONDS: ${REPLICA_RECONCILE_INTERVAL_SECONDS:-0.5}
+      REPLICA_HEARTBEAT_FILE: /tmp/integrated_replica_executor.heartbeat
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - integrated_replica_state:/var/lib/openontology-replicas
+    command: python -m app.data_channel.integrated.replica_executor
+    # 资源上限按真实容量：默认 2 捕获 × 子进程 JVM（堆与 CDC 子进程同级）
+    # + Python 监督进程预算；调大 REPLICA_MAX_CAPTURES 时同步上调。
+    mem_limit: ${REPLICA_EXECUTOR_MEM_LIMIT:-3g}
+    cpus: ${REPLICA_EXECUTOR_CPUS:-2.0}
+    pids_limit: 1024
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=256m,nosuid,nodev,mode=1777
+    # 停止时先向捕获子进程组发 SIGTERM 再回收，留足优雅退出预算。
+    stop_grace_period: 45s
+    healthcheck:
+      # 执行器每拍对账完成后刷新心跳文件；元数据库不可达时不刷新、如实失败。
+      test: ["CMD", "python", "-c", "import os,time,sys; sys.exit(0 if time.time()-os.path.getmtime('/tmp/integrated_replica_executor.heartbeat')<30 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    restart: unless-stopped
+
   # 任务实例 agent 执行体：消费 task_instances.control，为每个 agent 节点
   # 起一个 openontology-task-agent 容器（只读 rootfs + bind-mount 工作区 +
   # 模型凭据容器环境注入）。镜像构建：docker build -t openontology-task-agent:local docker/task-agent
@@ -1029,6 +1094,10 @@ volumes:
   uploads:
   api_hub_data:
   dbx_data:
+  # integrated_replica_executor 的偏移/模式历史专用卷（单宿主共享，
+  # 每 capture 由 SourceLease 单写者围栏；不支持跨主机共享）。
+  # 与 CDC 的 integrated_cdc_state 一样不与任何其他服务共享。
+  integrated_replica_state:
   # WeKnora keeps its own database, cache, file and docreader-temp volumes.
   # None of these is shared with the platform services. Graph retrieval is off,
   # so there is no WeKnora-specific Neo4j volume and no integration-state
