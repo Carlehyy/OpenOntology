@@ -34,8 +34,9 @@ RUN cp -aL /usr/lib/jvm/jre-21 /tmp/portable-jre
 # 副本 SMT：只用本镜像的 JDK 与 /debezium/lib 既有 jar 离线编译，构建
 # 即自校验（SelfTest 随构建运行，失败则镜像构建失败）；产物只取 jar，
 # 编译中间物不进入最终镜像。该阶段以镜像自带用户 jboss(185) 运行，
-# 产物目录放 /tmp（唯一普遍可写根）。
-COPY integrated_runtime/replica/ /src/replica-smt/
+# 产物目录放 /tmp（唯一普遍可写根）。部署归档以 umask 077 解包，
+# 因此显式设置构建源码权限，保证非 root 用户可遍历目录并读取源码。
+COPY --chmod=0755 integrated_runtime/replica/ /src/replica-smt/
 RUN sh /src/replica-smt/build.sh /debezium /tmp/replica-smt-artifacts \
  && java -cp "/tmp/replica-smt-artifacts/classes:/tmp/replica-smt-artifacts/test-classes:/debezium/lib/*" \
       io.openontology.replica.SelfTest
@@ -63,7 +64,8 @@ RUN if [ -z "$CDC_PREBUILT_BACKEND" ]; then \
       uv sync --frozen --no-dev --no-install-project \
       && uv pip install --python /app/.venv/bin/python --no-deps py-openjudge==0.2.1; \
     fi
-COPY . .
+# 保留归档的受限模式，由运行 UID 拥有源码以保证目录和文件可读。
+COPY --chown=10001:10001 . .
 
 # 非 root 运行；状态卷目录预置属主（空命名卷首次挂载会继承镜像内属主）。
 # 两个执行器各用独立状态根：CDC /var/lib/openontology-cdc、副本执行器

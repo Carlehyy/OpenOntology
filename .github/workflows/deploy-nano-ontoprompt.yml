@@ -482,7 +482,17 @@ jobs:
           KANEO_WEB_URL: https://kaneo.ci.invalid
           KANEO_ADMIN_USER: ci_admin
           KANEO_ADMIN_PASSWORD: ci-only-Kaneo-Admin-2026!
-        run: docker compose -f docker-compose.prod.yml build
+        run: |
+          set -Eeuo pipefail
+          docker compose -f docker-compose.prod.yml build
+          # Rebuild the replica image with the server archive modes (umask 077):
+          # both the donor and the final non-root runtime must read the sources.
+          trap 'chmod -R go+rX backend/app backend/integrated_runtime' EXIT
+          chmod -R go-rwx backend/app backend/integrated_runtime
+          docker compose -f docker-compose.prod.yml build integrated_replica_executor
+          replica_image="$(docker compose -f docker-compose.prod.yml build --print integrated_replica_executor | python3 -c 'import json,sys; print(json.load(sys.stdin)["target"]["integrated_replica_executor"]["tags"][0])')"
+          docker run --rm --network none -e ENVIRONMENT=test --entrypoint python "$replica_image" \
+            -c 'import os; assert os.geteuid() == 10001; from app.data_channel.integrated import cdc_executor, replica_executor; print("non-root executor imports passed")'
 
       - name: WeKnora isolated service and native MCP canary
         env: *service-canary-env

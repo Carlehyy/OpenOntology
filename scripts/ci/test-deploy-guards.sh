@@ -409,8 +409,12 @@ if ! grep -Fq \
     || ! grep -Fq \
     'mkdir -p /var/lib/openontology-cdc /var/lib/openontology-replicas' \
     "$REPO_ROOT/backend/Dockerfile.cdc" \
-    || ! grep -Fq 'backend/integrated_runtime' "$ARCHIVE_SCRIPT"; then
-  printf 'Dockerfile.cdc must ship replica-smt.jar on the Debezium classpath, preset both state roots, and the SMT sources must travel in the deployment archive\n' >&2
+    || ! grep -Fq 'backend/integrated_runtime' "$ARCHIVE_SCRIPT" \
+    || ! grep -Fq 'COPY --chmod=0755 integrated_runtime/replica/ /src/replica-smt/' \
+      "$REPO_ROOT/backend/Dockerfile.cdc" \
+    || ! grep -Fq 'COPY --chown=10001:10001 . .' "$REPO_ROOT/backend/Dockerfile.cdc" \
+    || ! grep -Fq 'USER 10001:10001' "$REPO_ROOT/backend/Dockerfile.cdc"; then
+  printf 'Dockerfile.cdc must ship replica-smt.jar, preset both state roots, and keep archived sources readable by the donor and non-root runtime\n' >&2
   exit 1
 fi
 
@@ -630,9 +634,14 @@ build_step="$(awk '
 if [ -z "$build_step" ] \
   || ! grep -Fq 'INTEGRATED_DBX_PASSWORD: ci-only-dbx-compose-interpolation' <<<"$build_step" \
   || [ "$(grep -c 'INTEGRATED_DBX_PASSWORD' "$DEPLOY_WORKFLOW")" -ne 1 ] \
-  || ! grep -Fq 'run: docker compose -f docker-compose.prod.yml build' <<<"$build_step" \
+  || ! grep -Fq 'docker compose -f docker-compose.prod.yml build' <<<"$build_step" \
+  || ! grep -Fq 'chmod -R go-rwx backend/app backend/integrated_runtime' <<<"$build_step" \
+  || ! grep -Fq 'docker compose -f docker-compose.prod.yml build integrated_replica_executor' <<<"$build_step" \
+  || ! grep -Fq 'trap '\''chmod -R go+rX backend/app backend/integrated_runtime'\'' EXIT' <<<"$build_step" \
+  || ! grep -Fq 'assert os.geteuid() == 10001' <<<"$build_step" \
+  || ! grep -Fq 'from app.data_channel.integrated import cdc_executor, replica_executor' <<<"$build_step" \
   || grep -Eq 'secrets\.|build-arg|docker compose.* up' <<<"$build_step"; then
-  printf 'Docker build must use one step-local public dbx interpolation value and no secret/build-arg/start\n' >&2
+  printf 'Docker build must test restrictive archived source permissions and non-root executor imports, use one step-local public dbx value, and no secret/build-arg/start\n' >&2
   exit 1
 fi
 
