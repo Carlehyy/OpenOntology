@@ -48,6 +48,44 @@ IMAGE="$(resolve_image)"
 docker image inspect "$IMAGE" >/dev/null
 mkdir -p "$ARTIFACTS"
 
+# Production startup imports the same Settings validator used by backend.
+# Use synthetic values for every required dependency; this runs with no
+# network and no database, and never reads production .env/secrets.
+production_import_gate() {
+  docker run --rm --network none --read-only --tmpfs /tmp:size=256m,nosuid,nodev \
+    --user 10001:10001 \
+    -e ENVIRONMENT=production \
+    -e DATABASE_URL=postgresql://ci_user:ci_password@db:5432/ci_db \
+    -e SECRET_KEY=ci-only-secret-key-0123456789abcdef \
+    -e ENCRYPTION_KEY= \
+    -e CORS_ALLOWED_ORIGINS= \
+    -e FIRST_ADMIN_PASSWORD=ci-only-admin-password \
+    -e REDIS_URL=redis://:ci-only-redis-password@redis:6379/0 \
+    -e N8N_API_URL=https://n8n.ci.invalid/api/v1 \
+    -e N8N_API_KEY=ci-only-n8n-api-key \
+    -e NEO4J_URI=bolt://neo4j:7687 \
+    -e NEO4J_USER=neo4j \
+    -e NEO4J_PASSWORD=ci-only-neo4j-password \
+    -e MINIO_ENDPOINT=minio:9000 \
+    -e MINIO_ACCESS_KEY=ci-only-minio-access \
+    -e MINIO_SECRET_KEY=ci-only-minio-secret \
+    -e STEWARD_BROWSER_CDP_URL=http://browser:9222 \
+    -e STEWARD_BROWSER_ALLOW_PRIVATE_NETWORKS=false \
+    -e WEKNORA_BASE_URL=http://weknora-app:8080 \
+    -e WEKNORA_WEB_URL=https://weknora.ci.invalid \
+    -e KANEO_BASE_URL=http://kaneo-app:5173 \
+    -e KANEO_WEB_URL=https://kaneo.ci.invalid \
+    -e PIPELINE_FILE_PUBLIC_APP_BASE_URL=https://app.ci.invalid \
+    -e PIPELINE_FILE_PUBLIC_API_BASE_URL=https://api.ci.invalid \
+    -e PYTHON_KERNEL_GATEWAY_AUTH_TOKEN=ci-only-kernel-gateway-token \
+    -e INTEGRATED_DBX_URL=http://dbx:4224 \
+    -e INTEGRATED_DBX_PASSWORD=ci-only-dbx-password \
+    -e INTEGRATED_DBX_COMMIT=0137e0cbc8b663da5a17ec424c6d47e4e5570ead \
+    --entrypoint python "$IMAGE" \
+    -c 'import os; assert os.geteuid() == 10001; from app.shared.config import settings; from app.data_channel.integrated import cdc_executor, replica_executor; print("production executor imports passed")'
+}
+production_import_gate
+
 cleanup() {
   # Remove only this run's driver and project. The acceptance driver can be
   # orphaned if the host-side watchdog fires, so name it explicitly before the

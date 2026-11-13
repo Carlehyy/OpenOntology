@@ -403,6 +403,21 @@ if [ -z "$replica_block" ] || [ -z "$local_replica_block" ] \
   printf 'integrated_replica_executor must auto-start without profiles, stay port/sock/env_file-free, remain scale-safe (no container_name), document REPLICA_MAX_CAPTURES in .env.example, be volume-backed with honest capacity defaults, participate in deploy readiness/rollback stop, and must not be redefined by the CDC overlay\n' >&2
   exit 1
 fi
+for key in \
+  ENVIRONMENT DATABASE_URL SECRET_KEY ENCRYPTION_KEY CORS_ALLOWED_ORIGINS \
+  REDIS_URL N8N_API_URL N8N_API_KEY NEO4J_URI NEO4J_USER NEO4J_PASSWORD \
+  MINIO_ENDPOINT MINIO_ACCESS_KEY MINIO_SECRET_KEY STEWARD_BROWSER_CDP_URL \
+  STEWARD_BROWSER_ALLOW_PRIVATE_NETWORKS WEKNORA_BASE_URL WEKNORA_WEB_URL \
+  KANEO_BASE_URL KANEO_WEB_URL PIPELINE_FILE_PUBLIC_APP_BASE_URL \
+  PIPELINE_FILE_PUBLIC_API_BASE_URL PYTHON_KERNEL_GATEWAY_AUTH_TOKEN \
+  FIRST_ADMIN_PASSWORD INTEGRATED_DBX_URL INTEGRATED_DBX_PASSWORD \
+  INTEGRATED_DBX_COMMIT; do
+  if ! grep -Eq "^[[:space:]]+$key:" <<<"$replica_block" \
+      || ! grep -Eq "^[[:space:]]+$key:" <<<"$local_replica_block"; then
+    printf 'integrated_replica_executor must explicitly receive shared Settings dependency %s in prod and local compose\n' "$key" >&2
+    exit 1
+  fi
+done
 if ! grep -Fq \
     'COPY --from=debezium /tmp/replica-smt-artifacts/replica-smt.jar /opt/debezium/lib/replica-smt.jar' \
     "$REPO_ROOT/backend/Dockerfile.cdc" \
@@ -439,10 +454,28 @@ if [ ! -x "$replica_acceptance_wrapper" ] \
     || ! grep -Fq 'name: integrated-replica-acceptance-${{ github.run_id }}' "$DEPLOY_WORKFLOW" \
     || ! grep -Fq 'path: .artifacts/ci-replicaacceptance' "$DEPLOY_WORKFLOW" \
     || ! grep -Fq 'trap '\''rc=$?; cleanup; trap - EXIT; exit "$rc"'\'' EXIT' "$replica_acceptance_wrapper" \
+    || ! grep -Fq 'ENVIRONMENT=production' "$replica_acceptance_wrapper" \
+    || ! grep -Fq 'from app.shared.config import settings' "$replica_acceptance_wrapper" \
+    || ! grep -Fq 'production executor imports passed' "$replica_acceptance_wrapper" \
+    || ! grep -Fq 'CORS_ALLOWED_ORIGINS=' "$replica_acceptance_wrapper" \
     || grep -Eq 'test-integrated-replica-acceptance\.sh.*\|\|[[:space:]]*true' "$DEPLOY_WORKFLOW"; then
-  printf 'real replica acceptance must be wired to the docker-build job, use an isolated port-free fixture stack, upload evidence, and never swallow failures\n' >&2
+  printf 'real replica acceptance must be wired to the docker-build job, cover synthetic production imports, use an isolated port-free fixture stack, upload evidence, and never swallow failures\n' >&2
   exit 1
 fi
+for key in \
+  ENVIRONMENT DATABASE_URL SECRET_KEY ENCRYPTION_KEY CORS_ALLOWED_ORIGINS \
+  REDIS_URL N8N_API_URL N8N_API_KEY NEO4J_URI NEO4J_USER NEO4J_PASSWORD \
+  MINIO_ENDPOINT MINIO_ACCESS_KEY MINIO_SECRET_KEY STEWARD_BROWSER_CDP_URL \
+  STEWARD_BROWSER_ALLOW_PRIVATE_NETWORKS WEKNORA_BASE_URL WEKNORA_WEB_URL \
+  KANEO_BASE_URL KANEO_WEB_URL PIPELINE_FILE_PUBLIC_APP_BASE_URL \
+  PIPELINE_FILE_PUBLIC_API_BASE_URL PYTHON_KERNEL_GATEWAY_AUTH_TOKEN \
+  FIRST_ADMIN_PASSWORD INTEGRATED_DBX_URL INTEGRATED_DBX_PASSWORD \
+  INTEGRATED_DBX_COMMIT; do
+  if ! grep -Fq -- "-e $key=" "$replica_acceptance_wrapper"; then
+    printf 'real replica acceptance production import must pass synthetic dependency %s\n' "$key" >&2
+    exit 1
+  fi
+done
 
 # WeKnora app/MCP must stay private; only the native UI gateway publishes
 # ports. The formal app is registration-closed, and the registration-open

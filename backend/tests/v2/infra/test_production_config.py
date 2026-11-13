@@ -524,6 +524,40 @@ def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
         in build_script
     )
 
+    # The replica executor does not mount .env, but imports the same Settings
+    # module. Its explicit environment must carry the shared dependency
+    # contract; keys already explicit on backend must use the same expression.
+    required_replica_env = {
+        "ENVIRONMENT", "DATABASE_URL", "SECRET_KEY", "ENCRYPTION_KEY",
+        "CORS_ALLOWED_ORIGINS",
+        "REDIS_URL", "N8N_API_URL", "N8N_API_KEY",
+        "NEO4J_URI", "NEO4J_USER", "NEO4J_PASSWORD",
+        "MINIO_ENDPOINT", "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY",
+        "STEWARD_BROWSER_CDP_URL", "STEWARD_BROWSER_ALLOW_PRIVATE_NETWORKS",
+        "WEKNORA_BASE_URL", "WEKNORA_WEB_URL",
+        "KANEO_BASE_URL", "KANEO_WEB_URL",
+        "PIPELINE_FILE_PUBLIC_APP_BASE_URL",
+        "PIPELINE_FILE_PUBLIC_API_BASE_URL",
+        "PYTHON_KERNEL_GATEWAY_AUTH_TOKEN", "FIRST_ADMIN_PASSWORD",
+        "INTEGRATED_DBX_URL", "INTEGRATED_DBX_PASSWORD",
+        "INTEGRATED_DBX_COMMIT",
+    }
+    replica = compose["services"]["integrated_replica_executor"]
+    assert "env_file" not in replica
+    backend_env = backend["environment"]
+    for key in required_replica_env:
+        assert key in replica["environment"], key
+        if key in backend_env and key != "REDIS_URL":
+            assert replica["environment"][key] == backend_env[key], key
+    # These come from backend env_file rather than explicit backend `environment`;
+    # pin the replica expressions so a dropped mapping cannot pass key-presence.
+    for key in ("CORS_ALLOWED_ORIGINS", "REDIS_URL", "N8N_API_URL", "N8N_API_KEY"):
+        assert replica["environment"][key] == "${" + key + ":-}", key
+    local = yaml.safe_load((ROOT / "docker-compose.local.yml").read_text())
+    local_replica = local["services"]["integrated_replica_executor"]
+    assert "env_file" not in local_replica
+    assert required_replica_env <= set(local_replica["environment"])
+
 
 def test_removed_graph_fallback_dependencies_are_not_packaged():
     project = tomllib.loads(
