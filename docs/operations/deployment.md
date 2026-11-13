@@ -376,7 +376,7 @@ docker.sock、以非 root（uid 10001）只读 rootfs 运行。
 
 - **镜像**：`backend/Dockerfile.cdc`。Python 运行时同 backend 镜像；Debezium
   Server 发行版与其 Java 21 运行时整体取自固定摘要官方镜像
-  `quay.io/debezium/server:3.7.1.Final@sha256:8c4e6c7efc392f9adfd283ede2e75cd1a3594ef1126b014248054a5e718bfbd5`
+  `quay.io/debezium/server:3.7.1.Final@sha256:80803a8a2b4bae4280ba9b350577fa57f9e79cf9a115b2dd30040c68e9a704c1`
   （升级 = 换摘要重测，不跟踪浮动 tag）。复用已构建 backend 镜像的快速路径
   见 Dockerfile 头注释（`CDC_PREBUILT_BACKEND=1`）。
 - **状态卷**：`integrated_cdc_state` 挂到 `/var/lib/openontology-cdc`，按

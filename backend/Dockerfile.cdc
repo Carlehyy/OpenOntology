@@ -23,7 +23,7 @@
 #
 # 执行器不需要 Node 运行时与 docker CLI，故不拷入（最小化攻击面）。
 ARG PYTHON_BASE_IMAGE=python:3.12-slim
-ARG DEBEZIUM_SERVER_IMAGE=quay.io/debezium/server:3.7.1.Final@sha256:8c4e6c7efc392f9adfd283ede2e75cd1a3594ef1126b014248054a5e718bfbd5
+ARG DEBEZIUM_SERVER_IMAGE=quay.io/debezium/server:3.7.1.Final@sha256:80803a8a2b4bae4280ba9b350577fa57f9e79cf9a115b2dd30040c68e9a704c1
 
 FROM ${DEBEZIUM_SERVER_IMAGE} AS debezium
 # Red Hat 系镜像的 JRE 携带指向 donor 文件系统的绝对符号链接（conf/、
