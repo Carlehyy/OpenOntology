@@ -111,13 +111,38 @@ Actions 日志。`KANEO_WEB_URL` 未显式配置时从 `PUBLIC_TLS_IP` 与
 `PUBLIC_TLS_IP` 时，部署脚本从显式传入的 `HEALTH_URL` 提取并校验公网 IP，
 持久化后供证书与 Kaneo 共用；已有值保持不变。健康地址使用域名或回环地址、
 无法确定公网 IP 时，须先在服务器 `.env` 配置 `PUBLIC_TLS_IP`，否则部署失败。
-公开入口检查要求 HTTP 8090 精确 308 跳转该 origin、HTTPS 8445 网关健康，
+公网入口检查要求 HTTP 8090 精确 308 跳转该 origin、HTTPS 8445 网关健康，
 且免登录中继 `/sso/entry` 无票据访问必须 302 回根路径（证明 kaneo-gateway →
 backend 反代与中继路由接通）。`backend` 容器持有
 `KANEO_ADMIN_EMAIL`/`KANEO_ADMIN_PASSWORD` 供一键免登录中继做服务端登录，
 其余运行时容器仍被掩码。密码获取只能在服务器受控终端读取 `.env`，边界同
 [首个管理员密码](#首次登录与管理员密码恢复)。服务与地址契约详见
 [配置说明](./configuration.md#kaneo-项目管理2490)。
+
+Grafana 监控看板（官方 13.3.1 固定 multiarch digest）是硬平台依赖，随同一
+Compose 启动：部署脚本在 Kaneo 栈之后、平台探针与数据库迁移之前，先以
+`compose ps --status running -q grafana` 确认该 Compose 项目中 Grafana 是否
+已在运行（状态查询失败会使部署立即非零退出，不会把查询失败误判为无容器），
+随后于私网启动 Grafana：新版 Compose 走 `compose up --wait grafana`，无
+`--wait` 的旧版走 `compose up -d` 加有界健康等待，两条路径的失败语义一致。
+启动后由一次性 `grafana-bootstrap` 容器执行
+`python -m app.operations.grafana.bootstrap`（有界等待健康 + 共享管理员
+basic 校验 + 确保 `openontology` 文件夹）与 `--verify` 只读复核。compose 健康
+等待或后续 bootstrap/`--verify` 任一步失败都会使部署立即非零退出。启动/
+健康等待失败时，若 Grafana 在本次部署前未运行，失败收尾只停止 Grafana 服务；
+若此前已在运行，则保留现场、不主动停止。bootstrap/`--verify` 失败保持原有
+收尾语义：停止 Grafana 服务。所有失败收尾都不停止其他已运行的业务服务，
+不留「Grafana 未就绪但部署成功」的状态；重复部署/重复 bootstrap 不修改已存在
+卷的管理员密码。首次部署时 `.env` 缺失或仍为本地默认值的
+`GRAFANA_ADMIN_PASSWORD` 由部署脚本随机生成并持久化（8–32 位无空白，不回显
+到 Actions 日志），`GRAFANA_IMAGE` 缺省时钉扎固定 digest。部署后公网入口
+安全回归硬门禁：经平台 frontend 入口的未认证 `/grafana/` 与
+`/grafana/api/health` 必须拒绝 401（证明 nginx `auth_request` 鉴权代理已接
+线、Grafana 未裸露），裸 `/grafana` 必须 301 到 `/grafana/`。`backend` 容器
+持有 `GRAFANA_ADMIN_*` 走内网 HTTP API，其余运行时容器仍被掩码；frontend
+依赖 grafana 健康与 grafana-bootstrap 成功完成。迁移停机窗口内前端被停止，
+`/grafana/` 同期不可用属预期（Grafana 自身容器不停止）。服务与地址契约详见
+[配置说明](./configuration.md#grafana-监控看板1331)。
 
 Hindsight 1.2.0 长期记忆是可选 profile，默认不部署：服务器 `.env` 写
 `HINDSIGHT_ENABLED=true` 后，`deploy-prod.sh` 幂等生成
@@ -460,10 +485,32 @@ CDP。插件包须以不可变 digest 交付；secret/artifact broker 使用仅�
 - 上一版本镜像、Compose 配置和回滚负责人已确认；
 - Kaneo：`PUBLIC_TLS_IP` 已配置，`KANEO_WEB_URL` 使用该 IP 和
   `KANEO_HTTPS_PORT`（未显式设置时自动推导）；本版生产编排不支持不同域名或
-  外部 TLS 代理的地址。`8090`/`8445`（或自定义端口）已放行且无端口冲突。
+  外部 TLS 代理的地址。`8090`/`8445`（或自定义端口）已放行且无端口冲突；
+- Grafana：`GRAFANA_IMAGE` 保持固定 digest（漂移会被 digest 门禁拒绝），
+  `GRAFANA_ADMIN_PASSWORD` 首次部署自动生成后保持稳定；未配置额外宿主端口
+  （生产 Grafana 不发布任何宿主端口，唯一入口是平台 frontend 的
+  `/grafana/`）。
 
 LLM 不属于部署启动门禁。基础平台发布成功后，再由管理员在模型配置页添加并
 测试所需提供商；不得为了通过平台 readiness 预置或回显真实模型凭据。
+
+发布前必须在隔离 staging 完成 Grafana 强依赖接入的下列验收
+并保留证据（证据入 CI artifact，不进 Git），不得以探活 200 代替：
+
+1. 首次部署在 `.env` 缺失时生成 `GRAFANA_ADMIN_PASSWORD`，重复部署后与已部署
+   实例保持一致（只核对存在与指纹，不回显值）；
+2. 私网初始化失败演练：grafana 未就绪或 grafana-bootstrap 失败时部署立即
+   非零退出，且未拖停其他已运行业务；
+3. 公网入口安全回归：经平台 frontend 入口的未认证 `/grafana/` 与
+   `/grafana/api/health` 必须 401（nginx `auth_request` 生效、Grafana 未
+   裸露），裸 `/grafana` 301 到 `/grafana/`；
+4. 平台内「监控看板」页签发看板会话后：原生编辑器（`/grafana/d/<uid>`）与
+   预览 kiosk iframe 加载、无 Grafana 登录页，Grafana Live WebSocket 正常；
+   无 cookie/篡改/过期 cookie 的 HTTP、API 与 WS 访问全部被拒；
+5. 运行期故障演练：停止 grafana 后平台 `/health/ready` 返回 503 且
+   `checks.unavailable` 含 `grafana`，其他服务继续运行；恢复后自动转绿；
+6. 卡片创建/信息/排序/删除全链路与 Grafana 文件夹、UID 对账一致（含
+   存在性对账与删除后 404 视为成功）。
 
 发布前必须在隔离 staging 完成 Kaneo 强依赖接入的下列验收
 并保留证据（证据入 CI artifact，不进 Git），不得以探活 200 代替：

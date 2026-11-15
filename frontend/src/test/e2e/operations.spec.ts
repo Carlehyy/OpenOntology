@@ -290,6 +290,28 @@ async function mockOperationsReports(page: Page, records: {
   })
 }
 
+/**
+ * 看板工作台 mock（真实 DTO 契约）：
+ * - 列表返回正常空态 {data:{grafana_available:true,total:0,items:[]}}——不能依赖
+ *   mockSession 的兜底 []（它会让列表解包失败、页面落到错误态，遮掩正常预期）；
+ * - grafana-session 成功 204 空 body（与后端一致）；
+ * - 未知 dashboards 端点显式 500，不静默兜底。
+ * 在 mockSession 之后注册、优先命中。
+ */
+async function mockOperationsDashboards(page: Page) {
+  await page.route('**/api/v2/operations/dashboards**', route => {
+    const path = new URL(route.request().url()).pathname
+    const method = route.request().method()
+    if (path === '/api/v2/operations/dashboards' && method === 'GET') {
+      return json(route, { grafana_available: true, total: 0, items: [] })
+    }
+    if (path === '/api/v2/operations/dashboards/grafana-session' && method === 'POST') {
+      return route.fulfill({ status: 204, body: '' })
+    }
+    return jsonError(route, 500, { detail: { code: 'unexpected', message: '未知看板端点' } })
+  })
+}
+
 async function mockSession(page: Page, user: Record<string, unknown>) {
   await page.addInitScript(sessionUser => {
     localStorage.setItem('token', 'operations-e2e-token')
@@ -344,11 +366,18 @@ test('智能运营：报告册卡片、书式阅读、一次批量查询与手�
   await mockSession(page, admin)
   const records = emptyRecords()
   await mockOperationsReports(page, records)
+  await mockOperationsDashboards(page)
   await page.setViewportSize({ width: 1440, height: 900 })
 
   await page.goto('/#/operations')
   await expect(page).toHaveURL(/\/#\/operations\/dashboard$/)
-  await expect(page.getByRole('heading', { name: '监控看板即将上线' })).toBeVisible()
+  // 监控看板已是真实工作台：断言工作台、标题与正常空态（列表契约 mock 返回
+  // total 0），而不是请求失败兜底或筛选空态。
+  await expect(page.getByTestId('operations-dashboard-workbench')).toBeVisible()
+  await expect(page.getByRole('heading', { name: '监控看板', exact: true })).toBeVisible()
+  await expect(page.getByTestId('dashboard-list-empty')).toBeVisible()
+  await expect(page.getByText('还没有监控看板', { exact: true })).toBeVisible()
+  await expect(page.getByTestId('dashboard-create')).toBeVisible()
 
   const nav = page.getByRole('navigation')
   const dataGroup = nav.getByRole('button', { name: '数据集成', exact: true })

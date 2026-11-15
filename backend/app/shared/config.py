@@ -303,6 +303,22 @@ class Settings(BaseSettings):
     kaneo_admin_password: str = Field(default="", repr=False)
     kaneo_timeout_seconds: int = Field(default=15, ge=3, le=60)
 
+    # Grafana 监控看板（固定 13.3.1 digest）。私网 API 地址（容器内经
+    # /grafana 子路径暴露，SERVE_FROM_SUB_PATH 契约）；浏览器入口走 nginx
+    # /grafana/。共享管理员凭据只注入 backend 与 grafana-bootstrap 容器，
+    # pipeline_executor/task_worker 等由掩码锚点合法置空——因此不得加全局
+    # 生产必需校验（同 Kaneo/WeKnora 先例），使用时 fail-closed（路由级
+    # 503），密码 repr=False 不进日志与接口响应。
+    grafana_base_url: str = "http://grafana:3000"
+    grafana_admin_user: str = "admin"
+    grafana_admin_password: str = Field(default="", repr=False)
+    grafana_timeout_seconds: int = Field(default=15, ge=3, le=60)
+    grafana_folder_uid: str = "openontology"
+    grafana_folder_title: str = "OpenOntology 监控看板"
+    # 独立看板会话 cookie（oo_grafana_session）TTL；交付运行配置为 28800
+    # 秒（8 小时），平台与 Grafana 会话独立、不随平台退出即时撤销。
+    grafana_session_ttl_seconds: int = Field(default=28800, ge=60, le=86400)
+
     @field_validator("kaneo_web_url", mode="before")
     @classmethod
     def kaneo_web_url_requires_https(cls, value: object) -> object:

@@ -151,6 +151,14 @@ compose_environment() {
     -u KANEO_ADMIN_USER \
     -u KANEO_ADMIN_EMAIL \
     -u KANEO_ADMIN_PASSWORD \
+    -u GRAFANA_IMAGE \
+    -u GRAFANA_BASE_URL \
+    -u GRAFANA_TIMEOUT_SECONDS \
+    -u GRAFANA_ADMIN_USER \
+    -u GRAFANA_ADMIN_PASSWORD \
+    -u GRAFANA_FOLDER_UID \
+    -u GRAFANA_FOLDER_TITLE \
+    -u GRAFANA_SESSION_TTL_SECONDS \
     -u HINDSIGHT_ENABLED \
     -u HINDSIGHT_BASE_URL \
     -u HINDSIGHT_WEB_URL \
@@ -727,6 +735,99 @@ start_and_verify_kaneo_stack() {
   run_kaneo_bootstrap
   run_kaneo_bootstrap --verify
   kaneo_bootstrap_active=0
+}
+
+run_grafana_bootstrap() {
+  log "running Grafana bootstrap: $*"
+  run_with_retry compose run --rm --no-deps grafana-bootstrap \
+    python -m app.operations.grafana.bootstrap "$@" || {
+    # A failed Grafana bootstrap makes the deployment fail loudly. Stop only
+    # the Grafana service; already running platform business services stay up.
+    log "stopping the grafana container after a failed bootstrap"
+    compose stop --timeout 30 grafana >/dev/null 2>&1 || true
+    return 1
+  }
+}
+
+start_and_verify_grafana_stack() {
+  # Grafana is a hard platform dependency: it is started privately and its
+  # one-shot bootstrap (health + shared-admin + folder ensure, then --verify)
+  # must pass before the platform probe, migrations and the final compose up.
+  # The browser entry only opens with the frontend, which the final compose up
+  # starts after all platform health conditions are satisfied.
+  #
+  # Record whether this Compose project already had a running Grafana before
+  # startup. A failed status query is a hard failure: an empty result must not
+  # be mistaken for "no container", because that could wrongly stop a service
+  # on a later failure. When startup/health-wait fails, only a Grafana instance
+  # created by this deployment is stopped; a previously running instance is
+  # left in place, and no other business service is touched.
+  local grafana_was_running=0 grafana_container_id startup_status=0
+  if ! grafana_container_id="$(compose ps --status running -q grafana)"; then
+    log "could not determine whether the grafana container was already running; refusing to start it"
+    return 1
+  fi
+  if [ -n "$grafana_container_id" ]; then
+    grafana_was_running=1
+  fi
+  log "starting the Grafana service on the private network"
+  if compose up --help 2>&1 | grep -q -- '--wait'; then
+    if ! run_with_retry compose up -d --wait \
+        --wait-timeout "${GRAFANA_APP_WAIT_TIMEOUT:-360}" grafana; then
+      startup_status=1
+    fi
+  else
+    if ! run_with_retry compose up -d grafana; then
+      startup_status=1
+    elif ! run_with_retry wait_for_service_healthy grafana 48 10; then
+      startup_status=1
+    fi
+  fi
+  if [ "$startup_status" -ne 0 ]; then
+    if [ "$grafana_was_running" -eq 0 ]; then
+      log "stopping the grafana container after a failed startup because it was not running before this deployment"
+      compose stop --timeout 30 grafana >/dev/null 2>&1 || true
+    else
+      log "grafana was already running before this deployment; leaving it in place after the failed startup"
+    fi
+    return 1
+  fi
+  if ! run_grafana_bootstrap; then
+    return 1
+  fi
+  if ! run_grafana_bootstrap --verify; then
+    return 1
+  fi
+  return 0
+}
+
+check_grafana_public_entry() {
+  # Security regression hard gate: the platform frontend entry must reject
+  # unauthenticated /grafana/ access (nginx auth_request + auth-proxy wired,
+  # Grafana never exposed bare). The 301 for the bare /grafana path is checked
+  # too so it can never fall through to the SPA entry page.
+  local http_port status
+  http_port="$(env_value PUBLIC_PORT)"
+  http_port="${http_port:-80}"
+  status="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 \
+    "http://127.0.0.1:${http_port}/grafana/" || true)"
+  if [ "$status" != "401" ]; then
+    log "unauthenticated /grafana/ must answer 401 through the platform entry (got ${status})"
+    return 1
+  fi
+  status="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 \
+    "http://127.0.0.1:${http_port}/grafana/api/health" || true)"
+  if [ "$status" != "401" ]; then
+    log "unauthenticated /grafana/api/health must answer 401 through the platform entry (got ${status})"
+    return 1
+  fi
+  status="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 \
+    "http://127.0.0.1:${http_port}/grafana" || true)"
+  if [ "$status" != "301" ]; then
+    log "bare /grafana must 301 to /grafana/ through the platform entry (got ${status})"
+    return 1
+  fi
+  return 0
 }
 
 check_kaneo_public_entry() {
@@ -1328,6 +1429,49 @@ configure_kaneo_env() {
   set_env_values_in_file "${APP_DIR}/.env" "${updates[@]}"
 }
 
+configure_grafana_env() {
+  # The shared Grafana administrator password is generated once and stays
+  # stable across deployments (GF_SECURITY_ADMIN_PASSWORD only takes effect
+  # on the first volume initialization; re-running bootstrap never resets an
+  # existing Grafana database). The value is never echoed into logs. Fresh and
+  # pre-Grafana .env files get every required key materialized here so
+  # validation cannot fail on a missing value; already persisted values are
+  # never rewritten.
+  local current
+  local -a updates=()
+  updates+=("GRAFANA_BASE_URL=http://grafana:3000")
+  current="$(env_value GRAFANA_TIMEOUT_SECONDS)"
+  [ -n "$current" ] || updates+=("GRAFANA_TIMEOUT_SECONDS=15")
+  # The Grafana shared administrator is a dedicated service account fixed by
+  # contract; it deliberately does not inherit the platform FIRST_ADMIN_USER.
+  current="$(env_value GRAFANA_ADMIN_USER)"
+  [ -n "$current" ] || updates+=("GRAFANA_ADMIN_USER=admin")
+  current="$(env_value GRAFANA_ADMIN_PASSWORD)"
+  case "$current" in
+    ""|change-me|admin123|localGrafanaAdmin2026!)
+      updates+=("GRAFANA_ADMIN_PASSWORD=$(random_service_admin_password)")
+      log "generated independent Grafana administrator password"
+      ;;
+  esac
+  # The board session cookie TTL defaults to the delivered 8h contract value
+  # (28800) when a fresh/legacy .env has no key yet.
+  current="$(env_value GRAFANA_SESSION_TTL_SECONDS)"
+  [ -n "$current" ] || updates+=("GRAFANA_SESSION_TTL_SECONDS=28800")
+  # Platform folder identity is part of the UID reconciliation contract.
+  current="$(env_value GRAFANA_FOLDER_UID)"
+  [ -n "$current" ] || updates+=("GRAFANA_FOLDER_UID=openontology")
+  current="$(env_value GRAFANA_FOLDER_TITLE)"
+  [ -n "$current" ] || updates+=("GRAFANA_FOLDER_TITLE=OpenOntology 监控看板")
+  # Official Grafana 13.3.1 image with a directly verified multiarch digest
+  # (both independent mirrors returned the identical manifest). Existing
+  # values are preserved; the production digest gate still rejects tag drift.
+  current="$(env_value GRAFANA_IMAGE)"
+  [ -n "$current" ] || updates+=(
+    "GRAFANA_IMAGE=grafana/grafana:13.3.1@sha256:0615ec4fbd4072004b7d86b46ded63013a74b7d6eb1119273dd89e8fa25c13cf"
+  )
+  set_env_values_in_file "${APP_DIR}/.env" "${updates[@]}"
+}
+
 hindsight_web_url_origin_ok() {
   # HINDSIGHT_WEB_URL 的部署期形态校验：http(s) origin（可带端口/IPv6 括号），
   # 不带凭据/路径/查询/fragment；允许单个尾部斜杠（backend 会归一化）。运行期
@@ -1678,6 +1822,57 @@ validate_kaneo_config() {
   log "validated Kaneo service URLs and independent account/runtime credentials"
 }
 
+validate_grafana_config() {
+  local admin_password
+  [ "$(env_value GRAFANA_BASE_URL)" = "http://grafana:3000" ] || {
+    log "GRAFANA_BASE_URL must remain the internal http://grafana:3000 contract"
+    exit 1
+  }
+  admin_password="$(env_value GRAFANA_ADMIN_PASSWORD)"
+  if [ "${#admin_password}" -lt 8 ] || [ "${#admin_password}" -gt 32 ]; then
+    log "GRAFANA_ADMIN_PASSWORD must contain between 8 and 32 characters"
+    exit 1
+  fi
+  case "$admin_password" in
+    *[[:space:]]*) log "GRAFANA_ADMIN_PASSWORD must not contain whitespace"; exit 1 ;;
+  esac
+  unset admin_password
+  case "$(env_value GRAFANA_TIMEOUT_SECONDS)" in
+    ""|*[!0-9]*)
+      log "GRAFANA_TIMEOUT_SECONDS must be an integer between 3 and 60"
+      exit 1
+      ;;
+    *)
+      if [ "$(env_value GRAFANA_TIMEOUT_SECONDS)" -lt 3 ] \
+          || [ "$(env_value GRAFANA_TIMEOUT_SECONDS)" -gt 60 ]; then
+        log "GRAFANA_TIMEOUT_SECONDS must be an integer between 3 and 60"
+        exit 1
+      fi
+      ;;
+  esac
+  case "$(env_value GRAFANA_SESSION_TTL_SECONDS)" in
+    ""|*[!0-9]*)
+      log "GRAFANA_SESSION_TTL_SECONDS must be an integer between 60 and 86400"
+      exit 1
+      ;;
+    *)
+      if [ "$(env_value GRAFANA_SESSION_TTL_SECONDS)" -lt 60 ] \
+          || [ "$(env_value GRAFANA_SESSION_TTL_SECONDS)" -gt 86400 ]; then
+        log "GRAFANA_SESSION_TTL_SECONDS must be an integer between 60 and 86400"
+        exit 1
+      fi
+      ;;
+  esac
+  case "$(env_value GRAFANA_IMAGE)" in
+    grafana/grafana:13.3.1@sha256:0615ec4fbd4072004b7d86b46ded63013a74b7d6eb1119273dd89e8fa25c13cf) ;;
+    *)
+      log "GRAFANA_IMAGE must remain the pinned grafana/grafana:13.3.1 digest contract"
+      exit 1
+      ;;
+  esac
+  log "validated Grafana service contract and shared administrator credentials"
+}
+
 start_integrated_dbx_if_needed() {
   if [ "$INTEGRATED_DBX_INTERNAL" = "1" ]; then
     compose up -d dbx
@@ -1789,6 +1984,7 @@ configure_integrated_dbx
 ensure_public_tls_ip
 configure_weknora_env
 configure_kaneo_env
+configure_grafana_env
 configure_hindsight_env
 # Chromium is bundled with the production Compose stack. Pin the internal CDP
 # URL so existing server-side .env files receive the newly required setting.
@@ -2384,6 +2580,7 @@ validate_required_runtime_dependencies() {
 validate_required_runtime_dependencies
 validate_weknora_config
 validate_kaneo_config
+validate_grafana_config
 validate_hindsight_config
 if [ -z "$(env_value ENCRYPTION_KEY)" ]; then
   log "ENCRYPTION_KEY is empty; preserving the existing SECRET_KEY-derived encryption key"
@@ -2448,7 +2645,8 @@ for image_key in \
   PYTHON_BASE_IMAGE NODE_BASE_IMAGE NGINX_BASE_IMAGE \
   WEKNORA_APP_IMAGE WEKNORA_UI_IMAGE WEKNORA_DOCREADER_IMAGE \
   WEKNORA_POSTGRES_IMAGE WEKNORA_REDIS_IMAGE \
-  KANEO_APP_IMAGE KANEO_POSTGRES_IMAGE; do
+  KANEO_APP_IMAGE KANEO_POSTGRES_IMAGE \
+  GRAFANA_IMAGE; do
   check_image_digest "$image_key"
 done
 # Hindsight 只在启用时参与 digest 门禁；未启用时缺键不得阻断全平台。
@@ -2545,6 +2743,11 @@ start_and_verify_weknora_app
 # private app is (re)initialized and verified before the platform probe,
 # migrations and the final compose up that opens the public gateway.
 start_and_verify_kaneo_stack
+# Grafana is a hard platform dependency as well: the private service is started
+# and the one-shot bootstrap (health + shared-admin + folder, then --verify)
+# must pass before the platform probe and migrations; a failure makes the
+# deployment fail loudly without stopping other already-running services.
+start_and_verify_grafana_stack
 log "starting required dependency services"
 run_with_retry start_required_dependency_services
 log "verifying required production dependency connectivity"
@@ -2625,7 +2828,8 @@ for i in $(seq 1 60); do
       && check_pipeline_executor \
       && check_frontend_assets \
       && check_weknora_public_entry \
-      && check_kaneo_public_entry; then
+      && check_kaneo_public_entry \
+      && check_grafana_public_entry; then
     if ! verify_runtime_source_attestation; then
       log "runtime source attestation failed; refusing to report deployment success"
       stop_new_runtime_after_failed_deploy
@@ -2646,7 +2850,7 @@ log "deployment health check failed"
 compose ps || true
 redact_compose_logs backend dbx browser frontend pipeline_executor \
   weknora-app weknora-ui weknora-gateway weknora-docreader \
-  kaneo-db kaneo-app kaneo-gateway || true
+  kaneo-db kaneo-app kaneo-gateway grafana grafana-bootstrap || true
 stop_new_runtime_after_failed_deploy
 log "migration reached head; restore the pre-deploy backup before rolling back the application"
 exit 1

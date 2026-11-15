@@ -67,7 +67,10 @@ x-weknora-app: &weknora-app-base
 # WEKNORA_ADMIN_PASSWORD with the real values for the one-click SSO relays
 # (explicit keys win over merge keys); every other runtime container keeps the
 # empty mask, and the Kaneo/WeKnora DB passwords and auth secrets stay masked
-# everywhere.
+# everywhere. The Grafana shared-admin password follows the same pattern:
+# `backend` re-declares the real value for the internal Grafana HTTP API
+# client and the one-shot grafana-bootstrap uses it to verify the folder; all
+# other runtime containers keep the empty mask.
 x-platform-runtime-weknora-secret-blocks: &platform-runtime-weknora-secret-blocks
   WEKNORA_ADMIN_PASSWORD: ""
   WEKNORA_DB_PASSWORD: ""
@@ -80,6 +83,7 @@ x-platform-runtime-weknora-secret-blocks: &platform-runtime-weknora-secret-block
   KANEO_AUTH_SECRET: ""
   HINDSIGHT_DB_PASSWORD: ""
   HINDSIGHT_CP_ACCESS_KEY: ""
+  GRAFANA_ADMIN_PASSWORD: ""
 
 
 services:
@@ -694,6 +698,18 @@ services:
       # 凭据仅用于该跳转，不进日志/接口/前端。
       KANEO_ADMIN_EMAIL: ${KANEO_ADMIN_EMAIL:-admin@kaneo.local}
       KANEO_ADMIN_PASSWORD: ${KANEO_ADMIN_PASSWORD:?kaneo_admin_password is required}
+      # Grafana 监控看板（官方固定 13.3.1 镜像）：backend 用共享管理员凭据走
+      # 内网 HTTP API（ensure 文件夹/建删看板/存在性对账）。管理员密码显式
+      # 声明真实值（YAML 显式键优先于上方掩码锚点）；凭据仅进入 backend 与
+      # grafana-bootstrap，不进日志/接口/前端。
+      GRAFANA_BASE_URL: http://grafana:3000
+      GRAFANA_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GRAFANA_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?grafana_admin_password is required}
+      GRAFANA_TIMEOUT_SECONDS: ${GRAFANA_TIMEOUT_SECONDS:-15}
+      GRAFANA_FOLDER_UID: ${GRAFANA_FOLDER_UID:-openontology}
+      GRAFANA_FOLDER_TITLE: ${GRAFANA_FOLDER_TITLE:-OpenOntology 监控看板}
+      # 独立看板会话 cookie（oo_grafana_session）TTL；交付运行配置 28800 秒（8 小时）。
+      GRAFANA_SESSION_TTL_SECONDS: ${GRAFANA_SESSION_TTL_SECONDS:-28800}
       # 通用平台内网 MCP 地址（CSV）。WeKnora 的 MCP 端点由原生 UI 手工登记，
       # 平台只读取 app 的 /mcp 前缀，不需要 WeKnora MCP token。
       SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS: http://weknora-app:8080/mcp
@@ -770,6 +786,10 @@ services:
         condition: service_healthy
       kaneo-bootstrap:
         condition: service_completed_successfully
+      # Grafana 健康才允许 API 启动（部署级 fail-closed 由 grafana-bootstrap
+      # 承担；运行期故障只影响 /health/ready 的 grafana 检查，不停止本服务）。
+      grafana:
+        condition: service_healthy
     volumes:
       - uploads:/uploads
       - api_hub_data:/api-hub-data
@@ -780,6 +800,7 @@ services:
       - weknora_internal
       - kaneo_internal
       - hindsight_internal
+      - grafana_internal
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     # Container hardening is defense in depth; user plugins still require the
     # dedicated rootless runner described in the commercial release gate.
@@ -802,6 +823,79 @@ services:
         soft: 65536
         hard: 65536
     restart: unless-stopped
+
+  # Grafana 监控看板（官方固定 13.3.1 镜像，多架构 index digest 钉扎）。空看板
+  # 工作台：不预置数据源/面板（无 provisioning 挂载），使用者在 Grafana 原生
+  # 界面（经平台「编排」入口）自行配置。生产不发布宿主端口，唯一入口是
+  # frontend（nginx）的 /grafana/ 鉴权代理；共享管理员凭据仅用于首次卷
+  # 初始化与 backend 内网 API。
+  grafana:
+    image: ${GRAFANA_IMAGE:?grafana image is required}
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      # 只在首次卷初始化时创建管理员；已有卷不会被 env 覆盖。原生改密后
+      # 运维须同步服务器 .env 并重启 backend/grafana-bootstrap。
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?grafana admin password is required}
+      # 允许平台页面 iframe 嵌入预览（kiosk 模式）。
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+      # 子路径 /grafana/（nginx 保留完整前缀转发）。
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      # host 为静态占位值；三个入口（80/8443/本地代理）均已实测不依赖其
+      # host 部分的准确性，路径部分是关键契约。
+      GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s/grafana/"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      # 免登录核心：nginx auth_request 校验看板会话 cookie 后注入
+      # X-WEBAUTH-USER（共享管理员）；客户端自带同名头会被网关覆盖。
+      GF_AUTH_PROXY_ENABLED: "true"
+      GF_AUTH_PROXY_HEADER_NAME: X-WEBAUTH-USER
+      GF_AUTH_PROXY_HEADER_PROPERTY: username
+      GF_AUTH_PROXY_AUTO_SIGN_UP: "false"
+      # 登录表单禁用（绕过网关也无密码入口），但 backend 内网 API 的
+      # basic auth 不受影响（13.3.1 实测并存）。
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_AUTH_DISABLE_SIGNOUT_MENU: "true"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    healthcheck:
+      # 镜像内已实测具备 wget；子路径健康端点与 serve_from_sub_path 契约一致。
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/grafana/api/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 60s
+      retries: 20
+    networks:
+      - grafana_internal
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  # 一次性 bootstrap：等待健康、确认共享管理员可登录、确保平台文件夹
+  # （UID openontology）存在，然后 --verify 只读复核。失败使部署失败
+  # （deploy-prod.sh start_and_verify_grafana_stack 非零退出）。
+  grafana-bootstrap:
+    build:
+      context: ./backend
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
+    command: ["/bin/sh", "-ec", "python -m app.operations.grafana.bootstrap && python -m app.operations.grafana.bootstrap --verify"]
+    environment:
+      GRAFANA_BASE_URL: http://grafana:3000
+      GRAFANA_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GRAFANA_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?grafana admin password is required}
+      GRAFANA_TIMEOUT_SECONDS: ${GRAFANA_TIMEOUT_SECONDS:-15}
+      GRAFANA_FOLDER_UID: ${GRAFANA_FOLDER_UID:-openontology}
+      GRAFANA_FOLDER_TITLE: ${GRAFANA_FOLDER_TITLE:-OpenOntology 监控看板}
+    depends_on:
+      grafana:
+        condition: service_healthy
+    networks:
+      - grafana_internal
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
 
 
   # 流水线调度/手动异步触发的执行者：经 NATS JetStream 消费，与 Web 进程隔离。
@@ -994,10 +1088,19 @@ services:
       - "${PUBLIC_PORT:-80}:80"
       # 裸 IP 自签 HTTPS 入口（浏览器首次访问需信任一次）
       - "${PUBLIC_HTTPS_PORT:-8443}:443"
+    # nginx 的 /grafana/ 鉴权代理要访问 grafana_internal 上的 grafana 与
+    # backend（auth_request 校验端点），因此显式声明 default + grafana_internal。
+    networks:
+      - default
+      - grafana_internal
     depends_on:
       backend:
         condition: service_healthy
       frontend_ssl_init:
+        condition: service_completed_successfully
+      grafana:
+        condition: service_healthy
+      grafana-bootstrap:
         condition: service_completed_successfully
     volumes:
       - frontend_ssl_certs:/etc/nginx/certs:ro
@@ -1035,6 +1138,9 @@ volumes:
   # (embedding model downloads once, then survives redeploys).
   hindsight_postgres_data:
   hindsight_model_cache:
+  # Grafana 原生数据（SQLite/数据源/看板/用户）。看板数据权威存储；必须与平台
+  # PostgreSQL（operations_dashboards 卡片元数据）成对备份/恢复。
+  grafana_data:
 
 networks:
   kaneo_internal:
@@ -1053,4 +1159,9 @@ networks:
   # embedding model from HuggingFace and the service calls back into backend);
   # no service on it publishes any host port.
   hindsight_internal:
+    driver: bridge
+  # Grafana 私网。成员限定为 grafana、grafana-bootstrap、backend、frontend
+  # （nginx）：网内任意进程都可构造 X-WEBAUTH-USER，禁止把其他服务加入。
+  # Grafana 无宿主端口，唯一入口是 frontend 的 /grafana/ 鉴权代理。
+  grafana_internal:
     driver: bridge

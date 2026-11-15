@@ -133,6 +133,114 @@ should_scan_drive_paths() {
   ]]
 }
 
+# 从 stdin 读取待扫描文本，输出命中行（行号:行内容）。
+# $1: yes/no —— should_scan_drive_paths 对该文件的盘符检查判定。
+# 全仓扫描与下方 --self-test 回归复用同一判定逻辑。
+scan_content_for_personal_paths() {
+  local scan_drive_paths="$1"
+  # 两个检测分支独立消费同一份输入（不能都读 stdin：先到者会耗尽流）。
+  # 命令替换剥除的尾部空行不参与任何模式匹配，不影响判定。
+  local content
+  content="$(cat)"
+  {
+    printf '%s\n' "$content" | grep -nE \
+      '(/Users/[^[:space:]`"'"'"']+|/home/[[:alnum:]_.-]+/|\.codex/worktrees/|[[:alpha:]]:[\\/]Users[\\/])' \
+      || true
+    if [[ "$scan_drive_paths" == "yes" ]]; then
+      # 冻结的 Grafana 官方 URL 模板 %(protocol)s://（GF_SERVER_ROOT_URL：
+      # docker-compose.local/prod 与 deploy 守卫断言共三处出现）会被一般
+      # 盘符模式误识别为盘符 s:/。只中和该精确字面量的局部误匹配后继续
+      # 扫描同行剩余内容——模板前/后的真实个人路径仍被拦截。
+      printf '%s\n' "$content" | sed 's/%(protocol)s:\/\//__OO_URL_TEMPLATE__/g' | grep -nE \
+        '(^|[^[:alnum:]+.-])[[:alpha:]]:[\\/]' \
+        || true
+    fi
+  } | sort -t: -k1,1n -u
+}
+
+# 判定逻辑的自测（全部合成值；本脚本自身在其既有扫描排除范围内）。
+# $1: 描述，$2: 期望 match/nomatch，$3: 盘符检查 yes/no，$4: 行内容。
+self_test_check() {
+  local description="$1" expected="$2" scan_drive_paths="$3" line="$4"
+  local got
+  got="$(printf '%s\n' "$line" | scan_content_for_personal_paths "$scan_drive_paths")"
+  if [[ "$expected" == "match" ]] && [[ -z "$got" ]]; then
+    printf 'self-test failed (expected match): %s\n' "$description" >&2
+    return 1
+  fi
+  if [[ "$expected" == "nomatch" ]] && [[ -n "$got" ]]; then
+    printf 'self-test failed (expected no match): %s\n' "$description" >&2
+    return 1
+  fi
+  return 0
+}
+
+run_hygiene_self_test() {
+  local failures=0
+  # 三种实际出现形式（Compose 值 / deploy 守卫命令断言 / 模板本身）
+  # 不再产生盘符误报（t6 Fedora 真实实测曾对这三行误报）。
+  self_test_check 'compose value form' nomatch yes \
+    'GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s/grafana/"' \
+    || failures=$((failures + 1))
+  self_test_check 'deploy guard assertion form' nomatch yes \
+    '|| ! grep -Fq '\''GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s/grafana/"'\'' <<<"$grafana_block" \' \
+    || failures=$((failures + 1))
+  self_test_check 'template itself' nomatch yes \
+    '%(protocol)s://%(domain)s/grafana/' \
+    || failures=$((failures + 1))
+  # 正常 URL 不是盘符路径。
+  self_test_check 'normal http url' nomatch yes \
+    'GRAFANA_BASE_URL=http://grafana:3000' \
+    || failures=$((failures + 1))
+  self_test_check 'normal https url' nomatch yes \
+    'root_url https://example.com/grafana/' \
+    || failures=$((failures + 1))
+  # 普通盘符路径（正/反斜杠）与既有 /Users/、/home/、worktree 检测仍拦截。
+  self_test_check 'plain drive path' match yes \
+    'cache_dir = D:/tmp/cache' \
+    || failures=$((failures + 1))
+  self_test_check 'backslash drive path' match yes \
+    'openssl_bin C:\OpenSSL\bin' \
+    || failures=$((failures + 1))
+  self_test_check 'users absolute path' match yes \
+    'copied from /Users/someone/dev/repo.txt' \
+    || failures=$((failures + 1))
+  self_test_check 'home path' match yes \
+    'source /home/devuser/project/run.sh' \
+    || failures=$((failures + 1))
+  self_test_check 'codex worktree path' match yes \
+    'checkout .codex/worktrees/repo-x' \
+    || failures=$((failures + 1))
+  # 同一行内模板前/后的真实路径必须仍被拦截。
+  self_test_check 'real drive path before template on same line' match yes \
+    'COPY --from=cache D:/build/artifacts && GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s/grafana/"' \
+    || failures=$((failures + 1))
+  self_test_check 'real drive path after template on same line' match yes \
+    'GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s/grafana/" && curl C:\tools\curl.exe' \
+    || failures=$((failures + 1))
+  # 文件级盘符检查开关（测试等排除范围）：盘符模式不适用，/Users/ 等仍拦截。
+  self_test_check 'drive scan disabled skips drive pattern' nomatch no \
+    'cache_dir = D:/tmp/cache' \
+    || failures=$((failures + 1))
+  self_test_check 'drive scan disabled still catches users path' match no \
+    'copied from /Users/someone/dev/repo.txt' \
+    || failures=$((failures + 1))
+
+  if ((failures > 0)); then
+    printf 'repository-hygiene self-test failed with %d error(s).\n' "$failures" >&2
+    exit 1
+  fi
+  printf 'repository-hygiene self-test passed.\n'
+}
+
+if [[ "${1:-}" == "--self-test" ]]; then
+  run_hygiene_self_test
+  exit 0
+fi
+
+# 正常门禁入口同样先跑同一回归自测，既有 CI 门禁因此自动包含这些用例。
+run_hygiene_self_test
+
 while IFS= read -r -d '' source_file; do
   if [[ ! -f "$source_file" ]] || ! grep -Iq . "$source_file"; then
     continue
@@ -149,18 +257,11 @@ while IFS= read -r -d '' source_file; do
     line_number="${matched_line%%:*}"
     report_error "personal absolute/worktree path in $source_file:$line_number"
   done < <(
-    {
-      grep -nE \
-        '(/Users/[^[:space:]`"'"'"']+|/home/[[:alnum:]_.-]+/|\.codex/worktrees/|[[:alpha:]]:[\\/]Users[\\/])' \
-        "$source_file" \
-        || true
-      if should_scan_drive_paths "$source_file"; then
-        grep -nE \
-          '(^|[^[:alnum:]+.-])[[:alpha:]]:[\\/]' \
-          "$source_file" \
-          || true
-      fi
-    } | sort -t: -k1,1n -u
+    if should_scan_drive_paths "$source_file"; then
+      scan_content_for_personal_paths yes < "$source_file"
+    else
+      scan_content_for_personal_paths no < "$source_file"
+    fi
   )
 done < <(git ls-files --cached --others --exclude-standard -z)
 

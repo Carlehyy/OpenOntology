@@ -486,6 +486,102 @@ if [ -z "$kaneo_db_block" ] || [ -z "$kaneo_app_block" ] \
   exit 1
 fi
 
+# Grafana stays private with the auth-proxy contract pinned (empty dashboards,
+# no provisioning, embedded kiosk previews); the shared-admin password reaches
+# only grafana, backend and grafana-bootstrap via the mask anchor exception.
+grafana_block="$(awk -v service=grafana '
+  $0 == "  " service ":" { in_service = 1 }
+  in_service && NR > 1 && $0 ~ /^  [A-Za-z0-9_-]+:/ && $0 != "  " service ":" { exit }
+  in_service { print }
+' "$PROD_COMPOSE")"
+grafana_bootstrap_block="$(awk -v service=grafana-bootstrap '
+  $0 == "  " service ":" { in_service = 1 }
+  in_service && NR > 1 && $0 ~ /^  [A-Za-z0-9_-]+:/ && $0 != "  " service ":" { exit }
+  in_service { print }
+' "$PROD_COMPOSE")"
+frontend_prod_block="$(awk -v service=frontend '
+  $0 == "  " service ":" { in_service = 1 }
+  in_service && NR > 1 && $0 ~ /^  [A-Za-z0-9_-]+:/ && $0 != "  " service ":" { exit }
+  in_service { print }
+' "$PROD_COMPOSE")"
+if [ -z "$grafana_block" ] || [ -z "$grafana_bootstrap_block" ] \
+    || grep -Eq '^[[:space:]]+ports:' <<<"$grafana_block" \
+    || grep -Fq 'provisioning' <<<"$grafana_block" \
+    || ! grep -Fq 'GF_SECURITY_ALLOW_EMBEDDING: "true"' <<<"$grafana_block" \
+    || ! grep -Fq 'GF_SERVER_SERVE_FROM_SUB_PATH: "true"' <<<"$grafana_block" \
+    || ! grep -Fq 'GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s/grafana/"' <<<"$grafana_block" \
+    || ! grep -Fq 'GF_USERS_ALLOW_SIGN_UP: "false"' <<<"$grafana_block" \
+    || ! grep -Fq 'GF_AUTH_ANONYMOUS_ENABLED: "false"' <<<"$grafana_block" \
+    || ! grep -Fq 'GF_AUTH_PROXY_ENABLED: "true"' <<<"$grafana_block" \
+    || ! grep -Fq 'GF_AUTH_PROXY_HEADER_NAME: X-WEBAUTH-USER' <<<"$grafana_block" \
+    || ! grep -Fq 'GF_AUTH_PROXY_AUTO_SIGN_UP: "false"' <<<"$grafana_block" \
+    || ! grep -Fq 'GF_AUTH_DISABLE_LOGIN_FORM: "true"' <<<"$grafana_block" \
+    || ! grep -Fq 'GF_AUTH_DISABLE_SIGNOUT_MENU: "true"' <<<"$grafana_block" \
+    || ! grep -Fq 'grafana_data:/var/lib/grafana' <<<"$grafana_block" \
+    || ! grep -Fq 'http://127.0.0.1:3000/grafana/api/health' <<<"$grafana_block" \
+    || grep -Fq 'GF_SECURITY_ADMIN_PASSWORD: ""' <<<"$grafana_block" \
+    || ! grep -Fq 'restart: "no"' <<<"$grafana_bootstrap_block" \
+    || ! grep -Fq \
+      'python -m app.operations.grafana.bootstrap && python -m app.operations.grafana.bootstrap --verify' \
+      <<<"$grafana_bootstrap_block" \
+    || ! grep -Fq 'GRAFANA_BASE_URL: http://grafana:3000' <<<"$grafana_bootstrap_block" \
+    || grep -Fq 'GRAFANA_ADMIN_PASSWORD: ""' <<<"$grafana_bootstrap_block" \
+    || ! grep -Fq 'grafana_internal' <<<"$backend_block" \
+    || ! grep -Fq 'grafana:' <<<"$backend_block" \
+    || ! grep -Fq 'grafana_internal' <<<"$frontend_prod_block" \
+    || ! grep -Fq 'grafana-bootstrap:' <<<"$frontend_prod_block" \
+    || ! grep -Fq 'service_completed_successfully' <<<"$frontend_prod_block" \
+    || ! grep -Fq '  grafana_data:' "$PROD_COMPOSE" \
+    || ! grep -Fq '  grafana_internal:' "$PROD_COMPOSE" \
+    || ! grep -Fq 'GRAFANA_ADMIN_PASSWORD: ""' "$PROD_COMPOSE"; then
+  printf 'Grafana must be private, unpinned-provisioning-free, auth-proxy-configured, masked everywhere except grafana/backend/bootstrap, and wired into backend and the frontend gateway\n' >&2
+  exit 1
+fi
+
+# The shared /grafana/ gateway contract: nginx validates the board session
+# cookie on every HTTP and WS request through auth_request with the original
+# Cookie header explicitly forwarded, overwrites client identity headers,
+# redirects the bare /grafana path, and never exposes Grafana without a valid
+# session. The Vite dev proxy implements the same per-request validation
+# without any static admin bypass, and the local compose grafana stays on the
+# loopback-only exception.
+if ! grep -Fq 'location = /_grafana_auth {' "$REPO_ROOT/frontend/nginx/locations.inc" \
+    || ! grep -Fq 'auth_request /_grafana_auth;' "$REPO_ROOT/frontend/nginx/locations.inc" \
+    || ! grep -Fq 'proxy_set_header Cookie $http_cookie;' "$REPO_ROOT/frontend/nginx/locations.inc" \
+    || ! grep -Fq 'auth_request_set $grafana_user $upstream_http_x_grafana_user;' "$REPO_ROOT/frontend/nginx/locations.inc" \
+    || ! grep -Fq 'proxy_set_header X-WEBAUTH-USER $grafana_user;' "$REPO_ROOT/frontend/nginx/locations.inc" \
+    || ! grep -Fq 'location = /grafana {' "$REPO_ROOT/frontend/nginx/locations.inc" \
+    || ! grep -Fq 'return 301 /grafana/;' "$REPO_ROOT/frontend/nginx/locations.inc" \
+    || ! grep -Fq 'charset utf-8;' "$REPO_ROOT/frontend/nginx/locations.inc" \
+    || ! grep -Fq 'resolver 127.0.0.11 valid=30s ipv6=off;' "$REPO_ROOT/frontend/nginx/locations.inc" \
+    || ! grep -Fq 'proxy_set_header Host $http_host;' "$REPO_ROOT/frontend/nginx/locations.inc" \
+    || ! grep -Fq '/api/v2/operations/dashboards/grafana-auth' "$REPO_ROOT/frontend/nginx/locations.inc" \
+    || ! grep -Fq 'configure_grafana_env' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq 'validate_grafana_config' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq 'run_grafana_bootstrap' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq 'start_and_verify_grafana_stack' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq 'check_grafana_public_entry' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq 'grafana/grafana:13.3.1@sha256:0615ec4fbd4072004b7d86b46ded63013a74b7d6eb1119273dd89e8fa25c13cf' \
+      "$DEPLOY_SCRIPT" \
+    || ! grep -Fq '  GRAFANA_IMAGE; do' "$DEPLOY_SCRIPT"; then
+  printf 'the /grafana/ gateway must validate the session cookie per request (nginx auth_request and the Vite dev middleware), pin the official image, and enforce the deploy-time Grafana chain\n' >&2
+  exit 1
+fi
+
+# The Vite dev middleware validates each request with the real cookie and
+# fails closed; a static admin injection (the pre-contract shortcut) must
+# never come back, and non-Grafana websockets (vite HMR) must be left alone.
+if ! grep -Fq 'function grafanaSessionProxyPlugin' "$REPO_ROOT/frontend/vite.config.ts" \
+    || ! grep -Fq "grafana-auth" "$REPO_ROOT/frontend/vite.config.ts" \
+    || ! grep -Fq "res.status !== 204" "$REPO_ROOT/frontend/vite.config.ts" \
+    || ! grep -Fq "'x-webauth-user': user" "$REPO_ROOT/frontend/vite.config.ts" \
+    || grep -Eq "X-WEBAUTH-USER'?: 'admin'|x-webauth-user'?: 'admin'" "$REPO_ROOT/frontend/vite.config.ts" \
+    || ! grep -Fq "GRAFANA_PROXY_TARGET" "$REPO_ROOT/frontend/vite.config.ts" \
+    || ! grep -Fq "server.httpServer?.on('upgrade'" "$REPO_ROOT/frontend/vite.config.ts"; then
+  printf 'the Vite dev /grafana proxy must validate the real cookie per request (HTTP and WS) with no static admin bypass\n' >&2
+  exit 1
+fi
+
 local_compose_block() {
   local service="$1"
   awk -v service="$service" '
@@ -534,6 +630,33 @@ if [ -z "$local_kaneo_bootstrap_block" ] || [ -z "$local_kaneo_app_block" ] \
     || ! grep -Fq 'weknora_ssl_certs:/etc/nginx/certs:ro' \
       <<<"$local_kaneo_gateway_block"; then
   printf 'local Kaneo startup must auto-run the bootstrap and hide the gateway until success\n' >&2
+  exit 1
+fi
+
+# Local Grafana keeps the production auth-proxy contract on the loopback-only
+# exception port; the vite container proxies /grafana/ with per-request
+# session validation (no static admin bypass, no 0.0.0.0 publication).
+local_grafana_block="$(local_compose_block grafana)"
+local_grafana_bootstrap_block="$(local_compose_block grafana-bootstrap)"
+local_frontend_block="$(local_compose_block frontend)"
+if [ -z "$local_grafana_block" ] || [ -z "$local_grafana_bootstrap_block" ] \
+    || grep -Fq 'GF_SECURITY_ADMIN_PASSWORD: ""' <<<"$local_grafana_block" \
+    || ! grep -Fq 'GF_AUTH_PROXY_ENABLED: "true"' <<<"$local_grafana_block" \
+    || ! grep -Fq 'GF_AUTH_DISABLE_LOGIN_FORM: "true"' <<<"$local_grafana_block" \
+    || ! grep -Fq '127.0.0.1:${GRAFANA_APP_LOOPBACK_PORT:-13001}:3000' \
+      <<<"$local_grafana_block" \
+    || ! grep -Fq 'grafana_data:/var/lib/grafana' <<<"$local_grafana_block" \
+    || ! grep -Fq 'restart: "no"' <<<"$local_grafana_bootstrap_block" \
+    || ! grep -Fq \
+      'python -m app.operations.grafana.bootstrap && python -m app.operations.grafana.bootstrap --verify' \
+      <<<"$local_grafana_bootstrap_block" \
+    || ! grep -Fq 'GRAFANA_PROXY_TARGET: ${GRAFANA_PROXY_TARGET:-http://grafana:3000}' \
+      <<<"$local_frontend_block" \
+    || ! grep -Fq 'grafana_internal' <<<"$local_frontend_block" \
+    || ! grep -Fq 'grafana-bootstrap:' <<<"$local_frontend_block" \
+    || ! grep -Fq '  grafana_data:' "$LOCAL_COMPOSE" \
+    || ! grep -Fq '  grafana_internal:' "$LOCAL_COMPOSE"; then
+  printf 'local Grafana must start with the same pinned contract on a loopback-only port, with the vite container proxying /grafana/ without an admin bypass\n' >&2
   exit 1
 fi
 
@@ -1304,6 +1427,367 @@ set_test_env_value KANEO_BASE_URL http://elsewhere.example.invalid:5173
 # the validator then enforces the contract on every subsequent deployment.
 grep -Fxq 'KANEO_BASE_URL=http://kaneo-app:5173' "$test_dir/.env"
 
+grafana_env_value() {
+  awk -F= -v key="$1" '
+    $0 ~ "^[[:space:]]*" key "=" {
+      print substr($0, index($0, "=") + 1)
+    }
+  ' "$test_dir/.env" | tail -n1
+}
+
+# Grafana env materialization: a fresh/legacy .env without any Grafana key
+# gets the full contract materialized (the shared administrator is the
+# dedicated contract account, not the platform FIRST_ADMIN_USER), already
+# persisted values and the generated password survive repeated runs, and
+# invalid values are rejected by validation.
+for grafana_key in \
+  GRAFANA_IMAGE GRAFANA_BASE_URL GRAFANA_TIMEOUT_SECONDS GRAFANA_ADMIN_USER \
+  GRAFANA_ADMIN_PASSWORD GRAFANA_FOLDER_UID GRAFANA_FOLDER_TITLE \
+  GRAFANA_SESSION_TTL_SECONDS; do
+  sed -i "/^[[:space:]]*${grafana_key}=/d" "$test_dir/.env"
+done
+set_test_env_value FIRST_ADMIN_USER platform-admin-name
+(
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT" >/dev/null
+)
+grep -Fxq 'GRAFANA_BASE_URL=http://grafana:3000' "$test_dir/.env"
+grep -Fxq 'GRAFANA_TIMEOUT_SECONDS=15' "$test_dir/.env"
+grep -Fxq 'GRAFANA_ADMIN_USER=admin' "$test_dir/.env"
+grep -Fxq 'GRAFANA_SESSION_TTL_SECONDS=28800' "$test_dir/.env"
+grep -Fxq 'GRAFANA_FOLDER_UID=openontology' "$test_dir/.env"
+grep -Fxq 'GRAFANA_FOLDER_TITLE=OpenOntology 监控看板' "$test_dir/.env"
+grep -Fxq \
+  'GRAFANA_IMAGE=grafana/grafana:13.3.1@sha256:0615ec4fbd4072004b7d86b46ded63013a74b7d6eb1119273dd89e8fa25c13cf' \
+  "$test_dir/.env"
+case "$(grafana_env_value GRAFANA_ADMIN_PASSWORD)" in
+  ""|change-me|admin123|localGrafanaAdmin2026!)
+    printf 'configure_grafana_env must generate a real shared administrator password for a fresh .env\n' >&2
+    exit 1
+    ;;
+esac
+if [ "$(grafana_env_value GRAFANA_ADMIN_USER)" != "admin" ]; then
+  printf 'GRAFANA_ADMIN_USER must stay the dedicated contract account, not inherit FIRST_ADMIN_USER\n' >&2
+  exit 1
+fi
+grafana_password_snapshot="$(grafana_env_value GRAFANA_ADMIN_PASSWORD)"
+
+# Already persisted legal values (including a custom timeout, TTL and folder)
+# survive a repeated deployment; the generated password never rotates.
+set_test_env_value GRAFANA_TIMEOUT_SECONDS 30
+set_test_env_value GRAFANA_SESSION_TTL_SECONDS 7200
+set_test_env_value GRAFANA_FOLDER_UID ops-board-folder
+(
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT" >/dev/null
+)
+grep -Fxq 'GRAFANA_TIMEOUT_SECONDS=30' "$test_dir/.env"
+grep -Fxq 'GRAFANA_SESSION_TTL_SECONDS=7200' "$test_dir/.env"
+grep -Fxq 'GRAFANA_FOLDER_UID=ops-board-folder' "$test_dir/.env"
+if [ "$(grafana_env_value GRAFANA_ADMIN_PASSWORD)" != "$grafana_password_snapshot" ]; then
+  printf 'repeated validation runs must not rotate the generated Grafana administrator password\n' >&2
+  exit 1
+fi
+
+# Invalid values are rejected instead of being silently normalized.
+set_test_env_value GRAFANA_TIMEOUT_SECONDS not-a-number
+if (
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT" >"$test_dir/grafana-invalid-timeout.log" 2>&1
+); then
+  printf 'a non-integer GRAFANA_TIMEOUT_SECONDS must be rejected\n' >&2
+  exit 1
+fi
+if [ ! -s "$test_dir/grafana-invalid-timeout.log" ]; then
+  printf 'the rejected GRAFANA_TIMEOUT_SECONDS run must write its diagnostic log\n' >&2
+  exit 1
+fi
+if ! grep -Fq 'GRAFANA_TIMEOUT_SECONDS must be an integer between 3 and 60' \
+    "$test_dir/grafana-invalid-timeout.log"; then
+  printf 'the rejected GRAFANA_TIMEOUT_SECONDS log must contain the validation error\n' >&2
+  exit 1
+fi
+set_test_env_value GRAFANA_TIMEOUT_SECONDS 15
+set_test_env_value GRAFANA_SESSION_TTL_SECONDS 5
+if (
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT" >/dev/null 2>&1
+); then
+  printf 'an out-of-range GRAFANA_SESSION_TTL_SECONDS must be rejected\n' >&2
+  exit 1
+fi
+set_test_env_value GRAFANA_SESSION_TTL_SECONDS 28800
+set_test_env_value GRAFANA_ADMIN_PASSWORD short
+if (
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT" >/dev/null 2>&1
+); then
+  printf 'a too-short GRAFANA_ADMIN_PASSWORD must be rejected\n' >&2
+  exit 1
+fi
+set_test_env_value GRAFANA_ADMIN_PASSWORD "$grafana_password_snapshot"
+# Restore the values later fake-deployment sections expect (FIRST_ADMIN_USER is
+# back to the .env.example default; the folder identity is back on contract).
+set_test_env_value FIRST_ADMIN_USER admin
+set_test_env_value GRAFANA_FOLDER_UID openontology
+printf 'ok deploy-grafana-env-materialization\n'
+
+# Isolated Grafana startup/health-wait semantics. The harness sources the real
+# run_grafana_bootstrap/start_and_verify_grafana_stack definitions extracted
+# from deploy-prod.sh (the product function is the subject under test) and
+# replaces only the external boundary (compose/run_with_retry/health/log).
+# Tests call the function from an if-condition, so they also prove the new
+# per-stage returns work when errexit is suppressed by the caller.
+grafana_isolation_dir="$test_dir/grafana-startup-isolation"
+mkdir -p "$grafana_isolation_dir"
+
+extract_deploy_function() {
+  local function_name="$1"
+  awk -v function_name="$function_name" '
+    $0 == function_name "() {" { in_function = 1 }
+    in_function { print }
+    in_function && $0 == "}" { exit }
+  ' "$DEPLOY_SCRIPT"
+}
+
+grafana_bootstrap_source="$(extract_deploy_function run_grafana_bootstrap)"
+grafana_start_source="$(extract_deploy_function start_and_verify_grafana_stack)"
+if [ -z "$grafana_bootstrap_source" ] || [ -z "$grafana_start_source" ]; then
+  printf 'the Grafana deploy functions must be extractable for isolation tests\n' >&2
+  exit 1
+fi
+
+grafana_harness="$grafana_isolation_dir/harness.sh"
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf '%s\n' 'set -Eeuo pipefail'
+  cat <<'GRAFANA_HARNESS_HEADER'
+log() { printf 'log: %s\n' "$*"; }
+run_with_retry() { "$@"; }
+compose() {
+  printf '%s\n' "$*" >>"$CASE_LOG"
+  case "$*" in
+    'ps --status running -q grafana')
+      if [ "${STATUS_QUERY_RC:-0}" -ne 0 ]; then
+        return "$STATUS_QUERY_RC"
+      fi
+      if [ "${GRAFANA_WAS_RUNNING:-0}" -eq 1 ]; then
+        printf 'grafana-container-id\n'
+      fi
+      return 0
+      ;;
+    'up --help')
+      if [ "${COMPOSE_HAS_WAIT:-1}" -eq 1 ]; then
+        printf '      --wait\n'
+      fi
+      return 0
+      ;;
+    'up -d --wait --wait-timeout 360 grafana')
+      return "${WAIT_RC:-0}"
+      ;;
+    'up -d grafana')
+      return "${UP_RC:-0}"
+      ;;
+    'stop --timeout 30 grafana')
+      return "${STOP_RC:-0}"
+      ;;
+    'run --rm --no-deps grafana-bootstrap python -m app.operations.grafana.bootstrap')
+      return "${BOOTSTRAP_RC:-0}"
+      ;;
+    'run --rm --no-deps grafana-bootstrap python -m app.operations.grafana.bootstrap --verify')
+      return "${VERIFY_RC:-0}"
+      ;;
+  esac
+  printf 'unexpected compose invocation: %s\n' "$*" >&2
+  return 97
+}
+wait_for_service_healthy() {
+  printf 'wait_for_service_healthy %s\n' "$*" >>"$CASE_LOG"
+  return "${HEALTH_RC:-0}"
+}
+GRAFANA_HARNESS_HEADER
+  printf '%s\n' "$grafana_bootstrap_source"
+  printf '%s\n' "$grafana_start_source"
+  cat <<'GRAFANA_HARNESS_MAIN'
+rc=0
+if start_and_verify_grafana_stack; then
+  rc=0
+else
+  rc=$?
+fi
+printf 'rc=%s\n' "$rc" >"$CASE_RESULT"
+exit 0
+GRAFANA_HARNESS_MAIN
+} >"$grafana_harness"
+
+run_grafana_isolation_case() {
+  local case_id="$1" compose_has_wait="$2" was_running="$3" status_rc="$4"
+  local wait_rc="$5" up_rc="$6" health_rc="$7" bootstrap_rc="$8" verify_rc="$9"
+  local case_dir="$grafana_isolation_dir/$case_id"
+  mkdir -p "$case_dir"
+  (
+    cd "$test_dir"
+    CASE_LOG="$case_dir/compose.log" \
+      CASE_RESULT="$case_dir/result" \
+      COMPOSE_HAS_WAIT="$compose_has_wait" \
+      GRAFANA_WAS_RUNNING="$was_running" \
+      STATUS_QUERY_RC="$status_rc" \
+      WAIT_RC="$wait_rc" \
+      UP_RC="$up_rc" \
+      HEALTH_RC="$health_rc" \
+      BOOTSTRAP_RC="$bootstrap_rc" \
+      VERIFY_RC="$verify_rc" \
+      bash "$grafana_harness" >"$case_dir/stdout.log" 2>&1
+  )
+}
+
+assert_grafana_case_calls() {
+  local case_id="$1" pattern="$2" expected="$3"
+  local log_file="$grafana_isolation_dir/$case_id/compose.log" actual
+  if [ ! -f "$log_file" ]; then
+    printf 'Grafana isolation case %s did not record compose calls\n' "$case_id" >&2
+    exit 1
+  fi
+  actual="$(awk -v pattern="$pattern" '
+    $0 == pattern { count += 1 }
+    END { print count + 0 }
+  ' "$log_file")"
+  if [ "$actual" -ne "$expected" ]; then
+    printf 'Grafana isolation case %s: expected %s call(s) to "%s", got %s\n' \
+      "$case_id" "$expected" "$pattern" "$actual" >&2
+    exit 1
+  fi
+}
+
+assert_grafana_bootstrap_order() {
+  local case_id="$1"
+  local log_file="$grafana_isolation_dir/$case_id/compose.log"
+  local bootstrap_line verify_line
+  bootstrap_line="$(awk '
+    /grafana-bootstrap python -m app.operations.grafana.bootstrap/ && !/--verify/ { print NR; exit }
+  ' "$log_file")"
+  verify_line="$(awk '
+    /grafana-bootstrap python -m app.operations.grafana.bootstrap --verify/ { print NR; exit }
+  ' "$log_file")"
+  if [ -z "$bootstrap_line" ] || [ -z "$verify_line" ] \
+      || [ "$bootstrap_line" -ge "$verify_line" ]; then
+    printf 'Grafana isolation case %s must run bootstrap before --verify\n' "$case_id" >&2
+    exit 1
+  fi
+}
+
+assert_grafana_isolation_case() {
+  local case_id="$1" expected_rc="$2" status_calls="$3" wait_calls="$4"
+  local up_calls="$5" health_calls="$6" stop_calls="$7"
+  local bootstrap_calls="$8" verify_calls="$9"
+  local case_dir="$grafana_isolation_dir/$case_id" rc first_line
+  if [ ! -s "$case_dir/result" ]; then
+    printf 'Grafana isolation case %s did not produce a result\n' "$case_id" >&2
+    exit 1
+  fi
+  rc="$(sed -n 's/^rc=//p' "$case_dir/result")"
+  case "$rc" in
+    ''|*[!0-9]*)
+      printf 'Grafana isolation case %s did not report a numeric return code\n' "$case_id" >&2
+      exit 1
+      ;;
+  esac
+  case "$expected_rc" in
+    zero)
+      if [ "$rc" -ne 0 ]; then
+        printf 'Grafana isolation case %s must return zero, got %s\n' "$case_id" "$rc" >&2
+        exit 1
+      fi
+      ;;
+    nonzero)
+      if [ "$rc" -eq 0 ]; then
+        printf 'Grafana isolation case %s must return nonzero\n' "$case_id" >&2
+        exit 1
+      fi
+      ;;
+    *)
+      printf 'Grafana isolation case %s has an invalid expected return code\n' "$case_id" >&2
+      exit 1
+      ;;
+  esac
+  if grep -Fq 'unexpected compose invocation:' "$case_dir/stdout.log"; then
+    printf 'Grafana isolation case %s invoked an unexpected compose command\n' "$case_id" >&2
+    exit 1
+  fi
+  first_line="$(sed -n '1p' "$grafana_isolation_dir/$case_id/compose.log")"
+  if [ "$first_line" != 'ps --status running -q grafana' ]; then
+    printf 'Grafana isolation case %s must query the running state before startup\n' "$case_id" >&2
+    exit 1
+  fi
+  assert_grafana_case_calls "$case_id" 'ps --status running -q grafana' "$status_calls"
+  assert_grafana_case_calls "$case_id" 'up -d --wait --wait-timeout 360 grafana' "$wait_calls"
+  assert_grafana_case_calls "$case_id" 'up -d grafana' "$up_calls"
+  assert_grafana_case_calls "$case_id" 'wait_for_service_healthy grafana 48 10' "$health_calls"
+  assert_grafana_case_calls "$case_id" 'stop --timeout 30 grafana' "$stop_calls"
+  assert_grafana_case_calls "$case_id" \
+    'run --rm --no-deps grafana-bootstrap python -m app.operations.grafana.bootstrap' \
+    "$bootstrap_calls"
+  assert_grafana_case_calls "$case_id" \
+    'run --rm --no-deps grafana-bootstrap python -m app.operations.grafana.bootstrap --verify' \
+    "$verify_calls"
+}
+
+run_grafana_isolation_case status-query-failure 1 0 1 0 0 0 0 0
+assert_grafana_isolation_case status-query-failure nonzero 1 0 0 0 0 0 0
+
+run_grafana_isolation_case no-old-wait-failure 1 0 0 1 0 0 0 0
+assert_grafana_isolation_case no-old-wait-failure nonzero 1 1 0 0 1 0 0
+
+run_grafana_isolation_case old-wait-failure 1 1 0 1 0 0 0 0
+assert_grafana_isolation_case old-wait-failure nonzero 1 1 0 0 0 0 0
+
+run_grafana_isolation_case no-old-fallback-up-failure 0 0 0 0 1 0 0 0
+assert_grafana_isolation_case no-old-fallback-up-failure nonzero 1 0 1 0 1 0 0
+
+run_grafana_isolation_case old-fallback-up-failure 0 1 0 0 1 0 0 0
+assert_grafana_isolation_case old-fallback-up-failure nonzero 1 0 1 0 0 0 0
+
+run_grafana_isolation_case no-old-fallback-health-failure 0 0 0 0 0 1 0 0
+assert_grafana_isolation_case no-old-fallback-health-failure nonzero 1 0 1 1 1 0 0
+
+run_grafana_isolation_case old-fallback-health-failure 0 1 0 0 0 1 0 0
+assert_grafana_isolation_case old-fallback-health-failure nonzero 1 0 1 1 0 0 0
+
+run_grafana_isolation_case normal-wait 1 0 0 0 0 0 0 0
+assert_grafana_isolation_case normal-wait zero 1 1 0 0 0 1 1
+assert_grafana_bootstrap_order normal-wait
+
+run_grafana_isolation_case normal-fallback 0 0 0 0 0 0 0 0
+assert_grafana_isolation_case normal-fallback zero 1 0 1 1 0 1 1
+assert_grafana_bootstrap_order normal-fallback
+
+printf 'ok deploy-grafana-startup-isolation\n'
+
 fake_bin="$test_dir/fake-bin"
 fake_docker_log="$test_dir/fake-docker.log"
 mkdir -p "$fake_bin"
@@ -1348,7 +1832,10 @@ for key in \
   HINDSIGHT_CP_ACCESS_KEY HINDSIGHT_API_KEY \
   HINDSIGHT_SERVICE_TOKEN HINDSIGHT_TIMEOUT_SECONDS HINDSIGHT_NAMESPACE \
   HINDSIGHT_DB_NAME HINDSIGHT_DB_USER HINDSIGHT_DB_PASSWORD \
-  HINDSIGHT_IMAGE HINDSIGHT_POSTGRES_IMAGE HINDSIGHT_HF_OFFLINE PUBLIC_TLS_IP; do
+  HINDSIGHT_IMAGE HINDSIGHT_POSTGRES_IMAGE HINDSIGHT_HF_OFFLINE PUBLIC_TLS_IP \
+  GRAFANA_IMAGE GRAFANA_BASE_URL GRAFANA_TIMEOUT_SECONDS GRAFANA_ADMIN_USER \
+  GRAFANA_ADMIN_PASSWORD GRAFANA_FOLDER_UID GRAFANA_FOLDER_TITLE \
+  GRAFANA_SESSION_TTL_SECONDS; do
   if [ "${!key+x}" = "x" ]; then
     printf 'compose environment leaked authority key: %s\n' "$key" \
       >>"$FAKE_DOCKER_LOG"
@@ -1926,6 +2413,11 @@ case "$url" in
   # 一键免登录中继：无票据访问由 backend 302 回各自服务的根路径
   https://127.0.0.1:8444/sso/entry) status="302" ;;
   https://127.0.0.1:8445/sso/entry) status="302" ;;
+  # Grafana 看板会话门（check_grafana_public_entry）：经平台入口的未认证
+  # /grafana/ 与 /grafana/api/health 必须由网关拒绝 401，裸 /grafana 301。
+  http://127.0.0.1:*/grafana/) status="401" ;;
+  http://127.0.0.1:*/grafana/api/health) status="401" ;;
+  http://127.0.0.1:*/grafana) status="301" ;;
   https://127.0.0.1:8445/*) body='ok' ;;
   */healthz) body='ok' ;;
 esac
@@ -1997,7 +2489,10 @@ for key in \
   HINDSIGHT_CP_ACCESS_KEY HINDSIGHT_API_KEY \
   HINDSIGHT_SERVICE_TOKEN HINDSIGHT_TIMEOUT_SECONDS HINDSIGHT_NAMESPACE \
   HINDSIGHT_DB_NAME HINDSIGHT_DB_USER HINDSIGHT_DB_PASSWORD \
-  HINDSIGHT_IMAGE HINDSIGHT_POSTGRES_IMAGE HINDSIGHT_HF_OFFLINE PUBLIC_TLS_IP; do
+  HINDSIGHT_IMAGE HINDSIGHT_POSTGRES_IMAGE HINDSIGHT_HF_OFFLINE PUBLIC_TLS_IP \
+  GRAFANA_IMAGE GRAFANA_BASE_URL GRAFANA_TIMEOUT_SECONDS GRAFANA_ADMIN_USER \
+  GRAFANA_ADMIN_PASSWORD GRAFANA_FOLDER_UID GRAFANA_FOLDER_TITLE \
+  GRAFANA_SESSION_TTL_SECONDS; do
   if [ "${!key+x}" = "x" ]; then
     printf 'compose environment leaked authority key: %s\n' "$key" \
       >>"$FAKE_DOCKER_LOG"

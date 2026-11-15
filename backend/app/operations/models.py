@@ -18,6 +18,31 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class OperationsDashboard(Base):
+    """监控看板卡片：平台维护元数据/排序/revision 与预生成 Grafana UID。
+
+    平台改名只改本表元数据；不读写 Grafana dashboard JSON/标题/version/
+    面板。图标白名单与顺序见 dashboards.schemas.DASHBOARD_ICONS。
+    """
+
+    __tablename__ = "operations_dashboards"
+    __table_args__ = (
+        Index("ix_operations_dashboards_updated_at", "updated_at"),
+        Index("ix_operations_dashboards_sort_order", "sort_order"),
+        UniqueConstraint("grafana_uid", name="uq_operations_dashboards_grafana_uid"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    icon: Mapped[str] = mapped_column(String(64), nullable=False, default="activity")
+    grafana_uid: Mapped[str] = mapped_column(String(40), nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
 class OperationsReport(Base):
     __tablename__ = "operations_reports"
     __table_args__ = (
