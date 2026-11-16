@@ -36,6 +36,7 @@ import { DashboardPreviewDialog } from './dashboards/DashboardPreviewDialog'
 import { useGrafanaSession } from './dashboards/useGrafanaSession'
 import {
   canWriteDashboards,
+  DASHBOARD_TILE_MIN_H,
   dashboardActionBlockReason,
   filterDashboards,
   reorderDashboardIds,
@@ -46,7 +47,7 @@ const DASHBOARDS_QUERY_KEY = ['operations-dashboards'] as const
 
 function CreateDashboardCard({ onCreate }: { onCreate: () => void }) {
   return (
-    <article className="group flex min-h-[190px] flex-col items-center justify-center rounded-2xl border border-dashed border-brand-line bg-brand-soft p-6 text-center transition-all hover:border-brand hover:shadow-[var(--shadow-md)]">
+    <article className={`group flex ${DASHBOARD_TILE_MIN_H} flex-col items-center justify-center rounded-2xl border border-dashed border-brand-line bg-brand-soft p-6 text-center transition-all hover:border-brand hover:shadow-[var(--shadow-md)]`}>
       <div className="flex h-12 w-12 items-center justify-center rounded-full bg-brand text-[var(--color-text-inverse)] shadow-sm transition-transform group-hover:scale-105">
         <Plus size={22} />
       </div>
@@ -306,12 +307,12 @@ export default function MonitoringDashboardPage() {
         {canWrite && <CreateDashboardCard onCreate={() => setCreateOpen(true)} />}
 
         {isLoading ? (
-          <div className={`flex min-h-[260px] items-center justify-center rounded-2xl border border-border bg-card ${stateSpan}`}>
+          <div className={`flex ${DASHBOARD_TILE_MIN_H} items-center justify-center rounded-2xl border border-border bg-card ${stateSpan}`}>
             <LoadingState message="加载看板列表..." />
           </div>
         ) : isError && !data ? (
           <div
-            className={`flex min-h-[260px] flex-col items-center justify-center gap-3 rounded-2xl border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-[var(--color-danger-bg)] px-6 text-center ${stateSpan}`}
+            className={`flex ${DASHBOARD_TILE_MIN_H} flex-col items-center justify-center gap-3 rounded-2xl border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-[var(--color-danger-bg)] px-6 text-center ${stateSpan}`}
             role="alert"
           >
             <p className="text-sm text-[var(--color-danger)]">看板列表加载失败，请检查网络连接后重试。</p>
@@ -320,7 +321,7 @@ export default function MonitoringDashboardPage() {
         ) : filtered.length === 0 ? (
           <div
             data-testid="dashboard-list-empty"
-            className={`flex min-h-[260px] flex-col items-center justify-center rounded-2xl border border-dashed border-border bg-card px-6 text-center ${stateSpan}`}
+            className={`flex ${DASHBOARD_TILE_MIN_H} flex-col items-center justify-center rounded-2xl border border-dashed border-border bg-card px-6 text-center ${stateSpan}`}
           >
             <p className="text-sm font-medium text-muted-foreground">
               {filterActive ? '没有符合条件的看板' : '还没有监控看板'}

@@ -14,6 +14,7 @@ import { Badge } from '@/components/ui/Badge'
 import { Eye, Pencil, SlidersHorizontal, Trash2 } from 'lucide-react'
 import type { OperationsDashboardCard } from '@/api/v2/operations-dashboards'
 import {
+  DASHBOARD_TILE_MIN_H,
   dashboardTimeLabel,
   shouldShowMissingBadge,
   type DropPlace,
@@ -97,7 +98,7 @@ export function DashboardCardView({
       data-testid="dashboard-card"
       data-dashboard-id={dashboard.id}
       data-grafana-status={dashboard.grafana_status}
-      className={`group flex min-h-[190px] flex-col overflow-hidden rounded-2xl border border-border bg-card transition-all duration-200 hover:-translate-y-0.5 hover:border-brand-line hover:shadow-[var(--shadow-md)] ${
+      className={`group flex ${DASHBOARD_TILE_MIN_H} flex-col overflow-hidden rounded-2xl border border-border bg-card transition-all duration-200 hover:-translate-y-0.5 hover:border-brand-line hover:shadow-[var(--shadow-md)] ${
         draggable ? 'cursor-grab active:cursor-grabbing' : ''
       } ${dragging ? 'opacity-40' : ''} ${dropPlace ? 'outline-2 -outline-offset-2 outline-brand' : ''}`}
     >

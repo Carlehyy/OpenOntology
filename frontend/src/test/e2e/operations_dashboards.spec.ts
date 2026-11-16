@@ -14,6 +14,7 @@
  * `operations_dashboards_stack.spec.ts` 在隔离栈验收。
  */
 import { expect, test, type Locator, type Page, type Route } from '@playwright/test'
+import { expectSameBoundingBox } from './support/geometry'
 
 const json = (route: Route, data: unknown) => route.fulfill({
   status: 200,
@@ -384,6 +385,33 @@ test('看板工作台：空列表引导创建第一个看板', async ({ page }) 
   await expect(page.getByTestId('dashboard-create')).toBeVisible()
   await expect(page.getByRole('button', { name: '立即创建' })).toBeVisible()
   await expect(page.getByText('先在平台建卡片，再通过「编排」配置数据源与面板')).toBeVisible()
+})
+
+test('看板工作台：空态与有卡片时新建入口卡高度一致（占位与卡片统一最小高度）', async ({ page }) => {
+  await mockSession(page, admin)
+  const state = newState([])
+  const records = newRecords()
+  await mockDashboards(page, state, records)
+  await mockGrafanaPages(page)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await gotoWorkbench(page)
+
+  // 空态：占位与新建入口卡同行；grid stretch 把同行条目拉到行内最高者，
+  // 占位与卡片共用最小高度时行高一致，不出现空态比卡片高出一截的布局。
+  const createCard = page.locator('article').filter({ has: page.getByRole('button', { name: '立即创建' }) })
+  await expect(page.getByTestId('dashboard-list-empty')).toBeVisible()
+  const emptyBox = await createCard.boundingBox()
+
+  // 创建第一个看板后进入有卡片态：新建入口卡高度不发生跳变
+  await page.getByTestId('dashboard-create').click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByLabel('看板名称').fill('首个看板')
+  await dialog.getByTestId('dashboard-form-submit').click()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await expect(page.getByText('首个看板', { exact: true })).toBeVisible()
+  const withCardBox = await createCard.boundingBox()
+
+  expectSameBoundingBox(emptyBox, withCardBox, '新建入口卡')
 })
 
 test('看板工作台：列表加载失败显示 role=alert 并可重新加载', async ({ page }) => {

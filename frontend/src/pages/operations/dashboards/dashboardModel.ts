@@ -24,6 +24,13 @@ export type DashboardIconKey = (typeof DASHBOARD_ICON_KEYS)[number]
 
 export const DEFAULT_DASHBOARD_ICON: DashboardIconKey = 'activity'
 
+/**
+ * 卡片与占位（加载/错误/空态）统一的最小高度类：
+ * grid 默认 stretch 会把同行条目拉到行内最高者，占位与卡片共用同一
+ * 最小高度，空↔有卡片切换时网格行高才不会跳变。
+ */
+export const DASHBOARD_TILE_MIN_H = 'min-h-[190px]'
+
 /** 名称与描述长度上限（后端 schema 同值）。 */
 export const DASHBOARD_NAME_MAX_LENGTH = 200
 export const DASHBOARD_DESCRIPTION_MAX_LENGTH = 500
