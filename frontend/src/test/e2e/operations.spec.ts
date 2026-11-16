@@ -371,10 +371,11 @@ test('智能运营：报告册卡片、书式阅读、一次批量查询与手�
 
   await page.goto('/#/operations')
   await expect(page).toHaveURL(/\/#\/operations\/dashboard$/)
-  // 监控看板已是真实工作台：断言工作台、标题与正常空态（列表契约 mock 返回
-  // total 0），而不是请求失败兜底或筛选空态。
+  // 监控看板已是真实工作台：断言工作台与正常空态（列表契约 mock 返回
+  // total 0），而不是请求失败兜底或筛选空态；顶部标题文案块已按 UX 收敛
+  // 删除，页面不再有「监控看板」heading（与看板工作台 spec 同口径）。
   await expect(page.getByTestId('operations-dashboard-workbench')).toBeVisible()
-  await expect(page.getByRole('heading', { name: '监控看板', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '监控看板' })).toHaveCount(0)
   await expect(page.getByTestId('dashboard-list-empty')).toBeVisible()
   await expect(page.getByText('还没有监控看板', { exact: true })).toBeVisible()
   await expect(page.getByTestId('dashboard-create')).toBeVisible()
