@@ -3,8 +3,8 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import { Sender } from '@ant-design/x'
 import { ConfigProvider, theme as antdTheme } from 'antd'
 import {
-  ArrowDown, Check, Cpu, Layers3, List, Loader2, Menu, Mic, Monitor, MoreHorizontal, Network, Paperclip, Pencil,
-  Route as RouteIcon, ScrollText, Send, Settings2, Square, SquareKanban, X,
+  ArrowDown, Check, Cpu, Layers3, List, ListChecks, Loader2, Menu, Mic, Monitor, MoreHorizontal, Network, Paperclip, Pencil,
+  ScrollText, Send, Settings2, Square, SquareKanban, X,
 } from 'lucide-react'
 
 import { modelApi } from '@/api/ontologies'
@@ -32,7 +32,10 @@ import VoiceRecordingBar from './components/VoiceRecordingBar'
 import QuickInputMenu from './components/QuickInputMenu'
 import QuickInputsDialog from './components/QuickInputsDialog'
 import ConversationSummaryDialog from './components/ConversationSummaryDialog'
-import EventRoutingDialog from './components/EventRoutingDialog'
+import RuleRoutingDialog from './components/RuleRoutingDialog'
+import DecisionItemsDialog, { useDecisionSummary } from './components/DecisionItemsDialog'
+import type { AutoLoopRuleCreate } from '@/api/autoloop'
+import { createDecisionSession } from './components/autoloopLogic'
 import { createSummaryScheduler } from './summaryScheduler'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Dialog, DialogTrigger } from '@/components/ui/dialog'
@@ -187,8 +190,47 @@ export default function SuperAssistantPage() {
   // 用户级 Hindsight 记忆运行时状态（SSE memory_status 事件更新）：与消息生成、
   // 工具步骤完全独立，记忆故障不作为聊天 error 呈现，仅以独立状态条可见
   const [memoryStatus, setMemoryStatus] = useState<MemoryStatusSnapshot | null>(null)
-  // 事件路由：头部按钮弹窗（入口位于会话纪要与领域知识之间，内容占位待后续迭代）
-  const [eventRoutingOpen, setEventRoutingOpen] = useState(false)
+  const canUseAutoLoop = hasMenuAccess(user, 'super_assistant')
+  const eventId = searchParams.get('autoloopEvent')
+  const decisionId = searchParams.get('decision')
+  const [ruleRoutingOpen, setRuleRoutingOpen] = useState(Boolean(eventId || searchParams.get('ruleRouting')))
+  const [decisionsOpen, setDecisionsOpen] = useState(Boolean(decisionId || searchParams.get('decisions')))
+  const [ruleDraft, setRuleDraft] = useState<AutoLoopRuleCreate | null>(null)
+  const [decisionSession, setDecisionSession] = useState(createDecisionSession)
+  useEffect(() => { setDecisionSession(createDecisionSession()) }, [user?.id])
+  const { summary: decisionSummary, refresh: refreshDecisionSummary } = useDecisionSummary(canUseAutoLoop)
+  useEffect(() => {
+    const decisions = canUseAutoLoop && Boolean(decisionId || searchParams.get('decisions'))
+    const routing = canUseAutoLoop && !decisions && Boolean(eventId || searchParams.get('ruleRouting'))
+    setDecisionsOpen(decisions); setRuleRoutingOpen(routing)
+    if (decisions || routing) setScheduledOpen(false)
+  }, [eventId, decisionId, searchParams, canUseAutoLoop])
+  const openDecisionItems = (id?: string) => {
+    if (!canUseAutoLoop) return
+    setRuleRoutingOpen(false); setDecisionsOpen(true)
+    setSearchParams(previous => {
+      const next = new URLSearchParams(previous)
+      next.delete('autoloopEvent'); next.delete('ruleRouting'); next.delete('decision'); next.delete('decisions'); next.delete('schedule'); next.delete('scheduleRun')
+      if (id) next.set('decision', id)
+      else next.set('decisions', '1')
+      return next
+    }, { replace: true })
+  }
+  const openAutoLoopEvent = (id: string) => {
+    if (!canUseAutoLoop) return
+    setScheduledOpen(false); setDecisionsOpen(false); setRuleRoutingOpen(true)
+    setSearchParams(previous => {
+      const next = new URLSearchParams(previous)
+      next.set('autoloopEvent', id)
+      next.delete('decision'); next.delete('decisions')
+      return next
+    }, { replace: true })
+  }
+  const fillRuleDraft = (value: AutoLoopRuleCreate) => {
+    if (!canUseAutoLoop) return
+    setRuleDraft(value); setRuleRoutingOpen(true); setDecisionsOpen(false); setScheduledOpen(false)
+    setSearchParams(previous => { const next = new URLSearchParams(previous); next.delete('autoloopEvent'); next.delete('decision'); next.delete('decisions'); next.delete('schedule'); next.delete('scheduleRun'); next.set('ruleRouting', '1'); return next }, { replace: true })
+  }
   // 知识库（WeKnora）：页面加载只读后端返回的原生 Web URL；入口不依赖 state、
   // 知识库或模型可用性，也不代表知识检索已就绪。普通点击走一键免登录（后端
   // 签发一次性票据，网关中继在 WeKnora origin 完成登录），右键/中键/修饰键
@@ -1557,6 +1599,10 @@ export default function SuperAssistantPage() {
         onSetArchived={(id, archived) => void setConversationArchived(id, archived)}
         onOpenSearch={() => setSearchOpen(true)}
         onOpenScheduled={() => setScheduledOpen(true)}
+        onOpenRuleRouting={() => {
+          setRuleRoutingOpen(true)
+          setSearchParams(previous => { const next = new URLSearchParams(previous); next.set('ruleRouting', '1'); return next }, { replace: true })
+        }}
         onOpenTaskInstances={() => setTaskInstancesOpen(true)}
         onOpenNotifications={() => setNotificationsOpen(true)}
         onIntegrationsSaved={() => void refreshMulticaConfig()}
@@ -1578,6 +1624,7 @@ export default function SuperAssistantPage() {
         open={scheduledOpen}
         initialTaskId={scheduleId}
         initialRunId={scheduleRunId}
+        onOpenAutoLoopEvent={openAutoLoopEvent}
         onClose={() => {
           setScheduledOpen(false)
           setSearchParams(previous => {
@@ -1619,9 +1666,18 @@ export default function SuperAssistantPage() {
         models={models}
         refreshKey={summaryRefreshKey}
       />
-      {eventRoutingOpen && (
-        <EventRoutingDialog onClose={() => setEventRoutingOpen(false)} />
+      {canUseAutoLoop && ruleRoutingOpen && (
+        <RuleRoutingDialog initialDraft={ruleDraft} initialEventId={eventId} scheduledTaskId={eventId ? scheduleId : null} scheduledRunId={eventId ? scheduleRunId : null} onOpenDecision={openDecisionItems} onClose={() => {
+          setRuleRoutingOpen(false); setRuleDraft(null)
+          setSearchParams(previous => { const next = new URLSearchParams(previous); next.delete('ruleRouting'); next.delete('autoloopEvent'); next.delete('schedule'); next.delete('scheduleRun'); return next }, { replace: true })
+        }} />
       )}
+      {canUseAutoLoop && decisionsOpen && <DecisionItemsDialog initialId={decisionId} summary={decisionSummary} session={decisionSession} onSelect={id => {
+        setSearchParams(previous => { const next = new URLSearchParams(previous); next.delete('decision'); next.delete('decisions'); if (id) next.set('decision', id); else next.set('decisions', '1'); return next }, { replace: true })
+      }} onOpenEvent={openAutoLoopEvent} onRefreshSummary={refreshDecisionSummary} onClose={() => {
+        setDecisionsOpen(false)
+        setSearchParams(previous => { const next = new URLSearchParams(previous); next.delete('decision'); next.delete('decisions'); return next }, { replace: true })
+      }} />}
       {/* 单一大卡：左聊天区 + 右助手配置面板同卡，内部 1px 分隔线 + 拖拽手柄相接；
           面板展开时聊天列让出 --config-w 宽度（面板本身绝对定位铺右缘），收起时整卡即聊天区 */}
       <section
@@ -1688,7 +1744,11 @@ export default function SuperAssistantPage() {
               </button>
             )}
           </div>
-          {/* 会话纪要入口：位于事件路由/项目管理（Kaneo）/知识库（WeKnora）入口左侧；窄屏（<md）让位标题/模型选择器，收进「更多操作」溢出菜单 */}
+          {canUseAutoLoop && <button type="button" onClick={() => openDecisionItems()} aria-label={`决策事项，${decisionSummary?.unfinishedTotal ?? '—'} 项未完成`} title="决策事项" data-workbench-decisions className="relative hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-brand-line bg-[var(--color-context-usage-bg)] text-brand-ink transition-colors hover:border-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:flex">
+            <ListChecks size={16} aria-hidden="true" />
+            {!!decisionSummary?.unfinishedTotal && <span className="absolute -right-1 -top-1 min-w-4 rounded-full bg-brand px-1 text-[10px] leading-4 text-white">{decisionSummary.unfinishedTotal > 99 ? '99+' : decisionSummary.unfinishedTotal}</span>}
+          </button>}
+          {/* 窄屏入口同序收进更多操作。 */}
           <button
             type="button"
             onClick={() => setSummaryOpen(true)}
@@ -1698,19 +1758,7 @@ export default function SuperAssistantPage() {
           >
             <ScrollText size={16} aria-hidden="true" />
           </button>
-          {/* 事件路由入口：位于会话纪要与领域知识之间；弹窗内容占位（规则配置后续迭代）。
-              窄屏（<md）与两侧入口一起收进「更多操作」溢出菜单。 */}
-          <button
-            type="button"
-            onClick={() => setEventRoutingOpen(true)}
-            aria-label="事件路由"
-            title="事件路由"
-            data-workbench-event-routing
-            className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-brand-line bg-[var(--color-context-usage-bg)] text-brand-ink transition-colors hover:border-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:flex"
-          >
-            <RouteIcon size={16} aria-hidden="true" />
-          </button>
-          {/* 项目管理（Kaneo）入口：位于知识库（WeKnora）入口紧左（事件路由右侧）；普通左键
+          {/* 项目管理（Kaneo）入口：位于知识库（WeKnora）入口紧左（会话纪要右侧）；普通左键
               一键免登录（领一次性票据新标签进入原生 Web），中键/修饰键/右键直开原生 URL 作
               手动登录兜底。窄屏（<md）收进「更多操作」溢出菜单。 */}
           {kaneoUrl ? (
@@ -1865,6 +1913,9 @@ export default function SuperAssistantPage() {
               </button>
             </PopoverTrigger>
             <PopoverContent align="end" side="bottom" sideOffset={8} className="w-44 p-1">
+              {canUseAutoLoop && <button type="button" onClick={() => { setHeaderOverflowOpen(false); openDecisionItems() }} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                <ListChecks size={15} className="shrink-0 text-brand-ink" />决策事项 <span className="ml-auto text-xs">{decisionSummary?.unfinishedTotal ?? '—'}</span>
+              </button>}
               <button
                 type="button"
                 onClick={() => { setHeaderOverflowOpen(false); setSummaryOpen(true) }}
@@ -1872,14 +1923,6 @@ export default function SuperAssistantPage() {
               >
                 <ScrollText size={15} className="shrink-0 text-brand-ink" />
                 会话纪要
-              </button>
-              <button
-                type="button"
-                onClick={() => { setHeaderOverflowOpen(false); setEventRoutingOpen(true) }}
-                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                <RouteIcon size={15} className="shrink-0 text-brand-ink" />
-                事件路由
               </button>
               {kaneoUrl ? (
                 <a
@@ -2025,6 +2068,7 @@ export default function SuperAssistantPage() {
                     <ChatMessage
                       key={message.id}
                       message={message}
+                      onFillRuleDraft={canUseAutoLoop ? fillRuleDraft : undefined}
                       onRetry={canRetryFailedMessage(message) ? () => retryFailedMessage(message) : undefined}
                     />
                   ))}

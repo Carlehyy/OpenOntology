@@ -33,6 +33,7 @@ async def application_lifespan(
     runtime_resources_started = False
     kernel_scheduler_started = False
     mcp_transport_started = False
+    task_instances_reconcile_attempted = False
     try:
         seed_database()
 
@@ -219,6 +220,14 @@ async def application_lifespan(
             except Exception as exc:
                 _main_logger.warning("记忆同步对账定时器启动失败: %s", exc)
 
+        if settings.environment != "test":
+            try:
+                from app.super_assistant.autoloop import scheduler as autoloop_scheduler
+
+                autoloop_scheduler.start()
+            except Exception as exc:
+                _main_logger.warning("AutoLoop 派发扫描器启动失败: %s", exc)
+
         # 消息通知渠道转发扫描器（每 30 秒投递 pending 单；旁路能力，失败不阻断启动）
         if settings.environment != "test":
             try:
@@ -246,6 +255,7 @@ async def application_lifespan(
             try:
                 from app.task_instances import reconcile as task_instances_reconcile
 
+                task_instances_reconcile_attempted = True
                 task_instances_reconcile.start()
             except Exception as exc:
                 _main_logger.warning("任务实例对账定时器启动失败: %s", exc)
@@ -344,6 +354,13 @@ async def application_lifespan(
             ontology_assistant_tasks.shutdown()
         except Exception:  # noqa: BLE001
             _main_logger.exception("本体助手回合对账器 cleanup failed")
+        if task_instances_reconcile_attempted:
+            try:
+                from app.task_instances import reconcile as task_instances_reconcile
+
+                await asyncio.to_thread(task_instances_reconcile.shutdown)
+            except Exception:  # noqa: BLE001
+                _main_logger.exception("任务实例对账定时器 cleanup failed")
         if sentinel_attempted:
             try:
                 from app.services.sentinel import (
@@ -363,6 +380,12 @@ async def application_lifespan(
         except Exception:  # noqa: BLE001
             _main_logger.exception("Super assistant scheduled-task scheduler cleanup failed")
         try:
+            from app.super_assistant.autoloop import scheduler as autoloop_scheduler
+
+            autoloop_scheduler.shutdown()
+        except Exception:  # noqa: BLE001
+            _main_logger.exception("AutoLoop dispatch scheduler cleanup failed")
+        try:
             from app.super_assistant import memory_scheduler
 
             memory_scheduler.shutdown()
@@ -380,3 +403,9 @@ async def application_lifespan(
             remote_agent_task_gc.shutdown()
         except Exception:  # noqa: BLE001
             _main_logger.exception("Remote agent task GC cleanup failed")
+        try:
+            from app.data_channel.pipeline_tasks.dispatch import shutdown_dispatch_loop
+
+            await asyncio.to_thread(shutdown_dispatch_loop)
+        except Exception:  # noqa: BLE001
+            _main_logger.exception("NATS dispatch loop cleanup failed")

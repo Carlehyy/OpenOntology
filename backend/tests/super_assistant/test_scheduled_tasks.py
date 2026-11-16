@@ -1,4 +1,4 @@
-"""超级助手用户定时任务：调度计算、CRUD、到期派发、无人值守执行。"""
+"""用户日程：保留调度契约，全部目标事务化生成 AutoLoop 事件。"""
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -13,6 +13,12 @@ from app.shared.database import Base
 from app.super_assistant.memory_models import (
     SuperAssistantMemorySetting,
     SuperAssistantMemorySource,
+)
+from app.super_assistant.autoloop.models import (
+    AUTOLOOP_TABLES,
+    AutoLoopDispatch,
+    AutoLoopEvent,
+    AutoLoopReceipt,
 )
 from app.super_assistant.models import (
     SuperAssistantConversation,
@@ -50,7 +56,9 @@ from app.super_assistant.scheduled_service import (
     parse_user_run_at,
     update_task,
 )
-from app.super_assistant.schemas import ScheduledTaskCreate, ScheduledTaskOut, ScheduledTaskUpdate
+from app.super_assistant.schemas import (
+    ScheduledRunOut, ScheduledTaskCreate, ScheduledTaskOut, ScheduledTaskUpdate,
+)
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
@@ -73,9 +81,10 @@ def _session(tmp_path):
             TaskApproval.__table__,
             TaskArtifact.__table__,
             TaskEvent.__table__,
-            # Hindsight 主链：execute_run 落用户消息时入队记忆来源
+            # 证明事件接收不创建会话、实例或用户记忆来源。
             SuperAssistantMemorySource.__table__,
             SuperAssistantMemorySetting.__table__,
+            *AUTOLOOP_TABLES,
         ],
     )
     return sessionmaker(bind=engine, expire_on_commit=False)
@@ -152,8 +161,8 @@ def test_dispatch_due_creates_run_and_disables_once(tmp_path, monkeypatch):
     Session = _session(tmp_path)
     sent = []
     monkeypatch.setattr(
-        "app.data_channel.pipeline_tasks.dispatch.dispatch_super_assistant_scheduled_run",
-        lambda run_id: sent.append(run_id),
+        "app.data_channel.pipeline_tasks.dispatch.dispatch_autoloop",
+        lambda dispatch_id, version: sent.append((dispatch_id, version)),
     )
     with Session() as db:
         _user(db)
@@ -177,8 +186,19 @@ def test_dispatch_due_creates_run_and_disables_once(tmp_path, monkeypatch):
         assert task.next_run_at is None
         runs = db.query(SuperAssistantScheduledRun).all()
         assert len(runs) == 1
-        assert runs[0].status == "queued"
-        assert runs[0].id == sent[0]
+        assert runs[0].status == "completed"
+        assert runs[0].result_summary == "已生成AutoLoop事件，等待规则路由"
+        receipt = db.query(AutoLoopReceipt).one()
+        event = db.query(AutoLoopEvent).filter_by(receipt_id=receipt.id).one()
+        dispatch = db.query(AutoLoopDispatch).one()
+        assert receipt.scheduled_task_id == task_id
+        assert receipt.scheduled_run_id == runs[0].id
+        assert dispatch.event_id == event.id
+        assert sent == [(dispatch.id, dispatch.version)]
+        assert db.query(SuperAssistantConversation).count() == 0
+        assert db.query(TaskInstance).count() == 0
+    assert dispatch_due_tasks() == 0
+    assert len(sent) == 1
 
 
 def test_dispatch_skips_when_previous_run_in_flight(tmp_path, monkeypatch):
@@ -214,107 +234,67 @@ def test_dispatch_skips_when_previous_run_in_flight(tmp_path, monkeypatch):
         assert {row.status for row in runs} == {"running", "skipped"}
 
 
-def test_execute_run_creates_conversation_and_records_summary(tmp_path, monkeypatch):
+@pytest.mark.parametrize("target_kind", ["super_assistant", "task_template"])
+@pytest.mark.parametrize("memory_enabled", [True, False])
+def test_execute_run_admits_event_only_and_replays_original_identity(
+    tmp_path, monkeypatch, target_kind, memory_enabled,
+):
     Session = _session(tmp_path)
-
-    def fake_stream_chat(**kwargs):
-        assert kwargs["unattended"] is True
-        assert kwargs["agent_mode"] is True
-        db = Session()
-        try:
-            message = db.get(SuperAssistantMessage, kwargs["assistant_message_id"])
-            message.content = "整理完成：三项待办。"
-            message.status = "complete"
-            db.commit()
-        finally:
-            db.close()
-        if False:
-            yield "unused"
-
-    monkeypatch.setattr("app.super_assistant.scheduled_service.stream_chat", fake_stream_chat)
-    monkeypatch.setattr("app.super_assistant.scheduled_service.publish_event", lambda *args, **kwargs: None)
+    sent = []
     monkeypatch.setattr("app.super_assistant.scheduled_service.SessionLocal", Session)
 
+    def publish(dispatch_id, version):
+        # Publishing can only observe a fully committed run and admission.
+        with Session() as db:
+            dispatch = db.get(AutoLoopDispatch, dispatch_id)
+            event = db.query(AutoLoopEvent).filter_by(id=dispatch.event_id).one()
+            receipt = db.get(AutoLoopReceipt, event.receipt_id)
+            assert db.get(SuperAssistantScheduledRun, receipt.scheduled_run_id).status == "completed"
+        sent.append((dispatch_id, version))
+
+    monkeypatch.setattr("app.data_channel.pipeline_tasks.dispatch.dispatch_autoloop", publish)
     with Session() as db:
         _user(db)
+        db.add(SuperAssistantMemorySetting(owner_id="owner-1", enabled=memory_enabled))
+        template_id = _template(db).id if target_kind == "task_template" else None
         task = SuperAssistantScheduledTask(
             owner_id="owner-1", title="晚报", instruction="整理今日进展",
             schedule_kind="once", timezone="Asia/Shanghai", enabled=False,
+            target_kind=target_kind, target_template_id=template_id,
         )
         db.add(task)
         db.flush()
         run = SuperAssistantScheduledRun(
             task_id=task.id, owner_id="owner-1",
-            scheduled_for=as_utc_naive(datetime.now(timezone.utc)),
-            status="queued",
+            scheduled_for=as_utc_naive(datetime.now(timezone.utc)), status="queued",
         )
         db.add(run)
         db.commit()
         run_id, task_id = run.id, task.id
 
     execute_run(run_id)
-    with Session() as db:
-        run = get_run(db, "owner-1", task_id, run_id)
-        assert run.status == "completed"
-        assert run.conversation_id
-        assert run.result_summary == "整理完成：三项待办。"
-        conversation = db.get(SuperAssistantConversation, run.conversation_id)
-        assert conversation.owner_id == "owner-1"
-        assert "晚报" in conversation.title
-        messages = list_runs(db, "owner-1", task_id)
-        assert messages[0].id == run_id
-
-
-def test_execute_run_memory_disabled_no_source(tmp_path, monkeypatch):
-    """用户关闭跨会话记忆：定时指令执行照常，不登记用户来源。"""
-    Session = _session(tmp_path)
-
-    def fake_stream_chat(**kwargs):
-        db = Session()
-        try:
-            message = db.get(SuperAssistantMessage, kwargs["assistant_message_id"])
-            message.content = "整理完成：两项待办。"
-            message.status = "complete"
-            db.commit()
-        finally:
-            db.close()
-        if False:
-            yield "unused"
-
-    monkeypatch.setattr("app.super_assistant.scheduled_service.stream_chat", fake_stream_chat)
-    monkeypatch.setattr("app.super_assistant.scheduled_service.publish_event", lambda *args, **kwargs: None)
-    monkeypatch.setattr("app.super_assistant.scheduled_service.SessionLocal", Session)
-
-    with Session() as db:
-        _user(db)
-        db.add(SuperAssistantMemorySetting(owner_id="owner-1", enabled=False))
-        task = SuperAssistantScheduledTask(
-            owner_id="owner-1", title="晚报", instruction="整理今日进展",
-            schedule_kind="once", timezone="Asia/Shanghai", enabled=False,
-        )
-        db.add(task)
-        db.flush()
-        run = SuperAssistantScheduledRun(
-            task_id=task.id, owner_id="owner-1",
-            scheduled_for=as_utc_naive(datetime.now(timezone.utc)),
-            status="queued",
-        )
-        db.add(run)
-        db.commit()
-        run_id, task_id = run.id, task.id
-
     execute_run(run_id)
     with Session() as db:
         run = get_run(db, "owner-1", task_id, run_id)
         assert run.status == "completed"
-        assert run.result_summary == "整理完成：两项待办。"
-        # 指令仍作为用户消息进入会话（聊天面不受记忆开关影响）
-        user_messages = (
-            db.query(SuperAssistantMessage)
-            .filter_by(role="user")
-            .all()
-        )
-        assert [message.content for message in user_messages] == ["整理今日进展"]
+        assert run.result_summary == "已生成AutoLoop事件，等待规则路由"
+        assert run.conversation_id is run.instance_id is None
+        receipt = db.query(AutoLoopReceipt).one()
+        event = db.query(AutoLoopEvent).filter_by(receipt_id=receipt.id).one()
+        dispatch = db.query(AutoLoopDispatch).one()
+        assert receipt.owner_id == event.owner_id == dispatch.owner_id == "owner-1"
+        assert event.data["instruction"] == "整理今日进展"
+        assert event.data["targetKind"] == target_kind
+        assert event.data["targetTemplateId"] == template_id
+        assert event.data["timezone"] == "Asia/Shanghai"
+        assert event.data["scheduledFor"].endswith("+00:00")
+        assert sent == [(dispatch.id, dispatch.version)]
+        dto = ScheduledRunOut.model_validate(run)
+        assert dto.autoloopEventIds == [event.id]
+        assert list_runs(db, "owner-1", task_id)[0].autoloopEventIds == [event.id]
+        assert db.query(SuperAssistantConversation).count() == 0
+        assert db.query(SuperAssistantMessage).count() == 0
+        assert db.query(TaskInstance).count() == 0
         assert db.query(SuperAssistantMemorySource).count() == 0
 
 
@@ -329,11 +309,10 @@ def test_dispatch_subject_and_handler_registration(monkeypatch):
     from app.super_assistant import scheduled_tasks
 
     assert SUPER_ASSISTANT_SCHEDULED_RUN_SUBJECT == "super_assistant.scheduled.run"
-    # 流扩容只能追加：既有 subject 顺序与 durable 不变；Hindsight 记忆同步
-    # 为当前尾项（本体助手后台回合之后，WeKnora 已退役宫殿 subject）。
-    assert PIPELINE_STREAM_SUBJECTS[-4:] == (
+    # 仅追加 AutoLoop；既有 subject 的顺序和 durable 保持不变。
+    assert PIPELINE_STREAM_SUBJECTS[-5:] == (
         "task_instances.control", "integrated.sync", "ontology.assistant.run",
-        "super_assistant.memory.sync",
+        "super_assistant.memory.sync", "super_assistant.autoloop.dispatch",
     )
     assert SUPER_ASSISTANT_SCHEDULED_RUN_SUBJECT in PIPELINE_STREAM_SUBJECTS
     registry = {
@@ -381,8 +360,8 @@ def test_overdue_daily_is_skipped_not_fired(tmp_path, monkeypatch):
     Session = _session(tmp_path)
     sent = []
     monkeypatch.setattr(
-        "app.data_channel.pipeline_tasks.dispatch.dispatch_super_assistant_scheduled_run",
-        lambda run_id: sent.append(run_id),
+        "app.data_channel.pipeline_tasks.dispatch.dispatch_autoloop",
+        lambda dispatch_id, version: sent.append((dispatch_id, version)),
     )
     now = datetime.now(timezone.utc)
     with Session() as db:
@@ -412,8 +391,8 @@ def test_queued_unpublished_run_is_redispatched(tmp_path, monkeypatch):
     Session = _session(tmp_path)
     sent = []
     monkeypatch.setattr(
-        "app.data_channel.pipeline_tasks.dispatch.dispatch_super_assistant_scheduled_run",
-        lambda run_id: sent.append(run_id),
+        "app.data_channel.pipeline_tasks.dispatch.dispatch_autoloop",
+        lambda dispatch_id, version: sent.append((dispatch_id, version)),
     )
     monkeypatch.setattr("app.super_assistant.scheduled_service.publish_event", lambda *a, **k: None)
     now = datetime.now(timezone.utc)
@@ -436,51 +415,56 @@ def test_queued_unpublished_run_is_redispatched(tmp_path, monkeypatch):
         run_id = run.id
     monkeypatch.setattr("app.super_assistant.scheduled_service.SessionLocal", Session)
     assert dispatch_due_tasks() == 1
-    assert sent == [run_id]
+    with Session() as db:
+        work = db.query(AutoLoopDispatch).one()
+        assert sent == [(work.id, work.version)]
+        assert db.get(SuperAssistantScheduledRun, run_id).status == "completed"
+    assert dispatch_due_tasks() == 0
+    assert len(sent) == 1
 
 
-def test_execute_run_claims_once(tmp_path, monkeypatch):
+def test_admission_failure_rolls_back_run_slot_and_facts(tmp_path, monkeypatch):
+    from app.super_assistant import scheduled_service
+    from app.super_assistant.autoloop.ingress import accept_scheduled_run
+
     Session = _session(tmp_path)
-    calls = []
-
-    def fake_stream_chat(**kwargs):
-        calls.append(kwargs["assistant_message_id"])
-        db = Session()
-        try:
-            message = db.get(SuperAssistantMessage, kwargs["assistant_message_id"])
-            message.content = "ok"
-            message.status = "complete"
-            db.commit()
-        finally:
-            db.close()
-        if False:
-            yield "unused"
-
-    monkeypatch.setattr("app.super_assistant.scheduled_service.stream_chat", fake_stream_chat)
-    monkeypatch.setattr("app.super_assistant.scheduled_service.publish_event", lambda *a, **k: None)
-    monkeypatch.setattr("app.super_assistant.scheduled_service.SessionLocal", Session)
+    now = as_utc_naive(datetime.now(timezone.utc))
+    sent = []
+    monkeypatch.setattr(scheduled_service, "SessionLocal", Session)
+    monkeypatch.setattr("app.data_channel.pipeline_tasks.dispatch.dispatch_autoloop",
+                        lambda *args: sent.append(args))
     with Session() as db:
         _user(db)
         task = SuperAssistantScheduledTask(
-            owner_id="owner-1", title="晚报", instruction="整理",
-            schedule_kind="once", timezone="Asia/Shanghai", enabled=False,
+            owner_id="owner-1", title="事务", instruction="整理",
+            schedule_kind="once", timezone="Asia/Shanghai", enabled=True, next_run_at=now,
         )
         db.add(task)
-        db.flush()
-        run = SuperAssistantScheduledRun(
-            task_id=task.id, owner_id="owner-1",
-            scheduled_for=as_utc_naive(datetime.now(timezone.utc)),
-            status="queued",
-        )
-        db.add(run)
         db.commit()
-        run_id = run.id
-    execute_run(run_id)
-    execute_run(run_id)
-    assert len(calls) == 1
+        task_id = task.id
+
+    def fail_after_admission(db, task, run):
+        accept_scheduled_run(db, task, run)
+        raise RuntimeError("admission write interrupted")
+
+    monkeypatch.setattr(scheduled_service, "accept_scheduled_run",
+                        fail_after_admission)
+    assert dispatch_due_tasks(now) == 0
     with Session() as db:
-        conversations = db.query(SuperAssistantConversation).all()
-        assert len(conversations) == 1
+        task = db.get(SuperAssistantScheduledTask, task_id)
+        assert task.enabled is True
+        assert task.next_run_at == now
+        assert db.query(SuperAssistantScheduledRun).count() == 0
+        assert db.query(AutoLoopReceipt).count() == 0
+        assert db.query(AutoLoopEvent).count() == 0
+        assert db.query(AutoLoopDispatch).count() == 0
+    assert sent == []
+    monkeypatch.setattr(scheduled_service, "accept_scheduled_run",
+                        accept_scheduled_run)
+    assert dispatch_due_tasks(now) == 1
+    with Session() as db:
+        assert db.query(SuperAssistantScheduledRun).one().status == "completed"
+        assert db.query(AutoLoopDispatch).count() == 1
 
 
 def test_reap_spares_running_run_with_recent_started_at(tmp_path, monkeypatch):
@@ -553,48 +537,30 @@ def test_reap_fails_running_run_with_stale_started_at(tmp_path, monkeypatch):
         assert run.error == REAP_ERROR
 
 
-def test_execute_run_overwrites_reaped_run_with_real_result(tmp_path, monkeypatch):
-    """执行期间被收割成「执行超时未完成」的运行，跑完后按真实终态覆盖并更正通知。"""
+def test_committed_schedule_recovers_same_dispatch_after_publish_unknown(tmp_path, monkeypatch):
+    from app.super_assistant.autoloop.dispatching import scan_pending
+
     Session = _session(tmp_path)
-    notices = []
+    attempts = []
 
-    def fake_publish_event(db, event):
-        notices.append((event.event_id, event.item.title))
+    def accepted_then_timeout(dispatch_id, version):
+        attempts.append((dispatch_id, version))
+        raise TimeoutError("broker acceptance unknown")
 
-    def fake_stream_chat(**kwargs):
-        db = Session()
-        try:
-            message = db.get(SuperAssistantMessage, kwargs["assistant_message_id"])
-            message.content = "整理完成：三项待办。"
-            message.status = "complete"
-            # 模拟收割器在执行期间介入：本行被标成超时失败（含已发出的假失败通知前提）
-            run = db.query(SuperAssistantScheduledRun).filter(
-                SuperAssistantScheduledRun.conversation_id == kwargs["conversation_id"],
-            ).one()
-            run.status = "failed"
-            run.error = REAP_ERROR
-            run.finished_at = as_utc_naive(datetime.now(timezone.utc))
-            db.commit()
-        finally:
-            db.close()
-        if False:
-            yield "unused"
-
-    monkeypatch.setattr("app.super_assistant.scheduled_service.stream_chat", fake_stream_chat)
-    monkeypatch.setattr("app.super_assistant.scheduled_service.publish_event", fake_publish_event)
+    monkeypatch.setattr("app.data_channel.pipeline_tasks.dispatch.dispatch_autoloop",
+                        accepted_then_timeout)
     monkeypatch.setattr("app.super_assistant.scheduled_service.SessionLocal", Session)
     with Session() as db:
         _user(db)
         task = SuperAssistantScheduledTask(
-            owner_id="owner-1", title="晚报", instruction="整理今日进展",
+            owner_id="owner-1", title="恢复", instruction="整理今日进展",
             schedule_kind="once", timezone="Asia/Shanghai", enabled=False,
         )
         db.add(task)
         db.flush()
         run = SuperAssistantScheduledRun(
             task_id=task.id, owner_id="owner-1",
-            scheduled_for=as_utc_naive(datetime.now(timezone.utc)),
-            status="queued",
+            scheduled_for=as_utc_naive(datetime.now(timezone.utc)), status="queued",
         )
         db.add(run)
         db.commit()
@@ -604,68 +570,55 @@ def test_execute_run_overwrites_reaped_run_with_real_result(tmp_path, monkeypatc
     with Session() as db:
         run = get_run(db, "owner-1", task_id, run_id)
         assert run.status == "completed"
-        assert run.error is None
-        assert run.result_summary == "整理完成：三项待办。"
-    # 更正通知的 eventId 必须带 -corrected 后缀：与收割 alert 同 eventId 不同
-    # payload 会被收件箱收据校验拒收（ValueError），更正通知就永远发不出去。
-    assert any(
-        event_id.endswith(":notice-corrected") and title.startswith("定时任务已完成")
-        for event_id, title in notices
-    )
+        work = db.query(AutoLoopDispatch).one()
+        original = (work.id, work.version)
+        assert work.state == "pending"
+    assert attempts == [original]
+    recovered = []
+    assert scan_pending(session_factory=Session,
+                        publish=lambda *args: recovered.append(args)) == 1
+    assert recovered == [original]
+    execute_run(run_id)
+    with Session() as db:
+        assert db.query(AutoLoopReceipt).count() == 1
+        assert db.query(AutoLoopDispatch).count() == 1
+        assert db.query(SuperAssistantConversation).count() == 0
+        assert db.query(TaskInstance).count() == 0
 
 
-def test_execute_run_overwrites_reaped_run_with_real_failure(tmp_path, monkeypatch):
-    """收割误报后执行真实失败：终态与 error 用真实值覆盖，更正 alert 不撞收据。"""
+@pytest.mark.parametrize("status", ["running", "completed", "failed", "skipped"])
+def test_legacy_delivery_never_reexecutes_running_or_terminal_run(tmp_path, monkeypatch, status):
+    """旧投递不能把超时、已有执行或终态当作从未执行而重做。"""
     Session = _session(tmp_path)
-    notices = []
-
-    def fake_publish_event(db, event):
-        notices.append((event.event_id, event.item.title))
-
-    def fake_stream_chat(**kwargs):
-        db = Session()
-        try:
-            run = db.query(SuperAssistantScheduledRun).filter(
-                SuperAssistantScheduledRun.conversation_id == kwargs["conversation_id"],
-            ).one()
-            run.status = "failed"
-            run.error = REAP_ERROR
-            run.finished_at = as_utc_naive(datetime.now(timezone.utc))
-            db.commit()
-        finally:
-            db.close()
-        raise RuntimeError("模型通道断开")
-
-    monkeypatch.setattr("app.super_assistant.scheduled_service.stream_chat", fake_stream_chat)
-    monkeypatch.setattr("app.super_assistant.scheduled_service.publish_event", fake_publish_event)
+    sent = []
+    monkeypatch.setattr("app.data_channel.pipeline_tasks.dispatch.dispatch_autoloop",
+                        lambda *args: sent.append(args))
     monkeypatch.setattr("app.super_assistant.scheduled_service.SessionLocal", Session)
     with Session() as db:
         _user(db)
         task = SuperAssistantScheduledTask(
-            owner_id="owner-1", title="晚报", instruction="整理今日进展",
+            owner_id="owner-1", title="历史运行", instruction="整理今日进展",
             schedule_kind="once", timezone="Asia/Shanghai", enabled=False,
         )
         db.add(task)
         db.flush()
         run = SuperAssistantScheduledRun(
-            task_id=task.id, owner_id="owner-1",
+            task_id=task.id, owner_id="owner-1", status=status,
             scheduled_for=as_utc_naive(datetime.now(timezone.utc)),
-            status="queued",
+            error=REAP_ERROR if status == "failed" else None,
+            result_summary="historical execution result",
         )
         db.add(run)
         db.commit()
-        run_id, task_id = run.id, task.id
-
+        run_id = run.id
     execute_run(run_id)
     with Session() as db:
-        run = get_run(db, "owner-1", task_id, run_id)
-        assert run.status == "failed"
-        assert "模型通道断开" in (run.error or "")
-        assert run.error != REAP_ERROR
-    assert any(
-        event_id.endswith(":alert-corrected") and title.startswith("定时任务失败")
-        for event_id, title in notices
-    )
+        row = db.get(SuperAssistantScheduledRun, run_id)
+        assert row.status == status
+        assert row.result_summary == "historical execution result"
+        assert row.error == (REAP_ERROR if status == "failed" else None)
+        assert db.query(AutoLoopReceipt).count() == 0
+    assert sent == []
 
 
 def test_reap_falls_back_to_created_at_when_started_at_missing(tmp_path, monkeypatch):
@@ -853,14 +806,14 @@ def test_update_task_target_change_validates_and_merges(tmp_path):
                 instruction="长" * 20_001))
 
 
-def test_execute_run_template_target_creates_instance(tmp_path, monkeypatch):
+@pytest.mark.parametrize("template_deleted", [False, True])
+def test_template_schedule_records_target_without_activating_instance(
+    tmp_path, monkeypatch, template_deleted,
+):
     Session = _session(tmp_path)
-    monkeypatch.setattr("app.super_assistant.scheduled_service.publish_event",
-                        lambda *args, **kwargs: None)
     monkeypatch.setattr("app.super_assistant.scheduled_service.SessionLocal", Session)
-    # 节点派发走 NATS：测试内联 no-op，实例停在 active 即可（触发即完成语义）
-    monkeypatch.setattr("app.task_instances.service._dispatch_node",
-                        lambda node_run_id: None)
+    monkeypatch.setattr("app.data_channel.pipeline_tasks.dispatch.dispatch_autoloop",
+                        lambda *args: None)
 
     with Session() as db:
         _user(db)
@@ -872,55 +825,25 @@ def test_execute_run_template_target_creates_instance(tmp_path, monkeypatch):
             scheduled_for=as_utc_naive(datetime.now(timezone.utc)), status="queued",
         )
         db.add(run)
+        if template_deleted:
+            template.deleted_at = datetime.now(timezone.utc)
         db.commit()
-        run_id, task_id = run.id, task.id
+        run_id, task_id, template_id = run.id, task.id, template.id
 
+    execute_run(run_id)
     execute_run(run_id)
     with Session() as db:
         run = get_run(db, "owner-1", task_id, run_id)
         assert run.status == "completed"
-        assert run.instance_id
-        assert run.conversation_id is None  # 模板目标不建会话
-        assert "例行汇总" in run.result_summary
-        instance = db.get(TaskInstance, run.instance_id)
-        assert instance is not None
-        assert instance.goal == "汇总昨天的待办"  # 任务内容即实例目标
-        assert instance.created_by == "owner-1"
-        assert instance.status == "active"
-        # 幂等重放：终态 run 不再认领，实例不重复创建
-        execute_run(run_id)
-        assert db.query(TaskInstance).count() == 1
+        assert run.result_summary == "已生成AutoLoop事件，等待规则路由"
+        assert run.instance_id is run.conversation_id is None
+        receipt = db.query(AutoLoopReceipt).one()
+        event = db.query(AutoLoopEvent).filter_by(receipt_id=receipt.id).one()
+        assert event.data["targetKind"] == "task_template"
+        assert event.data["targetTemplateId"] == template_id
+        assert event.data["instruction"] == "汇总昨天的待办"
+        assert db.query(TaskInstance).count() == 0
         assert db.query(SuperAssistantConversation).count() == 0
-
-
-def test_execute_run_template_target_missing_template_fails(tmp_path, monkeypatch):
-    Session = _session(tmp_path)
-    monkeypatch.setattr("app.super_assistant.scheduled_service.publish_event",
-                        lambda *args, **kwargs: None)
-    monkeypatch.setattr("app.super_assistant.scheduled_service.SessionLocal", Session)
-
-    with Session() as db:
-        _user(db)
-        template = _template(db)
-        task = create_task(db, "owner-1", _future_body(
-            target_kind="task_template", target_template_id=template.id))
-        run = SuperAssistantScheduledRun(
-            task_id=task.id, owner_id="owner-1",
-            scheduled_for=as_utc_naive(datetime.now(timezone.utc)), status="queued",
-        )
-        db.add(run)
-        db.commit()
-        run_id, task_id = run.id, task.id
-        # 创建后模板被软删：触发时如实失败，不静默跳过
-        template.deleted_at = datetime.now(timezone.utc)
-        db.commit()
-
-    execute_run(run_id)
-    with Session() as db:
-        run = get_run(db, "owner-1", task_id, run_id)
-        assert run.status == "failed"
-        assert "流程模板不存在或已删除" in run.error
-        assert run.instance_id is None
 
 def test_reap_reconciles_template_run_with_existing_instance(tmp_path, monkeypatch):
     """收割对账（对抗审查 F1）：activate 已成功、终态写回因进程崩溃丢失——

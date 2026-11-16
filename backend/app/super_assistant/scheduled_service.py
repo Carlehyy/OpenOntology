@@ -1,7 +1,7 @@
-"""超级助手定时任务：计划 CRUD、到期派发、无人值守执行。
+"""用户日程 CRUD 与事件接收：所有存量目标均进入 AutoLoop。
 
-扫描半边在 API 进程（APScheduler），执行半边经 NATS 交给 nats_executor。
-每次触发新建一条会话，结果摘要写回执行记录；需要确认的写工具不自动批准。
+计划投影、唯一槽位 run、接收事实和待派发同事务提交。NATS 只负责唤醒，
+发布失败由 AutoLoop 持久派发扫描恢复，不再直接创建会话或任务实例。
 """
 from __future__ import annotations
 
@@ -9,11 +9,10 @@ import logging
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import and_, func, or_
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.auth.models import User
 from app.inbox.schemas import (
     InboxAction,
     InboxAudience,
@@ -25,12 +24,11 @@ from app.inbox.schemas import (
 from app.inbox.service import publish_event
 from app.shared.database import SessionLocal
 from app.super_assistant.models import (
-    SuperAssistantConversation,
-    SuperAssistantMessage,
     SuperAssistantScheduledRun,
     SuperAssistantScheduledTask,
 )
-from app.super_assistant.runtime import stream_chat
+from app.super_assistant.autoloop.ingress import accept_scheduled_run
+from app.super_assistant.autoloop.models import AutoLoopDispatch, AutoLoopEvent, AutoLoopReceipt
 from app.super_assistant.schemas import ScheduledTaskCreate, ScheduledTaskUpdate
 from app.super_assistant.scheduled_constants import STALE_RUNNING
 from app.task_instances.models import TaskInstance, TaskTemplate
@@ -42,7 +40,6 @@ REAP_ERROR = "执行超时未完成"
 QUEUED_REDISPATCH_AFTER = timedelta(seconds=20)
 OVERDUE_GRACE = timedelta(hours=2)
 ONCE_PAST_GRACE = timedelta(minutes=2)
-RESULT_SUMMARY_CHARS = 4000
 # 模板目标的任务内容即实例 goal（InstanceActivate.goal 上限），创建/更新时校验
 TEMPLATE_GOAL_MAX_CHARS = 20_000
 IN_FLIGHT = ("queued", "running")
@@ -310,9 +307,22 @@ def delete_task(db: Session, owner_id: str, task_id: str) -> None:
     db.commit()
 
 
+def _with_event_ids(db: Session, runs: list[SuperAssistantScheduledRun]) -> list[SuperAssistantScheduledRun]:
+    by_id = {run.id: run for run in runs}
+    for run in runs:
+        run.autoloopEventIds = []
+    if by_id:
+        links = db.execute(select(AutoLoopReceipt.scheduled_run_id, AutoLoopEvent.id).join(
+            AutoLoopEvent, AutoLoopEvent.receipt_id == AutoLoopReceipt.id,
+        ).where(AutoLoopReceipt.scheduled_run_id.in_(by_id)).order_by(AutoLoopEvent.seq))
+        for run_id, event_id in links:
+            by_id[run_id].autoloopEventIds.append(event_id)
+    return runs
+
+
 def list_runs(db: Session, owner_id: str, task_id: str, *, limit: int = 50) -> list[SuperAssistantScheduledRun]:
     _get_owned(db, owner_id, task_id)
-    return (
+    runs = (
         db.query(SuperAssistantScheduledRun)
         .filter(
             SuperAssistantScheduledRun.task_id == task_id,
@@ -322,6 +332,7 @@ def list_runs(db: Session, owner_id: str, task_id: str, *, limit: int = 50) -> l
         .limit(max(1, min(limit, 100)))
         .all()
     )
+    return _with_event_ids(db, runs)
 
 
 def get_run(db: Session, owner_id: str, task_id: str, run_id: str) -> SuperAssistantScheduledRun:
@@ -337,7 +348,7 @@ def get_run(db: Session, owner_id: str, task_id: str, run_id: str) -> SuperAssis
     )
     if run is None:
         raise ScheduledTaskNotFoundError("执行记录不存在")
-    return run
+    return _with_event_ids(db, [run])[0]
 
 
 def _fail_run_row(db: Session, run: SuperAssistantScheduledRun, now: datetime, error: str) -> None:
@@ -366,6 +377,8 @@ def _reap_stale_runs(db: Session, now: datetime) -> None:
             or_(
                 and_(
                     SuperAssistantScheduledRun.status == "queued",
+                    or_(SuperAssistantScheduledRun.conversation_id.isnot(None),
+                        SuperAssistantScheduledRun.instance_id.isnot(None)),
                     SuperAssistantScheduledRun.created_at < cutoff,
                 ),
                 and_(
@@ -390,27 +403,58 @@ def _reap_stale_runs(db: Session, now: datetime) -> None:
         _fail_run_row(db, run, now, REAP_ERROR)
 
 
+def _admit_queued_run(db: Session, run: SuperAssistantScheduledRun, now: datetime):
+    """CAS an unexecuted legacy run; admission and completion share one commit."""
+    changed = db.execute(update(SuperAssistantScheduledRun).where(
+        SuperAssistantScheduledRun.id == run.id,
+        SuperAssistantScheduledRun.status == "queued",
+        SuperAssistantScheduledRun.conversation_id.is_(None),
+        SuperAssistantScheduledRun.instance_id.is_(None),
+    ).values(status="running", started_at=now))
+    if changed.rowcount != 1:
+        return None
+    task = db.get(SuperAssistantScheduledTask, run.task_id)
+    if task is None:
+        raise ScheduledTaskNotFoundError("计划已删除")
+    _, event, _ = accept_scheduled_run(db, task, run)
+    run.status = "completed"
+    run.error = None
+    run.result_summary = "已生成AutoLoop事件，等待规则路由"
+    run.finished_at = now
+    db.flush()
+    dispatch = db.scalar(select(AutoLoopDispatch).where(AutoLoopDispatch.event_id == event.id))
+    return dispatch.id, dispatch.version, dispatch.state
+
+
+def _publish_admitted(work, dispatch_fn) -> None:
+    if work is None or work[2] != "pending":
+        return
+    try:
+        dispatch_fn(work[0], work[1])
+    except Exception:
+        # The broker may have accepted the message. The durable dispatch keeps
+        # its identity/version and the scanner retries after restart.
+        logger.exception("日程事件唤醒未确认 dispatch=%s", work[0])
+
+
 def _redispatch_queued(db: Session, now: datetime, dispatch_fn) -> int:
-    cutoff = now - QUEUED_REDISPATCH_AFTER
-    queued = (
-        db.query(SuperAssistantScheduledRun)
-        .filter(
-            SuperAssistantScheduledRun.status == "queued",
-            SuperAssistantScheduledRun.started_at.is_(None),
-            SuperAssistantScheduledRun.created_at <= cutoff,
-        )
-        .limit(50)
-        .all()
-    )
-    sent = 0
+    queued = db.scalars(select(SuperAssistantScheduledRun).where(
+        SuperAssistantScheduledRun.status == "queued",
+        SuperAssistantScheduledRun.conversation_id.is_(None),
+        SuperAssistantScheduledRun.instance_id.is_(None),
+        SuperAssistantScheduledRun.created_at <= now - QUEUED_REDISPATCH_AFTER,
+    ).order_by(SuperAssistantScheduledRun.created_at).limit(50)).all()
+    admitted = 0
     for run in queued:
         try:
-            dispatch_fn(run.id)
-            sent += 1
-        except Exception as exc:
-            _fail_run_row(db, run, now, f"派发失败：{exc}")
-            logger.exception("定时任务排队重派失败 run=%s", run.id)
-    return sent
+            work = _admit_queued_run(db, run, now)
+            db.commit()
+            admitted += int(work is not None)
+            _publish_admitted(work, dispatch_fn)
+        except Exception:
+            db.rollback()
+            logger.exception("日程排队记录接收失败 run=%s", run.id)
+    return admitted
 
 
 def _in_flight(db: Session, task_id: str) -> SuperAssistantScheduledRun | None:
@@ -471,253 +515,91 @@ def _notify(db: Session, *, run: SuperAssistantScheduledRun, task: SuperAssistan
 
 
 def dispatch_due_tasks(now: datetime | None = None) -> int:
-    """扫描到期计划并派发。返回本次尝试派发的条数。"""
-    from app.data_channel.pipeline_tasks.dispatch import dispatch_super_assistant_scheduled_run
+    """Admit due schedule slots; return the number durably admitted."""
+    from app.data_channel.pipeline_tasks.dispatch import dispatch_autoloop
 
     now = as_utc_naive(now or datetime.now(timezone.utc))
-    db = SessionLocal()
-    dispatched = 0
-    try:
+    with SessionLocal() as db:
         _reap_stale_runs(db, now)
-        dispatched += _redispatch_queued(db, now, dispatch_super_assistant_scheduled_run)
         db.commit()
-        due = (
-            db.query(SuperAssistantScheduledTask)
-            .filter(
-                SuperAssistantScheduledTask.enabled.is_(True),
-                SuperAssistantScheduledTask.next_run_at.isnot(None),
-                SuperAssistantScheduledTask.next_run_at <= now,
-            )
-            .order_by(SuperAssistantScheduledTask.next_run_at.asc())
-            .limit(50)
-            .all()
-        )
+        admitted = _redispatch_queued(db, now, dispatch_autoloop)
+        due = db.scalars(select(SuperAssistantScheduledTask).where(
+            SuperAssistantScheduledTask.enabled.is_(True),
+            SuperAssistantScheduledTask.next_run_at.isnot(None),
+            SuperAssistantScheduledTask.next_run_at <= now,
+        ).order_by(SuperAssistantScheduledTask.next_run_at).limit(50)).all()
         for task in due:
+            task_id = task.id
             try:
-                dispatched += _dispatch_one(db, task, now, dispatch_super_assistant_scheduled_run)
-            except Exception:  # noqa: BLE001 — 单条失败不影响其余
+                admitted += _dispatch_one(db, task, now, dispatch_autoloop)
+            except Exception:
                 db.rollback()
-                logger.exception("定时任务派发失败 task=%s", task.id)
-        return dispatched
-    finally:
-        db.close()
+                logger.exception("日程事件接收失败 task=%s", task_id)
+        return admitted
 
 
 def _dispatch_one(db: Session, task: SuperAssistantScheduledTask, now: datetime, dispatch_fn) -> int:
     slot = task.next_run_at
     if slot is None:
         return 0
+    next_run = (None if task.schedule_kind == "once" else compute_next_run_at(
+        kind=task.schedule_kind, after=now, run_at=task.run_at,
+        hour=task.hour, minute=task.minute, weekday=task.weekday,
+    ))
+    claimed = db.execute(update(SuperAssistantScheduledTask).where(
+        SuperAssistantScheduledTask.id == task.id,
+        SuperAssistantScheduledTask.enabled.is_(True),
+        SuperAssistantScheduledTask.next_run_at == slot,
+    ).values(next_run_at=next_run, enabled=next_run is not None,
+        last_dispatched_at=now, updated_at=now))
+    if claimed.rowcount != 1:
+        db.rollback()
+        return 0
     overdue = (now - slot) > OVERDUE_GRACE and task.schedule_kind != "once"
-    overlapping = _in_flight(db, task.id)
-    if overlapping:
+    if _in_flight(db, task.id):
         status, error = "skipped", "上次执行尚未结束，本次已跳过"
     elif overdue:
         status, error = "skipped", "错过触发窗口，已跳过补跑"
     else:
         status, error = "queued", None
-    if status == "skipped":
-        logger.info("定时任务跳过派发 task=%s slot=%s 原因=%s", task.id, slot, error)
     run = SuperAssistantScheduledRun(
-        task_id=task.id,
-        owner_id=task.owner_id,
-        scheduled_for=slot,
-        status=status,
-        error=error,
-        finished_at=now if status == "skipped" else None,
+        task_id=task.id, owner_id=task.owner_id, scheduled_for=slot,
+        status=status, error=error, finished_at=now if status == "skipped" else None,
     )
     db.add(run)
-    task.last_dispatched_at = now
-    task.updated_at = now
-    _advance_schedule(task, now)
     try:
+        db.flush()
+        work = _admit_queued_run(db, run, now) if status == "queued" else None
         db.commit()
     except IntegrityError:
         db.rollback()
-        existing = (
-            db.query(SuperAssistantScheduledRun)
-            .filter(
-                SuperAssistantScheduledRun.task_id == task.id,
-                SuperAssistantScheduledRun.scheduled_for == slot,
-            )
-            .first()
-        )
-        if existing is not None and existing.status == "queued":
-            try:
-                dispatch_fn(existing.id)
-                return 1
-            except Exception:
-                logger.exception("定时任务冲突槽位重派失败 run=%s", existing.id)
-        logger.info("定时任务时段已派发，跳过重复 task=%s slot=%s", task.id, slot)
+        # The slot's unique constraint is the final concurrent admission guard.
+        existing = db.scalar(select(SuperAssistantScheduledRun).where(
+            SuperAssistantScheduledRun.task_id == task.id,
+            SuperAssistantScheduledRun.scheduled_for == slot,
+        ))
+        if existing is None:
+            raise
         return 0
-    db.refresh(run)
-    if status != "queued":
-        return 0
-    try:
-        dispatch_fn(run.id)
-    except Exception as exc:
-        _fail_run_row(db, run, _now(), f"派发失败：{exc}")
-        db.commit()
-        logger.exception("定时任务 NATS 派发失败 run=%s", run.id)
-        return 0
-    return 1
+    _publish_admitted(work, dispatch_fn)
+    return int(work is not None)
 
 
 def execute_run(run_id: str) -> None:
-    """nats_executor 消费入口：认领 queued 行并无人值守跑完对话。"""
-    db = SessionLocal()
-    assistant_id = None
-    owner_id = None
-    conversation_id = None
-    task_title = None
-    task_id = None
-    try:
-        claimed = (
-            db.query(SuperAssistantScheduledRun)
-            .filter(
-                SuperAssistantScheduledRun.id == run_id,
-                SuperAssistantScheduledRun.status == "queued",
-            )
-            .update(
-                {"status": "running", "started_at": _now()},
-                synchronize_session=False,
-            )
-        )
-        db.commit()
-        if claimed != 1:
-            logger.info("定时任务执行未认领 run=%s", run_id)
-            return
+    """Preserve the old NATS seam, admitting only never-executed queued runs.
+
+    Historical running/terminal rows retain their existing remote identities.
+    A timeout never permits replaying the old conversation/template action.
+    """
+    from app.data_channel.pipeline_tasks.dispatch import dispatch_autoloop
+
+    with SessionLocal() as db:
         run = db.get(SuperAssistantScheduledRun, run_id)
         if run is None:
-            return
-        task = db.get(SuperAssistantScheduledTask, run.task_id)
-        if task is None:
-            _fail_run_row(db, run, _now(), "计划已删除")
-            db.commit()
-            return
-        if task.target_kind == "task_template":
-            scheduled_for = run.scheduled_for
-            db.close()
-            return _execute_template_target_run(run_id, task, scheduled_for)
-        conversation = SuperAssistantConversation(
-            owner_id=task.owner_id,
-            title=_conversation_title(task, run.scheduled_for),
-        )
-        db.add(conversation)
-        db.flush()
-        user_message = SuperAssistantMessage(
-            conversation_id=conversation.id,
-            role="user",
-            content=task.instruction,
-            status="complete",
-        )
-        assistant_message = SuperAssistantMessage(
-            conversation_id=conversation.id,
-            role="assistant",
-            content="",
-            status="streaming",
-        )
-        db.add_all([user_message, assistant_message])
-        run.conversation_id = conversation.id
-        db.flush()
-        from app.super_assistant.hindsight_memory import enqueue_message, get_settings
-
-        if user_message.content and get_settings(db, task.owner_id).enabled:
-            enqueue_message(
-                db, owner_id=task.owner_id, conversation_id=conversation.id,
-                message_id=user_message.id, role="user", content=user_message.content,
-                occurred_at=user_message.created_at,
-            )
+            return  # A deleted schedule/run has no work to admit.
+        work = _admit_queued_run(db, run, _now())
         db.commit()
-        assistant_id = assistant_message.id
-        owner_id = task.owner_id
-        conversation_id = conversation.id
-        task_title = task.title
-        task_id = task.id
-    finally:
-        db.close()
-
-    if not assistant_id or not owner_id or not conversation_id:
-        return
-
-    error_text = None
-    try:
-        for _ in stream_chat(
-            conversation_id=conversation_id,
-            owner_id=owner_id,
-            assistant_message_id=assistant_id,
-            requested_model_id=None,
-            agent_mode=True,
-            unattended=True,
-        ):
-            pass
-    except Exception as exc:  # noqa: BLE001 — 执行失败写回 run，不向上抛以免 NATS 空烧
-        error_text = str(exc)
-        logger.exception("定时任务执行失败 run=%s", run_id)
-
-    db = SessionLocal()
-    try:
-        run = db.get(SuperAssistantScheduledRun, run_id)
-        if run is None:
-            logger.warning("定时任务写回落空：运行记录已不存在 run=%s", run_id)
-            return
-        # 本进程刚跑完：仍是 running 照旧写终态；若执行期间被收割成
-        # 「执行超时未完成」，用真实终态覆盖并按真实结果补发一条更正通知
-        # （收割时的假失败通知不撤回，只追加；eventId 加 -corrected 后缀，
-        # 否则与收割通知同 eventId 不同 payload 会触发收件箱 ValueError）。
-        # skipped 与其他失败另有归属，不覆盖。
-        reaped = run.status == "failed" and run.error == REAP_ERROR
-        if run.status != "running" and not reaped:
-            logger.warning(
-                "定时任务写回跳过：状态已被他处变更 run=%s status=%s error=%s",
-                run_id, run.status, run.error,
-            )
-            return
-        task = db.get(SuperAssistantScheduledTask, task_id) if task_id else None
-        assistant = db.get(SuperAssistantMessage, assistant_id)
-        finished = _now()
-        run.finished_at = finished
-        if error_text:
-            run.status = "failed"
-            run.error = error_text[:2000]
-            if assistant and assistant.status == "streaming":
-                assistant.status = "error"
-                assistant.content = assistant.content or error_text
-        elif assistant is None or assistant.status != "complete":
-            run.status = "failed"
-            run.error = (assistant.content if assistant else None) or "执行未正常结束"
-            run.result_summary = (assistant.content or "")[:RESULT_SUMMARY_CHARS] if assistant else None
-        else:
-            run.status = "completed"
-            run.error = None
-            run.result_summary = (assistant.content or "")[:RESULT_SUMMARY_CHARS]
-        if reaped:
-            logger.info(
-                "定时任务收割误报已按真实终态覆盖 run=%s 终态=%s", run_id, run.status,
-            )
-        db.commit()
-        if task is not None:
-            kind = "notice" if run.status == "completed" else "alert"
-            title = (
-                f"定时任务已完成：{task_title}"
-                if run.status == "completed"
-                else f"定时任务失败：{task_title}"
-            )
-            summary = run.result_summary or run.error or ""
-            _notify(
-                db, run=run, task=task, kind=kind, title=title, summary=summary,
-                event_suffix="-corrected" if reaped else "",
-            )
-            db.commit()
-    finally:
-        db.close()
-
-
-def _fail_run_by_id(db: Session, run_id: str, error: str) -> None:
-    run = db.get(SuperAssistantScheduledRun, run_id)
-    if run is None:
-        return
-    _fail_run_row(db, run, _now(), error)
-    db.commit()
+    _publish_admitted(work, dispatch_autoloop)
 
 
 def _reconcile_template_run(
@@ -754,96 +636,3 @@ def _reconcile_template_run(
     )
     db.commit()
     return True
-
-
-def _execute_template_target_run(
-    run_id: str, task: SuperAssistantScheduledTask, scheduled_for: datetime,
-) -> None:
-    """模板目标执行：从模板拉起实例即视为本次触发完成（触发即完成语义），
-    实例自身的进度与成败在任务实例域查询；实例名沿用会话标题同款时间戳格式。"""
-    from fastapi import HTTPException
-
-    from app.task_instances import schemas as task_instance_schemas
-    from app.task_instances import service as task_instance_service
-
-    db = SessionLocal()
-    try:
-        template = (
-            db.query(TaskTemplate)
-            .filter(
-                TaskTemplate.id == task.target_template_id,
-                TaskTemplate.deleted_at.is_(None),
-            )
-            .first()
-        )
-        if template is None:
-            _fail_run_by_id(db, run_id, "流程模板不存在或已删除")
-            return
-        run = db.get(SuperAssistantScheduledRun, run_id)
-        if run is None:
-            return
-        owner = db.get(User, task.owner_id)
-        result = task_instance_service.activate_instance(
-            db,
-            task.target_template_id,
-            task_instance_schemas.InstanceActivate(
-                name=_conversation_title(task, scheduled_for),
-                goal=task.instruction,
-            ),
-            owner,
-            idempotency_key=f"sa-scheduled:{run_id}",
-        )
-        # activate_instance 内部已 commit，run 随会话过期重读；仅 running 行
-        # 写终态，收割误报照实覆盖并按真实结果补发 -corrected 更正通知
-        # （与超级助手目标写回守卫同款）
-        reaped = run.status == "failed" and run.error == REAP_ERROR
-        if run.status != "running" and not reaped:
-            logger.warning(
-                "定时任务模板目标写回跳过：状态已被他处变更 run=%s status=%s",
-                run_id, run.status,
-            )
-            return
-        run.status = "completed"
-        run.error = None
-        run.instance_id = result["id"]
-        run.result_summary = (
-            f"已按模板「{template.name}」创建实例「{result['name']}」，"
-            "进度与结果请在任务实例中查看"
-        )
-        run.finished_at = _now()
-        db.commit()
-        _notify(
-            db, run=run, task=task, kind="notice",
-            title=f"定时任务已完成：{task.title}",
-            summary=run.result_summary,
-            event_suffix="-corrected" if reaped else "",
-        )
-        db.commit()
-    except HTTPException as exc:
-        # activate_instance 以 HTTP 404 表达模板/版本缺失（触达前的软删竞态等，
-        # 均发生在引擎激活之前，实例不可能已创建）
-        db.rollback()
-        detail = exc.detail if isinstance(exc.detail, str) else "流程模板或其版本不存在或已删除"
-        logger.warning("定时任务模板目标执行失败 run=%s detail=%s", run_id, detail)
-        _fail_run_by_id(db, run_id, f"实例创建失败：{detail}")
-    except Exception as exc:  # noqa: BLE001 — 失败写回 run，不向上抛以免 NATS 空烧
-        db.rollback()
-        logger.exception("定时任务模板目标执行失败 run=%s", run_id)
-        # activate 内部自 commit：异常不代表实例未创建，先按幂等键对账补记
-        error_text = str(exc)[:2000]
-        try:
-            run = db.get(SuperAssistantScheduledRun, run_id)
-            if run is None or not _reconcile_template_run(db, run, task):
-                _fail_run_by_id(db, run_id, f"实例创建失败：{error_text}")
-        except Exception:
-            logger.exception("定时任务模板目标失败写回未完成 run=%s", run_id)
-    finally:
-        db.close()
-
-
-def _conversation_title(task: SuperAssistantScheduledTask, scheduled_for: datetime) -> str:
-    local = as_utc_naive(scheduled_for).replace(tzinfo=timezone.utc).astimezone(SHANGHAI)
-    stamp = f"{local.month:02d}-{local.day:02d} {local.hour:02d}:{local.minute:02d}"
-    base = task.title.strip() or "定时任务"
-    title = f"{base} · {stamp}"
-    return title[:200]

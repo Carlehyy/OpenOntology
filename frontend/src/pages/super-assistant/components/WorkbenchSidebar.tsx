@@ -3,7 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
   Archive, ArchiveRestore, Bell, Brain, ChevronRight, Clock, Download, History, Inbox, LayoutDashboard, ListChecks, LogOut,
-  Megaphone, Mic, Network, Pencil, Plug, Plus, Search, Sparkles, Trash2, Wrench, X,
+  Megaphone, Mic, Network, Pencil, Plug, Plus, Route, Search, Sparkles, Trash2, Wrench, X,
 } from 'lucide-react'
 
 import { notificationsApi } from '@/api/notifications'
@@ -40,6 +40,7 @@ interface WorkbenchSidebarProps {
   onSetArchived: (id: string, archived: boolean) => void
   onOpenSearch: () => void
   onOpenScheduled: () => void
+  onOpenRuleRouting: () => void
   onOpenTaskInstances: () => void
   /** 打开消息通知弹窗（仅 admin 入口可见） */
   onOpenNotifications: () => void
@@ -191,6 +192,7 @@ export default function WorkbenchSidebar({
   onSetArchived,
   onOpenSearch,
   onOpenScheduled,
+  onOpenRuleRouting,
   onOpenTaskInstances,
   onOpenNotifications,
   onIntegrationsSaved,
@@ -326,6 +328,9 @@ export default function WorkbenchSidebar({
         <button type="button" onClick={() => { onOpenScheduled(); onCloseMobile() }} className={actionItemClass}>
           <Clock size={16} className="shrink-0" /> 定时任务
         </button>
+        {hasMenuAccess(user, 'super_assistant') && <button type="button" onClick={() => { onOpenRuleRouting(); onCloseMobile() }} className={actionItemClass} data-workbench-rule-routing>
+          <Route size={16} className="shrink-0" /> 规则路由
+        </button>}
         {/* 任务实例：DAG 流程模板与自动化任务轨道（弹窗入口收归超级助手） */}
         <button
           type="button"

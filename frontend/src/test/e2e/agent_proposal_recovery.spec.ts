@@ -242,6 +242,8 @@ async function mockPlatform(page: Page, behavior: { get: () => GetBehavior; stat
       const item = page.locator(`[data-session-history-item="${id}"]`)
       await expect(item).toBeVisible()
       await item.getByRole('button').first().click()
+      await expect(page).toHaveURL(new RegExp(`[?&]conversation_id=${id}(?:&|$)`))
+      await expect(page.getByText(id === conversationA ? '把订单改成已发货' : '新会话提问', { exact: true })).toBeVisible()
     },
     setProposalGet: (mode: GetBehavior) => { behavior.get = () => mode },
     releaseParked,
@@ -530,8 +532,8 @@ test('prepare 幂等回放既有终态：不再 decide/execute，直接展示权
   expect(harness.mutationCount('execute')).toBe(0)
 })
 
-test('同挂载 A→B→A 旧 prepare 迟到：key 相同但代次已变，不得继续 decide/execute', async ({ page }) => {
-  const behavior = { get: (): GetBehavior => 'fulfill', state: () => preparedState(confirmationA) }
+test('同挂载 A→B→A 旧 prepare 迟到：key 相同但代次已变，只读核实后不得继续 decide/execute', async ({ page }) => {
+  const behavior = { get: (): GetBehavior => 'park', state: () => preparedState(confirmationA) }
   const harness = await mockPlatform(page, behavior, {
     recordA: false,
     sameProposalAcrossConversations: true,
@@ -552,13 +554,20 @@ test('同挂载 A→B→A 旧 prepare 迟到：key 相同但代次已变，不�
   await expect(confirm).toBeEnabled()
 
   harness.releaseParkedPrepare(preparedState(confirmationA))
-  await page.waitForTimeout(500)
+  await expect.poll(() => harness.proposalGetCount(confirmationA)).toBe(1)
+  await expect(card.getByTestId('proposal-recovery-banner')).toBeVisible()
+  await expect(confirm).toHaveCount(0)
   expect(harness.mutationCount('prepare')).toBe(1)
   expect(harness.mutationCount('decide')).toBe(0)
   expect(harness.mutationCount('execute')).toBe(0)
+
+  harness.setProposalGet('fulfill')
+  harness.releaseParked()
   await expect(confirm).toBeEnabled()
   await expect(card.getByText(/v22/)).toHaveCount(0)
   await expect(card.getByTestId('proposal-effects-title')).toContainText('预演效果 · 尚未落库')
+  expect(harness.mutationCount('decide')).toBe(0)
+  expect(harness.mutationCount('execute')).toBe(0)
 })
 
 test('旧 finally 不清同 key 新代次执行态', async ({ page }) => {

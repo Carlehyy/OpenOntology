@@ -380,6 +380,7 @@ def tool_schemas() -> list[dict[str, Any]]:
                     "title": {"type": "string", "description": "任务标题（必填，一句话概括）"},
                     "assignee": {"type": "string", "description": "指派对象：智能体名称或 ID，留空则不指派"},
                     "description": {"type": "string", "description": "任务详细描述（可选）"},
+                    "priority": {"type": "string", "enum": ["urgent", "high", "medium", "low", "none"], "description": "优先级；省略时使用 multica 默认值"},
                     "allow_duplicate": {"type": "boolean", "description": "同名活跃任务默认被拒绝（409）；确需重复创建时置 true"},
                 },
                 "required": ["title"],
@@ -569,6 +570,12 @@ def execute_tool(db: Session, owner_id: str, name: str, arguments: dict[str, Any
         else:
             agents = multica_client.list_agents(base_url, token, workspace_id)
             assignee_id, resolved_name = multica_client.match_agent(agents, assignee)
+    create_options = {}
+    if "priority" in arguments:
+        priority = arguments["priority"]
+        if priority not in ("urgent", "high", "medium", "low", "none"):
+            raise MulticaServiceError("创建任务失败：priority 无效")
+        create_options["priority"] = priority
     issue = multica_client.create_issue(
         base_url,
         token,
@@ -577,6 +584,7 @@ def execute_tool(db: Session, owner_id: str, name: str, arguments: dict[str, Any
         description=description,
         assignee_id=assignee_id,
         allow_duplicate=bool(arguments.get("allow_duplicate")),
+        **create_options,
     )
     issue_ref = _external_ref(issue)
     return json.dumps(

@@ -1,25 +1,15 @@
-"""定时任务 NATS 消息处理器（executor 进程内运行）。"""
+"""旧日程 NATS 入口：把尚未执行的 queued 记录交给 AutoLoop。"""
 from __future__ import annotations
 
 import asyncio
-import logging
-
-logger = logging.getLogger(__name__)
 
 
 async def run_scheduled_task_message(payload: dict) -> None:
-    """super_assistant.scheduled.run：无人值守执行一条到期计划。"""
-    run_id = str(payload.get("run_id") or "")
-    if not run_id:
-        logger.error("定时任务消息缺少 run_id，丢弃")
-        return
+    """提交接收事实后才返回；事务异常交给 executor NAK。"""
+    run_id = payload.get("run_id")
+    if not isinstance(run_id, str) or not run_id.strip():
+        raise ValueError("定时任务消息缺少 run_id")
 
     from app.super_assistant.scheduled_service import execute_run
 
-    def _run() -> None:
-        try:
-            execute_run(run_id)
-        except Exception:
-            logger.exception("定时任务执行器异常 run=%s", run_id)
-
-    await asyncio.to_thread(_run)
+    await asyncio.to_thread(execute_run, run_id)

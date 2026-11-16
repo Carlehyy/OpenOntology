@@ -12,6 +12,13 @@ describe('errorText', () => {
     assert.equal(errorText(null, '自定义兜底'), '自定义兜底')
   })
 
+  it('对象型错误取 message 或 code，始终返回可渲染字符串', () => {
+    assert.equal(errorText({ detail: { code: 'content_version_conflict', current: { status: 'pending_dispatch' } } }), 'content_version_conflict')
+    assert.equal(errorText({ detail: { code: 'state_conflict', message: '当前步骤不能关闭' } }), '当前步骤不能关闭')
+    assert.equal(errorText({ detail: { current: { status: 'sending' } } }, '操作未被接受'), '操作未被接受')
+    assert.equal(errorText({ detail: { message: { nested: true }, code: 409 }, message: { invalid: true } }), '操作失败')
+  })
+
   it('FastAPI 422 的数组 detail 折叠为可读字符串（防 toast 渲染非字符串导致整树白屏）', () => {
     const fastapi422 = {
       detail: [

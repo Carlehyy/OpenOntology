@@ -863,8 +863,9 @@ class ScheduledRunOut(ORMModel):
     id: str
     task_id: str
     conversation_id: str | None
-    # task_template 目标触发创建的任务实例 id；超级助手目标为 None
+    # 历史模板执行保留的实例关联；新日程只生成 AutoLoop 事件。
     instance_id: str | None
+    autoloopEventIds: list[str] = Field(default_factory=list)
     scheduled_for: datetime
     status: str
     error: str | None

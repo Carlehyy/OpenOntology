@@ -727,10 +727,27 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     all_paths = app.openapi()["paths"]
     for path, methods in memory_operations.items():
         assert set(all_paths[path]) == methods
+    # AutoLoop is an additive feature contract; retain the legacy fingerprint.
+    autoloop_operations = {
+        f"{prefix}/autoloop/rules": {"get", "post"},
+        f"{prefix}/autoloop/rules/{{identity}}": {"get", "patch", "delete"},
+        f"{prefix}/autoloop/rules/{{identity}}/preview": {"post"},
+        f"{prefix}/autoloop/rules/preview": {"post"},
+        f"{prefix}/autoloop/events": {"get"},
+        f"{prefix}/autoloop/events/{{identity}}": {"get"},
+        f"{prefix}/autoloop/decision-items": {"get"},
+        f"{prefix}/autoloop/decision-items/summary": {"get"},
+        f"{prefix}/autoloop/decision-items/{{identity}}": {"get"},
+        f"{prefix}/autoloop/decision-items/{{identity}}/decide": {"post"},
+        f"{prefix}/autoloop/decision-items/{{identity}}/mark-handled": {"post"},
+    }
+    assert {path: set(value) for path, value in all_paths.items()
+            if path.startswith(f"{prefix}/autoloop/")} == autoloop_operations
+    assert sum(map(len, autoloop_operations.values())) == 14
     paths = {
         path: value
         for path, value in all_paths.items()
-        if path.startswith(prefix) and path not in memory_operations
+        if path.startswith(prefix) and path not in memory_operations and path not in autoloop_operations
     }
     payload = json.dumps(
         paths,

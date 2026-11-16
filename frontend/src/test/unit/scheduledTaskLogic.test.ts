@@ -3,7 +3,7 @@ import { describe, it } from 'node:test'
 
 import type { ScheduledTask } from '../../api/superAssistant.ts'
 import {
-  STATUS_LABEL, WEEKDAYS, defaultDatetimeLocal, freshCreateForm, isCreateFormDirty,
+  STATUS_LABEL, WEEKDAYS, createScheduledPayload, defaultDatetimeLocal, editScheduledPayload, freshCreateForm, isCreateFormDirty,
   scheduleLabel, shanghaiDatetimeLocal, shanghaiIsoFromLocal, targetLabel, validateCreateForm,
 } from '../../pages/super-assistant/components/scheduledTaskLogic.ts'
 
@@ -180,23 +180,38 @@ describe('validateCreateForm（P0-4 字段级校验 + S-2/S-3 文案）', () => 
     assert.deepEqual(errors, { instruction: '请输入任务内容', timeOfDay: '请选择执行时间' })
   })
 
-  it('模板目标未选模板 → 「请选择流程模板」；超级助手目标不校验模板', () => {
-    const form = { ...freshCreateForm(), instruction: '例行汇总', target: 'task_template' as const }
-    assert.deepEqual(validateCreateForm(form, NOW), { templateId: '请选择流程模板' })
-    assert.deepEqual(validateCreateForm({ ...form, templateId: 'tpl-1' }, NOW), {})
-    assert.deepEqual(validateCreateForm({ ...freshCreateForm(), instruction: 'x' }, NOW), {})
+  it('历史模板目标不再参与事件化表单校验，保留未绑定模板和长内容', () => {
+    const form = { ...base(), target: 'task_template' as const, instruction: '长'.repeat(20_001) }
+    assert.deepEqual(validateCreateForm(form, NOW), {})
   })
 
-  it('模板目标任务内容超 2 万字（切换目标后的存量长文）→ 字段级拦截，不流到后端 400', () => {
-    const form = {
-      ...freshCreateForm(),
-      instruction: '长'.repeat(20_001),
-      target: 'task_template' as const,
-      templateId: 'tpl-1',
-    }
-    assert.equal(validateCreateForm(form, NOW).instruction, '流程模板目标的任务内容不能超过 20000 字')
-    // 超级助手目标同长度不拦（后端上限 10 万字）
-    assert.deepEqual(validateCreateForm({ ...form, target: 'super_assistant' }, NOW), {})
+  it('历史编辑允许保留过去的单次时间，但仍要求内容和时间', () => {
+    const form = { ...base(), onceAt: '2026-01-01T09:00' }
+    assert.deepEqual(validateCreateForm(form, NOW, true), {})
+    assert.deepEqual(validateCreateForm({ ...form, instruction: '', onceAt: '' }, NOW, true), {
+      instruction: '请输入任务内容', onceAt: '请选择执行时间',
+    })
+  })
+})
+
+describe('事件化计划载荷与历史编辑', () => {
+  it('新建仅发送事件内容和时间，不发送目标、模板或时区', () => {
+    const payload = createScheduledPayload({ ...freshCreateForm(), title: ' 日报 ', instruction: ' 汇总 ', kind: 'weekly', timeOfDay: '08:35', weekday: '2', target: 'task_template', templateId: 'legacy' })
+    assert.deepEqual(payload, { title: '日报', instruction: '汇总', schedule_kind: 'weekly', run_at: null, hour: 8, minute: 35, weekday: 2, enabled: true })
+  })
+
+  it('只改标题时不重写时间精度、历史模板或时区；未修改表单为空 PATCH', () => {
+    const baseline = { ...freshCreateForm(), title: '旧标题', instruction: '内容', onceAt: '2026-10-14T09:05', target: 'task_template' as const, templateId: 'legacy' }
+    assert.deepEqual(editScheduledPayload(baseline, baseline), {})
+    assert.deepEqual(editScheduledPayload({ ...baseline, title: ' 新标题 ' }, baseline), { title: '新标题' })
+  })
+
+  it('显式改时间只发送该时间；频率转换清除互斥字段', () => {
+    const baseline = { ...freshCreateForm(), kind: 'once' as const, onceAt: '2026-10-14T09:05' }
+    assert.deepEqual(editScheduledPayload({ ...baseline, onceAt: '2026-10-14T09:06' }, baseline), { run_at: '2026-10-14T09:06:00+08:00' })
+    assert.deepEqual(editScheduledPayload({ ...baseline, kind: 'daily', timeOfDay: '12:15' }, baseline), { schedule_kind: 'daily', run_at: null, hour: 12, minute: 15, weekday: null })
+    const weekly = { ...baseline, kind: 'weekly' as const, weekday: '1' }
+    assert.deepEqual(editScheduledPayload({ ...weekly, weekday: '4' }, weekly), { weekday: 4 })
   })
 })
 

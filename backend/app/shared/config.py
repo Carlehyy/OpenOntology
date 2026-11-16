@@ -208,6 +208,12 @@ class Settings(BaseSettings):
     super_assistant_agent_max_iterations: int = 50
     super_assistant_tool_result_chars: int = 30000
     super_assistant_approval_timeout_seconds: int = 180
+    # AutoLoop shares model records and encrypted per-owner Multica credentials.
+    autoloop_model_config_id: str = ""
+    autoloop_model_timeout_seconds: int = Field(default=30, ge=1, le=60)
+    autoloop_template_budget_ms: int = Field(default=1000, ge=1, le=10000)
+    autoloop_watchdog_interval_seconds: int = Field(default=120, ge=10, le=3600)
+    autoloop_recent_failure_hours: int = Field(default=24, ge=1, le=168)
     # 自我进化（反思/记忆，对标 small-rust-hermes）：micro 反思每
     # super_assistant_reflect_interval 轮触发一次，显式教学关键词绕过冷却；
     # 低于 auto_accept_min_confidence 或无冲突校验不通过的记忆候选进入人工审批。

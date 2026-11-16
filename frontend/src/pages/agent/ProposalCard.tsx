@@ -219,7 +219,20 @@ export function ProposalCard({ oid, proposal, conversationId }: {
       // 留痕 confirmationId（best-effort）：写失败不影响后续决定/执行
       pendingConfirmationIdsRef.current.set(keyAtStart, prepared.confirmationId)
       saveProposalConfirmationRecord(window.localStorage, keyAtStart, { confirmationId: prepared.confirmationId })
-      if (isStale()) return
+      if (isStale()) {
+        // 切回原会话后才收到 prepare：留痕出现晚于恢复 effect，主动只读核实。
+        // 若已有新执行，由新链独占恢复与结果，旧链不能覆盖它。
+        if (mountedRef.current && recoveryKeyRef.current === keyAtStart
+          && executeRunRef.current === runId) {
+          const generationAtRecovery = keyGenerationRef.current
+          setErrorState({ key: keyAtStart, message: RECOVERY_SYNC_MESSAGE })
+          void recoverAuthoritative(keyAtStart, prepared.confirmationId, () => mountedRef.current
+            && recoveryKeyRef.current === keyAtStart
+            && keyGenerationRef.current === generationAtRecovery
+            && executeRunRef.current === runId)
+        }
+        return
+      }
       // prepare 幂等回放可能带回既有权威状态（已执行/待审/unknown 等）：
       // 直接展示，绝不再次 decide/execute
       if (prepared.state !== 'prepared') {

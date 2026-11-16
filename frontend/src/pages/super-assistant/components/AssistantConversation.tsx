@@ -8,6 +8,10 @@ import {
 import {
   type SuperMessage, type ToolStep,
 } from '@/api/superAssistant'
+import type { AutoLoopRuleCreate } from '@/api/autoloop'
+import { Alert } from '@/components/ui/Alert'
+import { Button } from '@/components/ui/Button'
+import { extractRuleDraftBlocks, parseRuleDraft } from './autoloopLogic'
 import MermaidBlock from '@/components/MermaidBlock'
 import OntologyConfirmationSummary from '@/components/OntologyConfirmationSummary'
 import {
@@ -186,7 +190,8 @@ const markdownText = (child: unknown): string => {
   return ''
 }
 
-function MarkdownCodeBlock({ children }: { children: React.ReactNode }) {
+function MarkdownCodeBlock({ children, onFillRuleDraft }: { children: React.ReactNode; onFillRuleDraft?: (value: AutoLoopRuleCreate) => void }) {
+  const [draftError, setDraftError] = useState('')
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
   const resetTimerRef = useRef<number | undefined>(undefined)
   const codeBlockRef = useRef<HTMLPreElement>(null)
@@ -237,6 +242,7 @@ function MarkdownCodeBlock({ children }: { children: React.ReactNode }) {
       <pre ref={codeBlockRef} className="overflow-x-auto bg-[var(--color-bg-elevated)] p-4 text-[12px] leading-6 text-[var(--color-text-primary)] selection:bg-brand-mist selection:text-brand-ink">
         <code className="font-mono">{source}</code>
       </pre>
+      {onFillRuleDraft && <div className="space-y-2 border-t border-border p-3"><Button variant="outline" size="sm" onClick={() => { try { const draft = parseRuleDraft(source); setDraftError(''); onFillRuleDraft(draft) } catch (err) { setDraftError(err instanceof Error ? err.message : '规则草稿解析失败') } }}>填入规则表单</Button><p className="text-xs text-muted-foreground">填表后仍需审阅并确认创建规则。</p>{draftError && <Alert role="alert" variant="danger">{draftError}</Alert>}</div>}
     </div>
   )
 }
@@ -283,11 +289,23 @@ export const assistantMarkdownComponents: Components = {
 }
 
 /** 助手回复的 Markdown 渲染（会话纪要弹窗等同域复用） */
-export function AssistantMarkdown({ content }: { content: string }) {
+export function AssistantMarkdown({ content, onFillRuleDraft }: { content: string; onFillRuleDraft?: (value: AutoLoopRuleCreate) => void }) {
   const normalized = useMemo(() => normalizeAssistantMarkdown(content), [content])
+  const components = useMemo<Components>(() => {
+    if (!onFillRuleDraft) return assistantMarkdownComponents
+    const drafts = extractRuleDraftBlocks(content)
+    return { ...assistantMarkdownComponents, pre: ({ children }) => {
+      const child = Array.isArray(children) ? children[0] : children
+      const props = child && typeof child === 'object' && 'props' in child ? (child as { props?: { children?: unknown; className?: string } }).props : undefined
+      const source = markdownText(props?.children).replace(/\n$/, '')
+      const isDraft = props?.className === 'language-autoloop-rule-draft' && drafts.includes(source)
+      if (isMermaidEl(child)) return <>{children}</>
+      return <MarkdownCodeBlock onFillRuleDraft={isDraft ? onFillRuleDraft : undefined}>{children}</MarkdownCodeBlock>
+    } }
+  }, [content, onFillRuleDraft])
   return (
     <div className="min-w-0 break-words [overflow-wrap:anywhere]">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={assistantMarkdownComponents}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
         {normalized}
       </ReactMarkdown>
     </div>
@@ -327,7 +345,7 @@ function AssistantMessageActions({ text }: { text: string }) {
   )
 }
 
-export function ChatMessage({ message, onRetry }: { message: SuperMessage; onRetry?: () => void }) {
+export function ChatMessage({ message, onRetry, onFillRuleDraft }: { message: SuperMessage; onRetry?: () => void; onFillRuleDraft?: (value: AutoLoopRuleCreate) => void }) {
   const settled = message.status !== 'streaming'
   const display = useMemo(() => {
     const normalized = normalizeAssistantMarkdown(message.content || '')
@@ -357,7 +375,7 @@ export function ChatMessage({ message, onRetry }: { message: SuperMessage; onRet
         thinkingRound={message.thinking_round}
       />
       {display.answer
-        ? <AssistantMarkdown content={display.answer} />
+        ? <AssistantMarkdown content={display.answer} onFillRuleDraft={settled ? onFillRuleDraft : undefined} />
         : message.status === 'streaming'
           ? null
           : <p className="text-sm text-[var(--color-text-tertiary)]">助手未返回文本</p>}

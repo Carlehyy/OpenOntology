@@ -400,6 +400,71 @@ broker 合并；首条消息仍在工作队列时按未 ack 重投，queued 行�
 `AGENT_RUN_*` 限额登记在 `backend/app/ontologies/agent_runtime/limits.py`，
 可按环境变量覆盖。
 
+### AutoLoop 通知与日程事件
+
+外部通知仍使用既有 ingest key 鉴权、来源限制、附件和渠道扇出。通知正文、
+AutoLoop 接收事实、初始事件与待派发记录在同一数据库事务提交；
+`(source_system, eventId)` 重放关联原通知和原接收事实。owner 只取原通知所用
+key 的持久 `created_by` 且要求用户仍有效，保存 key 身份与来源限制；缺失归属
+时保留 `awaiting_owner` 供排查，不从正文、来源名称或 PAT 推导他人身份。
+可选 `threadId`（最多 512 字符）保存在接收事实中；重放保留原线程。历史绑定
+按 owner、实际 key、线程、工作区和连接器地址校验，线程字符串本身不授予
+Issue 权限。日程以持久任务 ID 作为来源线程。
+
+全部存量日程目标到期后只生成 AutoLoop 事件。原计划槽位、Asia/Shanghai
+时区、周期计算、一次性停用和执行历史继续保留；成功入站的 run 摘要为
+“已生成AutoLoop事件，等待规则路由”。该摘要表示事件已持久接收，业务规则
+和后续动作的结果应查对应 AutoLoop 事件。日程不再直接创建普通会话或激活
+任务模板实例。
+
+API 的 lifespan 在依赖就绪后启动日程扫描器（30 秒）和 AutoLoop 派发扫描器
+（5 秒），每个调度任务仅运行一个实例，停止时等待在途扫描完成并回收线程。
+派发通过现有 `PIPELINE_TASKS` stream 的
+`super_assistant.autoloop.dispatch` subject，独立 executor 订阅 durable
+`super-assistant-autoloop-dispatch`；原 subject/durable 继续保留。stream 保持
+工作队列、7 天保留和 10 分钟 Msg-Id 去重窗，遇到不相容的存量策略会报错，
+不静默覆盖。Web 派发循环在独立线程中运行并复用事件循环，生命周期结束时
+回收线程和连接。
+
+PostgreSQL 是接收与派发的事实源。Msg-Id 固定为
+`super_assistant.autoloop.dispatch:<dispatch_id>:<version>`；发布确认超时后保留
+原身份，由扫描器再次投递。executor 通过 CAS 领取默认 120 秒的 lease，过期
+lease 由扫描器恢复；旧 token 不能完成新领取的工作。重复消息查持久结果。
+路由领取后固定首条命中规则的版本和模板快照。命中规则按沙箱模板确定性生成
+任务或追加评论；未命中时由模型输出 `create_task`、`append_task`、
+`create_decision`、`ignore` 四种动作之一。校验失败、模型不可用或超时生成
+可见的 `kernel_fallback` 决策。若运行时路由不可用，派发仍保留 `pending` 与
+`error=awaiting_business_router`，追加 `routing.deferred` 并延迟 30 秒 NAK。
+生产排查同时检查接收事件、路由事实、派发 state/error、lease/attempts、
+逐步骤结果和 durable 的 pending/ack_pending。
+
+AutoLoop 扫描器每 5 秒恢复派发和动作步骤，看门狗默认每 120 秒读取评论、
+时间线和任务消息。`AUTOLOOP_MODEL_CONFIG_ID` 可指定精确启用的模型配置，
+显式无效 ID 不回退默认模型；`AUTOLOOP_MODEL_TIMEOUT_SECONDS` 默认 30 秒，
+范围 1–60。`AUTOLOOP_TEMPLATE_BUDGET_MS` 默认 1000，范围 1–10000，超限
+明确失败，不截断模板结果。`AUTOLOOP_WATCHDOG_INTERVAL_SECONDS` 默认 120，
+范围 10–3600；`AUTOLOOP_RECENT_FAILURE_HOURS` 默认 24，范围 1–168。
+看门狗只关注 blocked、in_review 以及具有近期失败和同次失败回收证据的 todo；
+远端未提供可归因的 task/cause 字段时，不能仅凭状态或相近时间推断失败回收。
+历史被远端截断时保留已有事项，待完整证据后再判定。相同证据和模型配置复用
+成功的持久研判；模型不可用时保留自由文本事项，后续扫描重新评估。模型配置
+修订或超时设置变化会使研判缓存失效。
+
+动作身份和步骤先提交再调用连接器。超时、发送中断或远端成功而本地提交失败
+保留为 unknown；没有权威请求身份或明确未执行证明时不会重发。明确未发送或
+HTTP 429 拒绝的步骤可复用原身份重试，最多尝试 3 次；已确认步骤不重复执行。
+连接器的 owner、服务地址与工作区必须仍与接收动作时的作用域一致。
+「已人工处理」仅原子关闭本地事项并消费证据水位，任何已认领、已发送、成功
+或结果未知的相关步骤都会阻止关闭。watchdog 决定只写普通评论；助手或内核
+决定生成唯一 `decision.answered` 事件，关联 Issue 评论作为独立步骤执行。
+
+进程收到 HTTP 403 `DAILY_LIMIT_EXCEEDED` 后立即停止 AutoLoop 后续扫描及调用，
+不自动重试；额度恢复需操作人员确认后重启相关 API/executor 进程。该停止标记
+为进程内状态，运维须同时检查所有运行实例。发布失败先恢复依赖并让原派发
+继续，不更换 dispatch 身份，不通过重复建通知规避去重，不直接修改 Issue 状态。
+真实模型质量和实际 Multica 部署的评论/执行效果需在授权的隔离环境单独验收。
+故障恢复执行方法见[测试手册](../development/testing.md#autoloop-事务入站与派发恢复)。
+
 ### 数据任务池：源端增量游标（水位）
 
 数据任务可选声明「增量游标列」（`cursor_column`，必须是流水线发布契约

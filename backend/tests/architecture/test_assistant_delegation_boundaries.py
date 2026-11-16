@@ -44,7 +44,7 @@ def _forbidden_imports(
                 for prefix in forbidden_prefixes
             ):
                 violations.append(
-                    f"{path.relative_to(BACKEND_DIR)}:{line} imports "
+                    f"{path.relative_to(BACKEND_DIR).as_posix()}:{line} imports "
                     f"{imported_module}"
                 )
     return violations
@@ -59,6 +59,21 @@ _SUPER_ASSISTANT_IMPORT_EXCEPTIONS = {
     ("app/super_assistant/ontology_tools.py",
      "app.ontologies.agent_runtime.assistant_facade"),
 }
+
+
+def test_exception_paths_are_portable_and_new_dependency_edges_remain_forbidden(tmp_path, monkeypatch):
+    monkeypatch.setitem(globals(), "BACKEND_DIR", tmp_path)
+    package = tmp_path / "app" / "super_assistant"
+    package.mkdir(parents=True)
+    allowed = package / "ontology_tools.py"
+    allowed.write_text("import app.ontologies.agent_runtime.assistant_facade\n", encoding="utf-8")
+    new_edge = package / "new_tool.py"
+    new_edge.write_text("import app.ontologies.agent_runtime.assistant_facade\n", encoding="utf-8")
+    violations = _forbidden_imports([allowed, new_edge], ("app.ontologies",))
+    assert all("\\" not in item for item in violations)
+    assert _excepted(violations[0]) in _SUPER_ASSISTANT_IMPORT_EXCEPTIONS
+    assert [item for item in violations if _excepted(item) not in _SUPER_ASSISTANT_IMPORT_EXCEPTIONS] == [
+        "app/super_assistant/new_tool.py:1 imports app.ontologies.agent_runtime.assistant_facade"]
 
 
 def test_super_assistant_does_not_import_ontology_or_exploration():
