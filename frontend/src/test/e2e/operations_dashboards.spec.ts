@@ -772,6 +772,77 @@ test('看板工作台：预览先续签再挂同源 kiosk iframe，全屏依据 
   }
 })
 
+test('看板工作台：预览弹窗全屏/关闭按钮同构浅底深字配色（明暗两态）', async ({ page }) => {
+  await mockSession(page, admin)
+  const state = newState([makeCard({ id: 'dash-button-tone', name: '配色看板' })])
+  const records = newRecords()
+  await mockDashboards(page, state, records)
+  await mockGrafanaPages(page)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await gotoWorkbench(page)
+
+  const openPreview = async () => {
+    await page.getByRole('button', { name: '预览 配色看板' }).click()
+    await expect(page.getByTestId('dashboard-preview-iframe')).toBeVisible()
+    return page.getByRole('dialog')
+  }
+
+  // 两按钮统一「浅底 + 深字 + 35% 同色系边框」，仅语义色不同（token 明暗成对维护）
+  const tone = {
+    light: {
+      fullscreenBg: 'rgb(232, 245, 233)',
+      fullscreenText: 'rgb(45, 138, 78)',
+      fullscreenBorder: /rgba?\(45,\s*138,\s*78,\s*0\.35\)|color\(srgb[^)]*\/\s*0\.35\)/,
+      closeBg: 'rgb(253, 232, 232)',
+      closeText: 'rgb(194, 59, 59)',
+      closeBorder: /rgba?\(194,\s*59,\s*59,\s*0\.35\)|color\(srgb[^)]*\/\s*0\.35\)/,
+    },
+    dark: {
+      fullscreenBg: 'rgba(63, 185, 80, 0.14)',
+      fullscreenText: 'rgb(63, 185, 80)',
+      fullscreenBorder: /rgba?\(63,\s*185,\s*80,\s*0\.35\)|color\(srgb[^)]*\/\s*0\.35\)/,
+      closeBg: 'rgba(229, 83, 75, 0.14)',
+      closeText: 'rgb(229, 83, 75)',
+      closeBorder: /rgba?\(229,\s*83,\s*75,\s*0\.35\)|color\(srgb[^)]*\/\s*0\.35\)/,
+    },
+  }
+
+  const assertTones = async (dialog: Locator, values: typeof tone.light) => {
+    const fullscreen = dialog.getByTestId('dashboard-preview-fullscreen')
+    const close = dialog.getByTestId('dashboard-preview-close')
+    // 全屏=浅绿底+深绿字，关闭=浅红底+深红字
+    await expect(fullscreen).toHaveCSS('background-color', values.fullscreenBg)
+    await expect(fullscreen).toHaveCSS('color', values.fullscreenText)
+    await expect(close).toHaveCSS('background-color', values.closeBg)
+    await expect(close).toHaveCSS('color', values.closeText)
+    // 边框为 35% 同色系语义色（color-mix 计算值按浏览器序列化形态匹配）
+    await expect(fullscreen).toHaveCSS('border-color', values.fullscreenBorder)
+    await expect(close).toHaveCSS('border-color', values.closeBorder)
+    // 除颜色外完全同构：同边框宽度与圆角
+    await expect(fullscreen).toHaveCSS('border-width', '1px')
+    await expect(close).toHaveCSS('border-width', '1px')
+    const fullscreenRadius = await fullscreen.evaluate(node => getComputedStyle(node).borderRadius)
+    const closeRadius = await close.evaluate(node => getComputedStyle(node).borderRadius)
+    expect(closeRadius).toBe(fullscreenRadius)
+  }
+
+  const dialog = await openPreview()
+  await assertTones(dialog, tone.light)
+  await dialog.getByTestId('dashboard-preview-close').click()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+
+  // 深色档：.dark 覆盖同一组 token，两按钮色值成对翻转
+  await page.evaluate(() => {
+    localStorage.setItem('theme', JSON.stringify({ state: { theme: 'dark' }, version: 0 }))
+  })
+  await page.reload()
+  await gotoWorkbench(page)
+  const darkDialog = await openPreview()
+  await assertTones(darkDialog, tone.dark)
+  await darkDialog.getByTestId('dashboard-preview-close').click()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+})
+
 test('看板工作台：预览续签失败不挂 iframe，重试成功后恢复', async ({ page }) => {
   await mockSession(page, admin)
   const state = newState([makeCard({ id: 'dash-preview-error', name: '预览失败看板' })])

@@ -30,6 +30,16 @@ import {
 
 type PreviewPhase = 'signing' | 'ready' | 'error'
 
+/**
+ * 头部两个动作按钮（全屏/关闭）除语义色外完全同构：同 size、同结构、
+ * 同圆角/内边距，统一为「浅底 + 深字 + 35% 同色系边框」（DESIGN.md §2.3，
+ * token 明暗成对维护）。类名必须写完整字面量，Tailwind 无法收集拼接类。
+ */
+const FULLSCREEN_BUTTON_CLASS =
+  'border border-[color-mix(in_srgb,var(--color-success)_35%,transparent)] bg-[var(--color-success-bg)] text-[var(--color-success)] hover:bg-[var(--color-success-bg)] hover:text-[var(--color-success)]'
+const CLOSE_BUTTON_CLASS =
+  'border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-[var(--color-danger-bg)] text-[var(--color-danger)] hover:bg-[var(--color-danger-bg)] hover:text-[var(--color-danger)]'
+
 interface DashboardPreviewDialogProps {
   dashboard: OperationsDashboardCard
   onClose: () => void
@@ -150,7 +160,8 @@ export function DashboardPreviewDialog({
             <Button
               type="button"
               size="sm"
-              variant="outline"
+              variant="ghost"
+              className={FULLSCREEN_BUTTON_CLASS}
               onClick={() => void toggleFullscreen()}
               aria-label={isFullscreen ? '退出全屏' : '全屏'}
               data-testid="dashboard-preview-fullscreen"
@@ -162,6 +173,7 @@ export function DashboardPreviewDialog({
               type="button"
               size="sm"
               variant="ghost"
+              className={CLOSE_BUTTON_CLASS}
               onClick={close}
               aria-label="关闭预览"
               data-testid="dashboard-preview-close"
