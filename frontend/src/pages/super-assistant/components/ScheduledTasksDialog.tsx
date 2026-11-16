@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
 import {
-  ArrowLeft, CheckCircle2, Clock, Loader2, Pause, Play, Plus, Trash2, XCircle,
+  ArrowLeft, CheckCircle2, Clock, Loader2, Pause, Pencil, Play, Plus, Trash2, XCircle,
 } from 'lucide-react'
 
 import {
@@ -12,7 +11,6 @@ import {
   type ScheduledTargetKind,
   type ScheduledTask,
 } from '@/api/superAssistant'
-import { taskInstancesApi, type TemplateSummary } from '@/api/taskInstances'
 import { Alert } from '@/components/ui/Alert'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { LoadingState } from '@/components/ui/LoadingState'
@@ -25,8 +23,8 @@ import { toast } from 'sonner'
 import { DialogShell } from './AssistantConfiguration'
 import { errorText } from './assistantPanelUtils'
 import {
-  STATUS_LABEL, TEMPLATE_GOAL_MAX_CHARS, WEEKDAYS, freshCreateForm, isCreateFormDirty,
-  scheduleLabel, targetLabel, shanghaiDatetimeLocal, shanghaiIsoFromLocal, validateCreateForm,
+  STATUS_LABEL, WEEKDAYS, freshCreateForm, isCreateFormDirty,
+  scheduleLabel, targetLabel, shanghaiDatetimeLocal, createScheduledPayload, editScheduledPayload, validateCreateForm,
   type CreateFormState, type CreateFormValidation,
 } from './scheduledTaskLogic'
 
@@ -37,6 +35,7 @@ export default function ScheduledTasksDialog({
   onClose,
   onOpenConversation,
   onOpenTaskInstance,
+  onOpenAutoLoopEvent,
 }: {
   open: boolean
   initialTaskId?: string | null
@@ -44,6 +43,7 @@ export default function ScheduledTasksDialog({
   onClose: () => void
   onOpenConversation: (conversationId: string) => void
   onOpenTaskInstance: (instanceId: string) => void
+  onOpenAutoLoopEvent: (eventId: string) => void
 }) {
   const [tasks, setTasks] = useState<ScheduledTask[]>([])
   const [runs, setRuns] = useState<ScheduledRun[]>([])
@@ -51,6 +51,7 @@ export default function ScheduledTasksDialog({
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [creating, setCreating] = useState(false)
+  const [editingTask, setEditingTask] = useState<ScheduledTask | null>(null)
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(initialTaskId ?? null)
   const [selectedRunId, setSelectedRunId] = useState<string | null>(initialRunId ?? null)
   const [runDetail, setRunDetail] = useState<ScheduledRun | null>(null)
@@ -69,14 +70,6 @@ export default function ScheduledTasksDialog({
   const [onceAt, setOnceAt] = useState(() => freshCreateForm().onceAt)
   const [timeOfDay, setTimeOfDay] = useState('09:00')
   const [weekday, setWeekday] = useState('0')
-
-  // 模板目标选择数据：复用任务实例弹窗的缓存键，两个入口共享同一份模板列表
-  const templatesQuery = useQuery({
-    queryKey: ['task-instances', 'templates', ''],
-    queryFn: () => taskInstancesApi.listTemplates(''),
-    enabled: open && creating,
-  })
-  const templates: TemplateSummary[] = templatesQuery.data ?? []
 
   const selectedTask = useMemo(
     () => tasks.find(item => item.id === selectedTaskId) || null,
@@ -105,6 +98,7 @@ export default function ScheduledTasksDialog({
     setFormBaseline(fresh)
     setValidation({})
     setError('')
+    setEditingTask(null)
   }, [])
 
   const refreshTasks = useCallback(async () => {
@@ -184,24 +178,10 @@ export default function ScheduledTasksDialog({
 
   if (!open) return null
 
-  const payloadFromForm = () => {
-    const [hour, minute] = timeOfDay.split(':').map(part => Number(part))
-    return {
-      title: title.trim(),
-      instruction: instruction.trim(),
-      target_kind: target,
-      target_template_id: target === 'task_template' ? templateId : null,
-      schedule_kind: kind,
-      run_at: kind === 'once' ? shanghaiIsoFromLocal(onceAt) : null,
-      hour: kind === 'once' ? null : hour,
-      minute: kind === 'once' ? null : minute,
-      weekday: kind === 'weekly' ? Number(weekday) : null,
-      enabled: true,
-    }
-  }
-
   const create = async () => {
-    const errors = validateCreateForm({ title, instruction, target, templateId, kind, onceAt, timeOfDay, weekday })
+    if (saving) return
+    const form = { title, instruction, target, templateId, kind, onceAt, timeOfDay, weekday }
+    const errors = validateCreateForm(form, new Date(), !!editingTask)
     setValidation(errors)
     if (errors.instruction || errors.templateId || errors.onceAt || errors.timeOfDay) {
       // 清掉上一轮后端报错，避免顶部横幅与新字段错误同屏矛盾
@@ -210,23 +190,23 @@ export default function ScheduledTasksDialog({
     }
     setSaving(true); setError('')
     try {
-      const created = await superAssistantApi.createScheduledTask(payloadFromForm())
+      const created = editingTask
+        ? await superAssistantApi.updateScheduledTask(editingTask.id, editScheduledPayload(form, formBaseline))
+        : await superAssistantApi.createScheduledTask(createScheduledPayload(form))
       await refreshTasks()
       setCreating(false)
       setSelectedTaskId(created.id)
       setSelectedRunId(null)
       resetForm()
-      toast.success('定时任务已创建', {
-        description: target === 'task_template'
-          ? '到点后会按所选模板创建实例，进度与结果在任务实例中查看。'
-          : '到点后会在后台执行，结果会出现在本弹窗的执行记录里。',
+      toast.success(editingTask ? '定时任务已保存' : '定时任务已创建', {
+        description: '到点后产生事件，由规则或助手处理。可在执行记录中查看关联事件。',
       })
     } catch (err) {
       // axios 超时（ECONNABORTED）无 response，errorText 会透出英文技术串；
       // 客户端超时不回滚服务端，须提示用户先查列表避免重复创建
       setError((err as { code?: string })?.code === 'ECONNABORTED'
-        ? '创建请求超时。请稍后重开列表确认是否已创建，避免重复创建。'
-        : errorText(err, '创建失败'))
+        ? editingTask ? '保存请求超时。请稍后刷新列表确认保存结果。' : '创建请求超时。请稍后重开列表确认是否已创建，避免重复创建。'
+        : errorText(err, editingTask ? '保存失败' : '创建失败'))
     } finally {
       setSaving(false)
     }
@@ -268,12 +248,26 @@ export default function ScheduledTasksDialog({
     setRunDetail(null)
   }
 
+  const openEdit = (task: ScheduledTask) => {
+    const value: CreateFormState = {
+      title: task.title, instruction: task.instruction, target: task.target_kind,
+      templateId: task.target_template_id ?? '', kind: task.schedule_kind,
+      onceAt: task.run_at ? shanghaiDatetimeLocal(new Date(task.run_at)) : freshCreateForm().onceAt,
+      timeOfDay: `${String(task.hour ?? 9).padStart(2, '0')}:${String(task.minute ?? 0).padStart(2, '0')}`,
+      weekday: String(task.weekday ?? 0),
+    }
+    setTitle(value.title); setInstruction(value.instruction); setTarget(value.target); setTemplateId(value.templateId)
+    setKind(value.kind); setOnceAt(value.onceAt); setTimeOfDay(value.timeOfDay); setWeekday(value.weekday)
+    setFormBaseline(value); setValidation({}); setError(''); setEditingTask(task); setCreating(true)
+    setSelectedRunId(null); setRunDetail(null)
+  }
+
   /** 离开创建态的统一守卫（P0-2，对抗审查收敛为单点）：关闭弹窗、左栏切换任务、
    *  重新开始创建，脏草稿一律先弹「放弃创建？」确认，放弃后执行原本要做的去向；
    *  saving 中所有离开动作改为 toast 反馈（请求已有 30s 超时，不会永久锁死） */
   const exitCreate = (after: () => void) => {
     if (saving) {
-      toast.info('正在创建定时任务，请稍候…')
+      toast.info(editingTask ? '正在保存定时任务，请稍候…' : '正在创建定时任务，请稍候…')
       return
     }
     if (creating && isCreateFormDirty(
@@ -315,26 +309,13 @@ export default function ScheduledTasksDialog({
     setKind(value)
     setValidation({})
   }
-  const changeTarget = (value: ScheduledTargetKind) => {
-    setTarget(value)
-    // 切回超级助手清掉残留选择：否则脏判定假阳性（可见表单与默认一致却拦放弃），
-    // 且再切回模板时旧选择无声复现；载荷侧本就发 null，状态与语义对齐
-    if (value === 'super_assistant') setTemplateId('')
-    setValidation(current => ({ ...current, templateId: undefined }))
-  }
-  const changeTemplateId = (value: string) => {
-    setTemplateId(value)
-    if (validation.templateId) setValidation(current => ({ ...current, templateId: undefined }))
-  }
 
   return (
     <>
       <DialogShell
         size="wide"
         title="定时任务"
-        description={creating && target === 'task_template'
-          ? '到点后按所选模板创建实例并运行；需要人工把关的节点会停下等你处理。'
-          : '到点后自动执行。需要确认的操作会跳过并记录，不会代替你确认。'}
+        description="到点后产生事件，交给规则或助手处理。执行记录保留关联事件与处理结果。"
         onClose={requestClose}
         icon={<Clock size={18} />}
         contentClassName="h-[min(82dvh,44rem)]"
@@ -398,12 +379,7 @@ export default function ScheduledTasksDialog({
               <CreateForm
                 title={title} setTitle={setTitle}
                 instruction={instruction} setInstruction={changeInstruction}
-                target={target} setTarget={changeTarget}
-                templateId={templateId} setTemplateId={changeTemplateId}
-                templates={templates}
-                templatesLoading={templatesQuery.isLoading}
-                templatesError={templatesQuery.isError}
-                onRetryTemplates={() => void templatesQuery.refetch()}
+                editingTask={editingTask}
                 kind={kind} setKind={changeKind}
                 onceAt={onceAt} setOnceAt={changeOnceAt}
                 timeOfDay={timeOfDay} setTimeOfDay={changeTimeOfDay}
@@ -419,12 +395,14 @@ export default function ScheduledTasksDialog({
                 onBack={() => { setSelectedRunId(null); setRunDetail(null) }}
                 onOpenConversation={id => { onOpenConversation(id); onClose() }}
                 onOpenTaskInstance={id => { onOpenTaskInstance(id); onClose() }}
+                onOpenAutoLoopEvent={onOpenAutoLoopEvent}
               />
             ) : selectedTask ? (
               <TaskDetail
                 task={selectedTask}
                 runs={runs}
                 onToggle={() => void toggleEnabled(selectedTask)}
+                onEdit={() => openEdit(selectedTask)}
                 onDelete={() => setDeleting(selectedTask)}
                 onOpenRun={id => setSelectedRunId(id)}
               />
@@ -444,9 +422,7 @@ export default function ScheduledTasksDialog({
         onConfirm={() => void confirmDelete()}
         loading={deletePending}
         title="删除定时任务？"
-        description={deleting?.target_kind === 'task_template'
-          ? '计划会停止，已创建的实例仍在任务实例中。'
-          : '计划会停止，已经生成的会话还在近期会话里。'}
+        description="计划会停止，已生成的运行记录和事件仍会保留。"
         confirmText="删除"
         variant="danger"
       />
@@ -455,7 +431,7 @@ export default function ScheduledTasksDialog({
         open={discardOpen}
         onClose={() => { setDiscardOpen(false); setPendingExit(null) }}
         onConfirm={discardCreate}
-        title="放弃创建？"
+        title={editingTask ? '放弃修改？' : '放弃创建？'}
         description="已填写的内容将丢失。"
         confirmText="放弃"
         cancelText="继续编辑"
@@ -466,8 +442,7 @@ export default function ScheduledTasksDialog({
 }
 
 function CreateForm({
-  title, setTitle, instruction, setInstruction, target, setTarget,
-  templateId, setTemplateId, templates, templatesLoading, templatesError, onRetryTemplates,
+  title, setTitle, instruction, setInstruction, editingTask,
   kind, setKind,
   onceAt, setOnceAt, timeOfDay, setTimeOfDay, weekday, setWeekday, validation, saving, onSubmit,
 }: {
@@ -475,14 +450,7 @@ function CreateForm({
   setTitle: (value: string) => void
   instruction: string
   setInstruction: (value: string) => void
-  target: ScheduledTargetKind
-  setTarget: (value: ScheduledTargetKind) => void
-  templateId: string
-  setTemplateId: (value: string) => void
-  templates: TemplateSummary[]
-  templatesLoading: boolean
-  templatesError: boolean
-  onRetryTemplates: () => void
+  editingTask: ScheduledTask | null
   kind: ScheduledKind
   setKind: (value: ScheduledKind) => void
   onceAt: string
@@ -519,10 +487,7 @@ function CreateForm({
           value={instruction}
           onChange={event => setInstruction(event.target.value)}
           rows={8}
-          maxLength={target === 'task_template' ? TEMPLATE_GOAL_MAX_CHARS : undefined}
-          placeholder={target === 'task_template'
-            ? '到点后会以这段内容作为任务目标，按所选模板的流程创建并运行实例。'
-            : '到点后助手会按这段任务内容在后台执行，例如：汇总昨天的待办并给出建议。'}
+          placeholder="作为到期事件的内容，例如：汇总昨天的待办并给出建议。"
           aria-describedby={validation.instruction ? 'scheduled-instruction-error' : undefined}
           className={`mt-1.5 w-full rounded-lg border bg-background px-3 py-2 text-sm shadow-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring ${validation.instruction ? 'border-[var(--color-danger)]' : 'border-input'}`}
         />
@@ -531,16 +496,8 @@ function CreateForm({
             {validation.instruction}
           </p>
         )}
-        {target === 'super_assistant' && (
-          <p className="mt-1.5 text-xs leading-5 text-[var(--color-text-tertiary)]">
-            浏览器、委派等平台写操作到点不会自动执行；外部工具是否直接执行，取决于其「需要确认」设置。
-          </p>
-        )}
-        {target === 'task_template' && (
-          <p className="mt-1.5 text-xs leading-5 text-[var(--color-text-tertiary)]">
-            到点后按模板创建实例并自动开跑；需要人工把关的节点会停下等你处理。
-          </p>
-        )}
+        <p className="mt-1.5 text-xs leading-5 text-[var(--color-text-tertiary)]">规则路由统一处理到期事件，需要你决定的内容会进入决策事项。</p>
+        {editingTask && <p className="mt-1.5 text-xs text-[var(--color-text-tertiary)]">原始目标：{targetLabel(editingTask)} · 时区：{editingTask.timezone}。保存保留该记录。</p>}
       </div>
       {/* 触发设置：短下拉并排成网格，标题与内容两行核心输入之后的紧凑区 */}
       <div className="grid grid-cols-2 gap-3">
@@ -555,65 +512,16 @@ function CreateForm({
             </SelectContent>
           </Select>
         </div>
-        <div className="min-w-0 space-y-1.5">
-          <span className="block text-xs font-medium text-[var(--color-text-primary)]">触发对象</span>
-          <Select value={target} onValueChange={value => setTarget(value as ScheduledTargetKind)}>
-            <SelectTrigger aria-label="触发对象" className="h-9 w-full text-sm"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="super_assistant">超级助手</SelectItem>
-              <SelectItem value="task_template">流程模板</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-        {target === 'task_template' && (
-          <div className="col-span-2 space-y-1.5">
-            <span className="block text-xs font-medium text-[var(--color-text-primary)]">流程模板</span>
-            <Select value={templateId} onValueChange={setTemplateId}>
-              <SelectTrigger
-                aria-label="流程模板"
-                aria-invalid={validation.templateId ? true : undefined}
-                aria-describedby={validation.templateId ? 'scheduled-template-error' : undefined}
-                className={`h-9 w-full text-sm ${validation.templateId ? 'border-[var(--color-danger)]' : ''}`}
-              >
-                <SelectValue placeholder={templatesLoading ? '模板加载中…' : '请选择流程模板'} />
-              </SelectTrigger>
-              <SelectContent>
-                {templates.map(template => (
-                  <SelectItem key={template.id} value={template.id}>{template.name}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            {validation.templateId && (
-              <p id="scheduled-template-error" role="alert" className="text-xs leading-5 text-[var(--color-danger)]">{validation.templateId}</p>
-            )}
-            {templatesError ? (
-              <p className="text-xs leading-5 text-[var(--color-danger)]">
-                模板加载失败。
-                <button
-                  type="button"
-                  onClick={onRetryTemplates}
-                  className="ml-1 text-brand-ink underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                >
-                  重试
-                </button>
-              </p>
-            ) : !templatesLoading && templates.length === 0 && !validation.templateId && (
-              <p className="text-xs leading-5 text-[var(--color-text-tertiary)]">
-                还没有可用的流程模板，可先在「任务实例」中创建后再来设置。
-              </p>
-            )}
-          </div>
-        )}
         {kind === 'once' && (
           <div className="col-span-2">
             <label htmlFor="scheduled-once-at" className="block text-xs font-medium text-[var(--color-text-primary)]">
-              执行时间
+              执行时间（北京时间）
             </label>
             <input
               id="scheduled-once-at"
               type="datetime-local"
               value={onceAt}
-              min={shanghaiDatetimeLocal()}
+              min={editingTask ? undefined : shanghaiDatetimeLocal()}
               onChange={event => setOnceAt(event.target.value)}
               aria-describedby={validation.onceAt ? 'scheduled-once-at-error' : undefined}
               className={inputClass(validation.onceAt)}
@@ -668,7 +576,7 @@ function CreateForm({
           onClick={onSubmit}
           className="inline-flex h-9 min-w-28 items-center justify-center gap-2 rounded-lg bg-brand px-4 text-xs font-medium text-white hover:bg-brand-deep focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {saving ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />} 创建
+          {saving ? <Loader2 size={13} className="animate-spin" /> : editingTask ? <Pencil size={13} /> : <Plus size={13} />} {editingTask ? '保存修改' : '创建'}
         </button>
       </div>
     </div>
@@ -676,11 +584,12 @@ function CreateForm({
 }
 
 function TaskDetail({
-  task, runs, onToggle, onDelete, onOpenRun,
+  task, runs, onToggle, onEdit, onDelete, onOpenRun,
 }: {
   task: ScheduledTask
   runs: ScheduledRun[]
   onToggle: () => void
+  onEdit: () => void
   onDelete: () => void
   onOpenRun: (id: string) => void
 }) {
@@ -694,10 +603,11 @@ function TaskDetail({
           <div className="min-w-0 flex-1">
             <h3 ref={titleRef} tabIndex={-1} className="truncate text-sm font-semibold text-[var(--color-text-primary)] outline-none">{task.title}</h3>
             <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
-              {scheduleLabel(task)} · 触发对象：{targetLabel(task)}
+              {scheduleLabel(task)} · 到期事件 · {task.timezone} · 原始目标：{targetLabel(task)}
               {task.next_run_at && task.enabled && task.schedule_kind !== 'once' ? ` · 下次 ${formatDateTime(task.next_run_at)}` : ''}
             </p>
           </div>
+          <button type="button" onClick={onEdit} className="inline-flex h-8 items-center gap-1 rounded-md border border-[var(--color-border)] px-2.5 text-xs hover:bg-[var(--color-bg-hover)]"><Pencil size={12} />编辑</button>
           <button
             type="button"
             onClick={onToggle}
@@ -741,13 +651,14 @@ function TaskDetail({
 }
 
 function RunDetail({
-  task, run, onBack, onOpenConversation, onOpenTaskInstance,
+  task, run, onBack, onOpenConversation, onOpenTaskInstance, onOpenAutoLoopEvent,
 }: {
   task: ScheduledTask
   run: ScheduledRun | null
   onBack: () => void
   onOpenConversation: (id: string) => void
   onOpenTaskInstance: (id: string) => void
+  onOpenAutoLoopEvent: (id: string) => void
 }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -784,6 +695,7 @@ function RunDetail({
           {!run.result_summary && !run.error && run.status === 'running' && (
             <p className="mt-6 text-center text-xs text-[var(--color-text-tertiary)]">正在后台执行…</p>
           )}
+          {!!run.autoloopEventIds?.length && <div className="mt-4 space-y-2"><p className="text-xs text-[var(--color-text-tertiary)]">关联事件</p>{run.autoloopEventIds.map(id => <button type="button" key={id} onClick={() => onOpenAutoLoopEvent(id)} className="block max-w-full break-all rounded-lg border border-[var(--color-border)] px-3 py-2 text-left text-xs hover:bg-[var(--color-bg-hover)]">查看事件 {id}</button>)}</div>}
           {run.conversation_id && (
             <button
               type="button"

@@ -32,6 +32,7 @@ SUPER_ASSISTANT_REFLECT_FULL_SUBJECT = "super_assistant.reflect.full"
 SUPER_ASSISTANT_REFLECT_FOCUSED_SUBJECT = "super_assistant.reflect.focused"
 SUPER_ASSISTANT_SCHEDULED_RUN_SUBJECT = "super_assistant.scheduled.run"
 SUPER_ASSISTANT_MEMORY_SYNC_SUBJECT = "super_assistant.memory.sync"
+AUTOLOOP_DISPATCH_SUBJECT = "super_assistant.autoloop.dispatch"
 # 本体聊天后台回合：Web 只负责把已落库的 run_id 送达，执行在 executor 进程。
 ONTOLOGY_ASSISTANT_RUN_SUBJECT = "ontology.assistant.run"
 ASSISTANT_EVAL_AUTOPILOT_SUBJECT = "assistant_evaluation.autopilot.cycle"
@@ -65,6 +66,7 @@ PIPELINE_STREAM_SUBJECTS = (
     # 只能追加：本体助手聊天后台回合（run_id 已落库后再派发）
     ONTOLOGY_ASSISTANT_RUN_SUBJECT,
     SUPER_ASSISTANT_MEMORY_SYNC_SUBJECT,
+    AUTOLOOP_DISPATCH_SUBJECT,
 )
 
 # 进程内缓存：每个进程只在首次派发时确保一次 Stream
@@ -185,11 +187,12 @@ async def _dispatch(
 # loop」（同步 def 端点跑线程池则没事）——数据集导入曾因此全线 503。
 # 独立循环线程对两种调用上下文都安全。
 _dispatch_loop: asyncio.AbstractEventLoop | None = None
-_dispatch_loop_lock = threading.Lock()
+_dispatch_thread: threading.Thread | None = None
+_dispatch_loop_lock = threading.RLock()
 
 
 def _get_dispatch_loop() -> asyncio.AbstractEventLoop:
-    global _dispatch_loop
+    global _dispatch_loop, _dispatch_thread
     with _dispatch_loop_lock:
         if _dispatch_loop is None or _dispatch_loop.is_closed():
             loop = asyncio.new_event_loop()
@@ -198,9 +201,70 @@ def _get_dispatch_loop() -> asyncio.AbstractEventLoop:
                 name="nats-dispatch-loop",
                 daemon=True,
             )
-            thread.start()
-            _dispatch_loop = loop
+            ready = threading.Event()
+            loop.call_soon(ready.set)
+            try:
+                thread.start()
+                if not ready.wait(timeout=5):
+                    raise RuntimeError("NATS dispatch loop did not start")
+            except BaseException:
+                if thread.ident is not None:
+                    loop.call_soon_threadsafe(loop.stop)
+                    thread.join(timeout=5)
+                if not thread.is_alive():
+                    loop.close()
+                raise
+            _dispatch_loop, _dispatch_thread = loop, thread
         return _dispatch_loop
+
+
+def _submit_dispatch(coroutine):
+    # Scheduling and lifecycle teardown share a lock: no publish can be queued
+    # between the final drain and loop.stop(). Waiting happens outside the lock.
+    with _dispatch_loop_lock:
+        try:
+            return asyncio.run_coroutine_threadsafe(coroutine, _get_dispatch_loop())
+        except BaseException:
+            coroutine.close()
+            raise
+
+
+def shutdown_dispatch_loop() -> None:
+    """Stop after producer schedulers; retain durable work on unknown outcomes."""
+    global _dispatch_loop, _dispatch_thread, _stream_ensured
+    with _dispatch_loop_lock:
+        loop, thread = _dispatch_loop, _dispatch_thread
+        if loop is None:
+            return
+        if thread is threading.current_thread():
+            raise RuntimeError("dispatch loop must be stopped by its owning API thread")
+
+        async def finish_pending():
+            pending = asyncio.all_tasks(loop) - {asyncio.current_task()}
+            if pending:
+                _, unfinished = await asyncio.wait(pending, timeout=30)
+                if unfinished:
+                    logger.warning("NATS shutdown left %s unconfirmed tasks; durable work remains recoverable", len(unfinished))
+                    for task in unfinished:
+                        task.cancel()
+                    await asyncio.gather(*unfinished, return_exceptions=True)
+            await loop.shutdown_asyncgens()
+            await loop.shutdown_default_executor(timeout=5)
+
+        try:
+            if loop.is_running():
+                asyncio.run_coroutine_threadsafe(finish_pending(), loop).result(timeout=40)
+        finally:
+            if not loop.is_closed():
+                loop.call_soon_threadsafe(loop.stop)
+            if thread is not None:
+                thread.join(timeout=5)
+                if thread.is_alive():
+                    raise RuntimeError("NATS dispatch loop did not terminate")
+            if not loop.is_closed():
+                loop.close()
+            _dispatch_loop, _dispatch_thread = None, None
+            _stream_ensured = False
 
 
 def _dispatch_sync(subject: str, payload: dict, msg_id: str) -> None:
@@ -212,11 +276,21 @@ def _dispatch_sync(subject: str, payload: dict, msg_id: str) -> None:
             "后台任务派发失败：未配置 NATS_URL（JetStream 消息通道），"
             "请在环境配置中显式设置后重试"
         )
-    future = asyncio.run_coroutine_threadsafe(
-        _dispatch(subject, payload, nats_url, msg_id),
-        _get_dispatch_loop(),
-    )
+    future = _submit_dispatch(_dispatch(subject, payload, nats_url, msg_id))
     future.result(timeout=15)
+
+
+def dispatch_autoloop(dispatch_id: str, version: int) -> None:
+    """Publish only a persisted dispatch identity/version; retries reuse Msg-Id."""
+    if not isinstance(dispatch_id, str) or not dispatch_id.strip():
+        raise ValueError("AutoLoop dispatch_id is required")
+    if type(version) is not int or version < 1:
+        raise ValueError("AutoLoop dispatch version must be positive")
+    _dispatch_sync(
+        AUTOLOOP_DISPATCH_SUBJECT,
+        {"dispatch_id": dispatch_id, "version": version},
+        f"{AUTOLOOP_DISPATCH_SUBJECT}:{dispatch_id}:{version}",
+    )
 
 
 def dispatch_task(subject: str, payload: dict) -> None:
@@ -260,9 +334,8 @@ def _dispatch_sync_to_stream(subject: str, payload: dict, msg_id: str, stream_na
     nats_url = (settings.nats_url or "").strip()
     if not nats_url:
         raise RuntimeError("后台任务派发失败：未配置 NATS_URL（JetStream 消息通道）")
-    future = asyncio.run_coroutine_threadsafe(
+    future = _submit_dispatch(
         _dispatch(subject, payload, nats_url, msg_id, stream_name=stream_name),
-        _get_dispatch_loop(),
     )
     future.result(timeout=15)
 

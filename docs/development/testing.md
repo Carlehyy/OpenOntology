@@ -61,6 +61,47 @@ OPENONTOLOGY_OPERATIONS_REPORTS_E2E=1 ENVIRONMENT=test \
 编辑、SQL 试跑、筛选后的表格值及 Hash 深链。沿用下文的隔离栈启动方式，通过
 `PLAYWRIGHT_API_URL` 和 `VITE_API_PROXY_TARGET` 指向隔离 API。
 
+### AutoLoop 事务入站与派发恢复
+
+通知、日程和派发测试纳入正式 pytest suite；SQLite 合同测试与真实 PostgreSQL、
+NATS 证据分别记录。真实测试需由执行者预留独占资源，数据库与 NATS 只接受
+loopback 端点。PostgreSQL URL 使用专用数据库且不携带 `search_path` 参数；
+fixture 为每个测试创建随机 `al_it_<uuid>` schema，并在退出时只清理该 schema。
+连接凭据从执行环境注入，不写入命令行、报告或版本库。
+
+```bash
+ENVIRONMENT=test \
+AUTOLOOP_TEST_POSTGRES_URL=<已预留的隔离-PostgreSQL-URL> \
+TEST_NATS_URL=nats://127.0.0.1:<已预留的非默认端口> \
+AUTOLOOP_TEST_NATS_EXCLUSIVE=1 \
+AUTOLOOP_TEST_RESOURCE_LEDGER=<绝对路径的-PG-资源账本.jsonl> \
+AUTOLOOP_TEST_NATS_LEDGER=<绝对路径的-NATS-资源账本.jsonl> \
+uv run --directory backend pytest -q --disable-warnings \
+  tests/super_assistant/autoloop \
+  tests/super_assistant/test_scheduled_tasks.py tests/notifications \
+  tests/data_channel/test_pipeline_nats_executor.py \
+  tests/data_channel/test_pipeline_task_dispatch.py tests/architecture
+```
+
+真实 NATS 测试使用生产契约 `PIPELINE_TASKS` stream 和对应 subject/durable，
+因此必须独占一个初始无此 stream 的隔离实例。`AUTOLOOP_TEST_NATS_EXCLUSIVE=1`
+声明执行者已获得该独占范围；遇到现存 stream 或未登记 consumer 时测试失败并
+保留现场，不接管已有资源。测试逐项记录新建、重连和清理的精确名称，结束后
+删除本次自有 consumer/stream、确认残留为空并关闭客户端及派发线程。需要把
+资源记录归属到执行任务时，可注入 `AUTOLOOP_TEST_TASK_ID` 和
+`AUTOLOOP_TEST_ATTEMPT_ID`；账本写入 `.artifacts/` 或 CI artifact。
+
+故障场景覆盖 broker 已接收但发布确认丢失、同一 durable 重连重投、并发重复
+投递，以及子进程在 PostgreSQL lease 提交后直接退出而未 ACK 的恢复。测试
+核对原始事件、派发身份、broker sequence、过期 lease 与 stale token，不能
+用“publish 返回成功”或 APScheduler job 无异常代替这些结果。尚未接入业务
+规则路由时，工作保持可见的 `awaiting_business_router`，延迟 NAK；仅有已持久化
+终态才走 ACK。该阶段证据不代表四类业务动作已执行。
+
+未提供相应端点时，真实测试明确 skip；验收报告须单列这些 skip，不能作为
+PostgreSQL/NATS 通过证据。新增测试后仍须执行本节开头的全量后端回归与
+`--store-durations --clean-durations`，提交实测时长表。
+
 ## 本地配置中心
 
 ```bash

@@ -2,11 +2,17 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import os
+from contextlib import asynccontextmanager
+from pathlib import Path
 import sys
+import tempfile
 import threading
 import time
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -404,6 +410,7 @@ def test_handler_registry_covers_all_stream_subjects():
         "integrated-sync-executor",
         "ontology-assistant-run-executor",
         "sa-memory-sync",
+        "super-assistant-autoloop-dispatch",
     }
     assert nats_executor._CONSUMER_DURABLE == "pipeline-executor"
 
@@ -747,7 +754,7 @@ async def test_run_subscribes_each_subject_with_own_durable(
 
     run_task = asyncio.ensure_future(executor.run())
     deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and len(subscriptions) < 20:
+    while time.monotonic() < deadline and len(subscriptions) < 21:
         await asyncio.sleep(0.02)
     executor.request_shutdown()
     await asyncio.wait_for(run_task, timeout=5)
@@ -769,14 +776,15 @@ async def test_run_subscribes_each_subject_with_own_durable(
         ("integrated.sync", "integrated-sync-executor"),
         ("ontology.assistant.run", "ontology-assistant-run-executor"),
         ("super_assistant.memory.sync", "sa-memory-sync"),
+        ("super_assistant.autoloop.dispatch", "super-assistant-autoloop-dispatch"),
         ("sa.execution.run.*", "sa-kernel-v1"),
         ("sa.execution.call.*", "sa-call-v1"),
         ("sa.execution.reconcile", "sa-reconciler-v1"),
         ("sa.plugin.reply.*", "sa-plugin-reply-v1"),
         ]
-    assert all(stream == "PIPELINE_TASKS" for _s, _d, stream, _c in subscriptions[:16])
-    assert all(stream == "SA_EXECUTION_V1" for _s, _d, stream, _c in subscriptions[16:19])
-    assert subscriptions[19][2] == "SA_PLUGIN_RUNNER_V1"
+    assert all(stream == "PIPELINE_TASKS" for _s, _d, stream, _c in subscriptions[:17])
+    assert all(stream == "SA_EXECUTION_V1" for _s, _d, stream, _c in subscriptions[17:20])
+    assert subscriptions[20][2] == "SA_PLUGIN_RUNNER_V1"
     # ack_wait=60s 与 20s 续约间隔配套；max_deliver 不设上限（-1）——
     # 丢一条 kernel 派发消息等于 Run 挂死到 deadline，瞬时故障靠 nak
     # delay=5s 退避而不是丢弃兜底。
@@ -827,26 +835,290 @@ async def test_heartbeat_file_keeps_fresh_mtime(executor, monkeypatch, tmp_path)
     assert time.time() - heartbeat.stat().st_mtime < 5
 
 
-@pytest.mark.skipif(
-    not __import__("os").environ.get("TEST_NATS_URL"),
-    reason="TEST_NATS_URL 未设置，跳过真实 NATS 集成测试",
-)
+_owned_nats_consumers = None
+
+
+def _record_nats_resource(operation, **details):
+    target = os.getenv("AUTOLOOP_TEST_NATS_LEDGER")
+    if target:
+        path = Path(target)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "operation": operation,
+                "taskId": os.getenv("AUTOLOOP_TEST_TASK_ID"),
+                "attemptId": os.getenv("AUTOLOOP_TEST_ATTEMPT_ID"),
+                "recordedAt": time.time(), **details,
+            }) + "\n")
+
+
+def _reserved_nats_url():
+    raw = os.getenv("TEST_NATS_URL")
+    if not raw:
+        pytest.skip("TEST_NATS_URL 未设置，跳过真实 NATS 集成测试")
+    url = urlsplit(raw)
+    if (url.scheme != "nats" or url.hostname not in {"127.0.0.1", "localhost", "::1"}
+            or url.port in {None, 4222} or url.username or url.password):
+        pytest.fail("真实 NATS 测试只接受已预留的非默认 loopback 端口")
+    if os.getenv("AUTOLOOP_TEST_NATS_EXCLUSIVE") != "1":
+        pytest.fail("canonical NATS 测试要求 AUTOLOOP_TEST_NATS_EXCLUSIVE=1 独占授权")
+    return raw
+
+
+@asynccontextmanager
+async def _owned_pipeline_stream():
+    """Serialize canonical stream ownership across pytest worker processes."""
+    identity = hashlib.sha256(_reserved_nats_url().encode()).hexdigest()[:20]
+    path = Path(tempfile.gettempdir()) / f"autoloop-nats-{identity}.lock"
+    with path.open("a+b") as handle:
+        if handle.seek(0, 2) == 0:
+            handle.write(b"\0")
+            handle.flush()
+        deadline = time.monotonic() + 180
+        while True:
+            try:
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    pytest.fail("canonical NATS test resource lock timed out")
+                await asyncio.sleep(0.05)
+        try:
+            async with _pipeline_stream_scope() as resources:
+                yield resources
+        finally:
+            handle.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@asynccontextmanager
+async def _pipeline_stream_scope():
+    """Create canonical resources only when absent, delete exact owned names."""
+    import nats
+    from nats.js.errors import NotFoundError
+    from app.data_channel.pipeline_tasks import dispatch
+
+    global _owned_nats_consumers
+    assert _owned_nats_consumers is None, "canonical NATS scopes cannot overlap"
+    dispatch.shutdown_dispatch_loop()
+    nc = await nats.connect(_reserved_nats_url(), connect_timeout=3)
+    _owned_nats_consumers = set()
+    js = nc.jetstream()
+    owned = False
+    try:
+        try:
+            await js.stream_info(dispatch.PIPELINE_STREAM)
+        except NotFoundError:
+            pass
+        else:
+            pytest.fail("PIPELINE_TASKS 已存在：拒绝接管未登记的 NATS 资源")
+        _record_nats_resource("reserved", stream=dispatch.PIPELINE_STREAM,
+                              subjects=list(dispatch.PIPELINE_STREAM_SUBJECTS))
+        await dispatch.ensure_pipeline_stream(js)
+        owned = True
+        info = await js.stream_info(dispatch.PIPELINE_STREAM)
+        _record_nats_resource("created", stream=dispatch.PIPELINE_STREAM,
+                              subjects=info.config.subjects)
+        yield nc, js
+    finally:
+        dispatch.shutdown_dispatch_loop()
+        try:
+            if owned:
+                consumers = await js.consumers_info(dispatch.PIPELINE_STREAM)
+                actual = {consumer.name for consumer in consumers}
+                unexpected = actual - _owned_nats_consumers
+                if unexpected:
+                    _record_nats_resource("unexpected_consumers", stream=dispatch.PIPELINE_STREAM,
+                                          consumers=sorted(unexpected))
+                    pytest.fail("canonical stream 出现未登记 consumer：保留现场并停止清理")
+                for name in sorted(actual):
+                    await js.delete_consumer(dispatch.PIPELINE_STREAM, name)
+                    _record_nats_resource("deleted", stream=dispatch.PIPELINE_STREAM,
+                                          consumer=name)
+                await js.delete_stream(dispatch.PIPELINE_STREAM)
+                _record_nats_resource("deleted", stream=dispatch.PIPELINE_STREAM)
+                with pytest.raises(NotFoundError):
+                    await js.stream_info(dispatch.PIPELINE_STREAM)
+                _record_nats_resource("residual_absent", stream=dispatch.PIPELINE_STREAM)
+        finally:
+            _owned_nats_consumers = None
+            await nc.drain()
+
+
+async def _owned_consumer(js, subject, durable, *, ack_wait=1):
+    from app.data_channel.pipeline_tasks.dispatch import PIPELINE_STREAM
+    from nats.js.api import ConsumerConfig
+
+    assert _owned_nats_consumers is not None, "consumer requires an owned stream scope"
+    first = durable not in _owned_nats_consumers
+    if first:
+        _record_nats_resource("reserved", stream=PIPELINE_STREAM, consumer=durable,
+                              subject=subject)
+    subscription = await js.pull_subscribe(subject, durable=durable, stream=PIPELINE_STREAM,
+        config=ConsumerConfig(ack_wait=ack_wait, max_deliver=None))
+    _owned_nats_consumers.add(durable)
+    _record_nats_resource("created" if first else "reconnected", stream=PIPELINE_STREAM,
+                          consumer=durable, subject=subject)
+    return subscription
+
+
+async def _consumer_drained(js, durable):
+    from app.data_channel.pipeline_tasks.dispatch import PIPELINE_STREAM
+
+    deadline = time.monotonic() + 10
+    while True:
+        info = await js.consumer_info(PIPELINE_STREAM, durable)
+        if info.num_pending == 0 and info.num_ack_pending == 0:
+            return info
+        assert time.monotonic() < deadline, (
+            f"consumer 未清零: pending={info.num_pending} ack_pending={info.num_ack_pending}"
+        )
+        await asyncio.sleep(0.05)
+
+
+def _autoloop_subscription():
+    from app.data_channel.pipeline_tasks.dispatch import AUTOLOOP_DISPATCH_SUBJECT
+
+    return next(item for item in nats_executor._handler_registry()
+                if item[0] == AUTOLOOP_DISPATCH_SUBJECT)
+
+
+def test_autoloop_real_nats_unknown_publish_and_durable_redelivery(monkeypatch, db):
+    """Real broker + persisted work: accepted timeout, duplicate, NAK and restart."""
+    from nats.errors import TimeoutError as NatsTimeoutError
+    from sqlalchemy import select
+    from sqlalchemy.orm import sessionmaker
+    from app.data_channel.pipeline_tasks import dispatch
+    from app.super_assistant.autoloop import dispatching
+    from app.super_assistant.autoloop.models import AutoLoopDispatch, AutoLoopEvent
+    from tests.super_assistant.autoloop.test_dispatching import _admit
+
+    sessions = sessionmaker(bind=db.get_bind(), expire_on_commit=False)
+    _, event_id, identity, version = _admit(sessions)
+    monkeypatch.setattr("app.config.settings.nats_url", _reserved_nats_url())
+    monkeypatch.setattr(dispatching, "SessionLocal", sessions)
+    monkeypatch.setattr(dispatching, "business_router", None)
+    # Exercise real delayed NAK without waiting the production 30s interval.
+    monkeypatch.setattr(dispatching.RoutingDeferred, "retry_after", 0.1)
+    subject, durable, handler = _autoloop_subscription()
+
+    async def consume():
+        async with _owned_pipeline_stream() as (nc, js):
+            subscription = await _owned_consumer(js, subject, durable)
+            publications = []
+
+            def accepted_but_confirmation_lost(dispatch_id, dispatch_version):
+                dispatch.dispatch_autoloop(dispatch_id, dispatch_version)
+                publications.append((dispatch_id, dispatch_version))
+                raise TimeoutError("fault: broker accepted but confirmation lost")
+
+            assert await asyncio.to_thread(dispatching.scan_pending,
+                session_factory=sessions, publish=accepted_but_confirmation_lost) == 0
+            with sessions() as fresh:
+                work = fresh.get(AutoLoopDispatch, identity)
+                assert work.state == "pending" and work.version == version
+            # A second publication retains Nats-Msg-Id and broker stream sequence.
+            assert await asyncio.to_thread(dispatching.scan_pending,
+                session_factory=sessions) == 1
+            assert publications == [(identity, version)]
+            stream = await js.stream_info(dispatch.PIPELINE_STREAM)
+            assert stream.state.messages == 1 and stream.state.last_seq == 1
+            [message] = await subscription.fetch(1, timeout=5)
+            first_sequence = message.metadata.sequence.stream
+            first_body = message.data
+            assert message.headers["Nats-Msg-Id"] == f"{subject}:{identity}:{version}"
+            await PipelineExecutor()._process_message(message, handler, subject)
+            await nc.flush()
+            info = await js.consumer_info(dispatch.PIPELINE_STREAM, durable)
+            assert info.num_ack_pending == 1
+            with sessions() as fresh:
+                work = fresh.get(AutoLoopDispatch, identity)
+                assert work.state == "pending" and work.error == "awaiting_business_router"
+                assert work.event_id == event_id and work.attempts == 1
+                deferred_version = work.version
+                assert fresh.scalar(select(AutoLoopEvent).where(
+                    AutoLoopEvent.type == "routing.deferred")).action == "pending"
+
+            await subscription.unsubscribe()
+            subscription = await _owned_consumer(js, subject, durable)
+            [duplicate] = await subscription.fetch(1, timeout=5)
+            assert duplicate.data == first_body
+            assert duplicate.metadata.sequence.stream == first_sequence
+            assert duplicate.metadata.num_delivered >= 2
+            await PipelineExecutor()._process_message(duplicate, handler, subject)
+            await nc.flush()
+            with sessions() as fresh:
+                work = fresh.get(AutoLoopDispatch, identity)
+                assert work.version == deferred_version and work.attempts == 1
+            # A visible terminal fact can be ACKed by a newly created executor.
+            with sessions() as fresh:
+                fresh.get(AutoLoopDispatch, identity).state = "done"
+                fresh.commit()
+            [terminal] = await subscription.fetch(1, timeout=5)
+            await PipelineExecutor()._process_message(terminal, handler, subject)
+            await nc.flush()
+            await _consumer_drained(js, durable)
+            with pytest.raises(NatsTimeoutError):
+                await subscription.fetch(1, timeout=0.2)
+
+    asyncio.run(consume())
+
+
+def test_autoloop_real_nats_concurrent_duplicate_deliveries(monkeypatch, db):
+    """Distinct broker deliveries of one DB identity contend under dispatch CAS."""
+    from sqlalchemy import func, select
+    from sqlalchemy.orm import sessionmaker
+    from app.super_assistant.autoloop import dispatching
+    from app.super_assistant.autoloop.models import AutoLoopDispatch, AutoLoopEvent
+    from tests.super_assistant.autoloop.test_dispatching import _admit
+
+    sessions = sessionmaker(bind=db.get_bind(), expire_on_commit=False)
+    _, _, identity, version = _admit(sessions)
+    monkeypatch.setattr(dispatching, "SessionLocal", sessions)
+    monkeypatch.setattr(dispatching, "business_router", None)
+    subject, durable, handler = _autoloop_subscription()
+
+    async def consume():
+        async with _owned_pipeline_stream() as (nc, js):
+            subscription = await _owned_consumer(js, subject, durable)
+            body = json.dumps({"dispatch_id": identity, "version": version}).encode()
+            # Inject duplication outside the publisher's dedup window/identity;
+            # DB CAS, rather than broker deduplication, must resolve it.
+            for suffix in ("a", "b"):
+                await js.publish(subject, body, headers={"Nats-Msg-Id": f"{identity}:{suffix}"})
+            messages = await subscription.fetch(2, timeout=5)
+            await asyncio.gather(*(PipelineExecutor()._process_message(message, handler, subject)
+                                   for message in messages))
+            await nc.flush()
+            info = await js.consumer_info("PIPELINE_TASKS", durable)
+            assert info.num_ack_pending == 2
+            with sessions() as fresh:
+                work = fresh.get(AutoLoopDispatch, identity)
+                assert work.attempts == 1 and work.error == "awaiting_business_router"
+                assert fresh.scalar(select(func.count()).select_from(AutoLoopEvent).where(
+                    AutoLoopEvent.type == "routing.deferred")) == 1
+
+    asyncio.run(consume())
+
+
 def test_dispatch_to_executor_end_to_end(monkeypatch):
     """真实 NATS：派发 → executor 消费执行 → 消息 ack、consumer 无积压。"""
-    import os
-
-    from app.data_channel.pipeline_tasks import dispatch as dispatch_module
     from app.data_channel.pipeline_tasks import engine as task_engine
     from app.data_channel.pipeline_tasks.dispatch import (
         PIPELINE_EXECUTE_SUBJECT,
-        PIPELINE_STREAM,
         dispatch_pipeline_task,
-        ensure_pipeline_stream,
     )
 
-    nats_url = os.environ["TEST_NATS_URL"]
-    monkeypatch.setattr("app.config.settings.nats_url", nats_url)
-    monkeypatch.setattr(dispatch_module, "_stream_ensured", False)
+    monkeypatch.setattr("app.config.settings.nats_url", _reserved_nats_url())
 
     executed = []
     monkeypatch.setattr(
@@ -857,44 +1129,17 @@ def test_dispatch_to_executor_end_to_end(monkeypatch):
         or {"status": "ok"},
     )
 
-    dispatch_pipeline_task("it-task-1", "scheduled")
-
     async def consume_once():
-        import nats
-        from nats.js.api import ConsumerConfig
-
-        nc = await nats.connect(nats_url, connect_timeout=3)
-        try:
-            js = nc.jetstream()
-            await ensure_pipeline_stream(js)
-            subscription = await js.pull_subscribe(
-                PIPELINE_EXECUTE_SUBJECT,
-                durable=nats_executor._CONSUMER_DURABLE,
-                stream=PIPELINE_STREAM,
-                config=ConsumerConfig(ack_wait=30, max_deliver=5),
-            )
-            consumer = PipelineExecutor()
+        async with _owned_pipeline_stream() as (_nc, js):
+            subscription = await _owned_consumer(js, PIPELINE_EXECUTE_SUBJECT,
+                                                nats_executor._CONSUMER_DURABLE)
+            await asyncio.to_thread(dispatch_pipeline_task, "it-task-1", "scheduled")
             messages = await subscription.fetch(1, timeout=10)
             assert len(messages) == 1
-            await consumer._run_message(
+            await PipelineExecutor()._process_message(
                 messages[0], _PIPELINE_TASK_HANDLER, _PIPELINE_TASK_DESC
             )
-            # ack 是 fire-and-forget 发布，轮询等服务端记账
-            import time as _time
-            deadline = _time.monotonic() + 10
-            while True:
-                info = await js.consumer_info(
-                    PIPELINE_STREAM, nats_executor._CONSUMER_DURABLE,
-                )
-                if info.num_pending == 0 and info.num_ack_pending == 0:
-                    return info
-                assert _time.monotonic() < deadline, (
-                    f"consumer 未在 10 秒内清零: pending={info.num_pending} "
-                    f"ack_pending={info.num_ack_pending}"
-                )
-                await asyncio.sleep(0.2)
-        finally:
-            await nc.drain()
+            return await _consumer_drained(js, nats_executor._CONSUMER_DURABLE)
 
     info = asyncio.run(consume_once())
 

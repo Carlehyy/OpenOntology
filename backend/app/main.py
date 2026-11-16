@@ -359,6 +359,13 @@ app.include_router(
     tags=["super-assistant"],
     dependencies=assistant_guard,
 )
+from app.super_assistant.autoloop import router as autoloop_router
+app.include_router(
+    autoloop_router.router,
+    prefix="/api/v2/super-assistant",
+    tags=["super-assistant-autoloop"],
+    dependencies=assistant_guard,
+)
 from app.super_assistant import memory_router, memory_llm
 app.include_router(
     memory_router.router,

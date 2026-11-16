@@ -732,7 +732,7 @@ class SuperAssistantScheduledTask(Base):
 
 
 class SuperAssistantScheduledRun(Base):
-    """一次计划触发的执行记录。会话在触发时新建，删除计划不删会话。"""
+    """一次计划槽位的投递记录；历史会话/实例关联继续可查。"""
 
     __tablename__ = "super_assistant_scheduled_runs"
     __table_args__ = (
@@ -749,7 +749,7 @@ class SuperAssistantScheduledRun(Base):
     conversation_id: Mapped[str | None] = mapped_column(
         String, ForeignKey("super_assistant_conversations.id", ondelete="SET NULL"), nullable=True, index=True,
     )
-    # task_template 目标触发创建的任务实例 id（超级助手目标恒为空），「查看实例」跳转依据
+    # 历史 task_template 执行的实例 id，保留「查看实例」关联。
     instance_id: Mapped[str | None] = mapped_column(String, nullable=True)
     scheduled_for: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="queued")

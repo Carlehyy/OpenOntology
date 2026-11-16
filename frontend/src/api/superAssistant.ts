@@ -533,8 +533,9 @@ export interface ScheduledRun {
   id: string
   task_id: string
   conversation_id: string | null
-  /** 模板目标触发创建的任务实例 id；超级助手目标为 null */
+  /** 历史模板目标触发的实例；新运行统一产生 AutoLoop 事件。 */
   instance_id: string | null
+  autoloopEventIds?: string[]
   scheduled_for: string
   status: ScheduledRunStatus
   error: string | null

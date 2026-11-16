@@ -4,8 +4,23 @@ import baseConfig from './playwright.config'
 
 // These tests require an isolated OpenOntology backend. Some business calls
 // are mocked, but no file in this list is safe to run as an offline PR test.
+const startAutoLoopStub = process.env.PLAYWRIGHT_AUTOLOOP_STACK === '1'
+  && process.env.PLAYWRIGHT_AUTOLOOP_START_STUB === '1'
+const stubURL = process.env.PLAYWRIGHT_AUTOLOOP_MULTICA_STUB_URL || 'http://127.0.0.1:18002'
+const baseServers = baseConfig.webServer
+  ? Array.isArray(baseConfig.webServer) ? baseConfig.webServer : [baseConfig.webServer]
+  : []
+
 export default defineConfig({
   ...baseConfig,
+  ...(startAutoLoopStub ? {
+    webServer: [...baseServers, {
+      command: 'node src/test/e2e/support/multica-stub.mjs',
+      url: `${stubURL.replace(/\/+$/, '')}/__autoloop/health`,
+      reuseExistingServer: false,
+      timeout: 15000,
+    }],
+  } : {}),
   testMatch: [
     '**/agent_graph.spec.ts',
     '**/agent_mcp_stack.spec.ts',
@@ -15,6 +30,7 @@ export default defineConfig({
     '**/api_hub_proxy_copy.spec.ts',
     '**/api_hub_response_copy.spec.ts',
     '**/auth.spec.ts',
+    '**/autoloop_stack.spec.ts',
     '**/data_channel_real_e2e.spec.ts',
     '**/export.spec.ts',
     '**/graph_interaction.spec.ts',

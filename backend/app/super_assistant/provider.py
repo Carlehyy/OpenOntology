@@ -11,6 +11,7 @@ import logging
 import re
 import time
 from collections.abc import Callable
+from threading import Event
 from typing import Any
 
 from app.model_configs.llm_gateway import merged_usage, strip_think_content
@@ -21,6 +22,33 @@ logger = logging.getLogger(__name__)
 
 class ProviderError(RuntimeError):
     pass
+
+
+class DailyLimitExceeded(ProviderError):
+    """An explicit provider daily cap stops AutoLoop until operator restart."""
+
+
+_daily_limit = Event()
+
+
+def daily_limit_reached() -> bool:
+    return _daily_limit.is_set()
+
+
+def check_daily_limit(status_code: int | None, body: Any) -> None:
+    if status_code == 403 and "DAILY_LIMIT_EXCEEDED" in str(body):
+        _daily_limit.set()
+        raise DailyLimitExceeded("DAILY_LIMIT_EXCEEDED") from None
+
+
+def ensure_autoloop_available() -> None:
+    if daily_limit_reached():
+        raise DailyLimitExceeded("DAILY_LIMIT_EXCEEDED")
+
+
+def _check_daily_limit(exc: BaseException) -> None:
+    status = getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None)
+    check_daily_limit(status, str(getattr(exc, "body", None)) + str(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -68,16 +96,15 @@ def _retry_after_seconds(exc: BaseException) -> float | None:
     return min(max(seconds, 0.0), _RETRY_AFTER_CAP_SECONDS)
 
 
-def _with_retry(call: Callable[[], Any]) -> Any:
-    """对瞬态 SDK 错误最多尝试 3 次，指数退避 1s/2s/4s，Retry-After 头优先。
-
-    非瞬态错误（含 ProviderError）立即原样抛出，不改变既有错误语义。
-    """
-    for attempt in range(_RETRY_MAX_ATTEMPTS):
+def _with_retry(call: Callable[[], Any], *, max_attempts: int = _RETRY_MAX_ATTEMPTS) -> Any:
+    """Retry transient errors within the caller's attempt budget."""
+    attempts = max(1, min(max_attempts, _RETRY_MAX_ATTEMPTS))
+    for attempt in range(attempts):
         try:
             return call()
         except Exception as exc:
-            if attempt + 1 >= _RETRY_MAX_ATTEMPTS or not isinstance(exc, _transient_error_types()):
+            _check_daily_limit(exc)
+            if attempt + 1 >= attempts or not isinstance(exc, _transient_error_types()):
                 raise
             delay = _retry_after_seconds(exc)
             if delay is None:
@@ -128,6 +155,8 @@ def _chat_openai(kw: dict[str, Any], messages: list[dict[str, Any]],
     }
     if kw.get("api_base"):
         client_kwargs["base_url"] = kw["api_base"]
+    if "max_attempts" in kw:
+        client_kwargs["max_retries"] = 0
     client = openai.OpenAI(**client_kwargs)
 
     provider_messages: list[dict[str, Any]] = []
@@ -170,7 +199,8 @@ def _chat_openai(kw: dict[str, Any], messages: list[dict[str, Any]],
                 "parameters": tool["parameters"],
             },
         } for tool in tools]
-    response = _with_retry(lambda: client.chat.completions.create(**create_kwargs))
+    response = _with_retry(lambda: client.chat.completions.create(**create_kwargs),
+            max_attempts=int(kw.get("max_attempts") or _RETRY_MAX_ATTEMPTS))
     usages = [getattr(response, "usage", None)]
     if not response.choices:
         raise ProviderError("模型未返回任何候选结果")
@@ -188,7 +218,8 @@ def _chat_openai(kw: dict[str, Any], messages: list[dict[str, Any]],
             "LLM 端点返回 finish_reason=tool_calls 但缺失 tool_calls 字段，"
             "去除 tools 降级重试（%s @ %s）", kw.get("model"), kw.get("api_base"))
         create_kwargs.pop("tools")
-        response = _with_retry(lambda: client.chat.completions.create(**create_kwargs))
+        response = _with_retry(lambda: client.chat.completions.create(**create_kwargs),
+            max_attempts=int(kw.get("max_attempts") or _RETRY_MAX_ATTEMPTS))
         usages.append(getattr(response, "usage", None))
         if (not response.choices
                 or (not getattr(response.choices[0].message, "content", None)
@@ -223,10 +254,13 @@ def _chat_anthropic(kw: dict[str, Any], messages: list[dict[str, Any]],
     }
     if kw.get("api_base"):
         client_kwargs["base_url"] = kw["api_base"]
+    if "max_attempts" in kw:
+        client_kwargs["max_retries"] = 0
     client = anthropic.Anthropic(**client_kwargs)
 
     response = _with_retry(
-        lambda: client.messages.create(**_anthropic_create_kwargs(kw, messages, tools))
+        lambda: client.messages.create(**_anthropic_create_kwargs(kw, messages, tools)),
+        max_attempts=int(kw.get("max_attempts") or _RETRY_MAX_ATTEMPTS),
     )
     text_parts: list[str] = []
     tool_calls: list[dict[str, Any]] = []

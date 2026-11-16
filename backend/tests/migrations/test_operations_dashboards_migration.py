@@ -19,6 +19,8 @@ from sqlalchemy import (
     text,
 )
 
+from tests.migrations.latest_head import LATEST_HEAD
+
 BACKEND = Path(__file__).resolve().parents[2]
 
 EXPECTED_COLUMNS = {
@@ -68,14 +70,14 @@ def test_upgrade_creates_dashboard_table_with_contract_shape(tmp_path, monkeypat
     with engine.connect() as connection:
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == "0150_operations_dashboards"
+        ).scalar_one() == LATEST_HEAD
     engine.dispose()
 
 
 def test_downgrade_drops_dashboard_table_and_upgrade_restores(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     cfg = _config(tmp_path / "dashboards-downgrade.db")
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0150_operations_dashboards")
     command.downgrade(cfg, "0149_integrated_replica_snapshot")
     engine = _engine(cfg)
     tables = inspect(engine).get_table_names()

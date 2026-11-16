@@ -64,6 +64,7 @@ _SUPER_ASSISTANT_REFLECT_FULL_DURABLE = "super-assistant-reflect-full"
 _SUPER_ASSISTANT_REFLECT_FOCUSED_DURABLE = "super-assistant-reflect-focused"
 _SUPER_ASSISTANT_SCHEDULED_RUN_DURABLE = "super-assistant-scheduled-run"
 _SUPER_ASSISTANT_MEMORY_SYNC_DURABLE = "sa-memory-sync"
+_AUTOLOOP_DISPATCH_DURABLE = "super-assistant-autoloop-dispatch"
 _TASK_INSTANCES_CONTROL_DURABLE = "task-instances-control"
 _ONTOLOGY_ASSISTANT_RUN_DURABLE = "ontology-assistant-run-executor"
 _EXECUTION_KERNEL_DURABLE = "sa-kernel-v1"
@@ -231,6 +232,7 @@ def _handler_registry():
     """subject → (durable, handler)：每 subject 独立 durable pull consumer。"""
     from app.data_channel.pipeline_tasks.dispatch import (
         ASSISTANT_EVAL_AUTOPILOT_SUBJECT,
+        AUTOLOOP_DISPATCH_SUBJECT,
         CONNECTION_SYNC_SUBJECT,
         DATASET_EVENT_SUBJECT,
         DATASET_IMPORT_SUBJECT,
@@ -249,6 +251,7 @@ def _handler_registry():
     )
     from app.assistant_evaluation import autopilot_tasks
     from app.super_assistant import reflection_tasks, scheduled_tasks
+    from app.super_assistant.autoloop.dispatching import run_dispatch_message
     from app.task_instances import executor as task_instances_executor
     from app.tasks import ontology_assistant_tasks
 
@@ -316,6 +319,11 @@ def _handler_registry():
             SUPER_ASSISTANT_MEMORY_SYNC_SUBJECT,
             _SUPER_ASSISTANT_MEMORY_SYNC_DURABLE,
             _run_super_assistant_memory_message,
+        ))
+        entries.append((
+            AUTOLOOP_DISPATCH_SUBJECT,
+            _AUTOLOOP_DISPATCH_DURABLE,
+            run_dispatch_message,
         ))
     return tuple(entries)
 

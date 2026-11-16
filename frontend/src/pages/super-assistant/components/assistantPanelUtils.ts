@@ -43,10 +43,13 @@ export const errorText = (error: any, fallback = '操作失败') => {
       })
       .filter(Boolean)
     if (messages.length > 0) return `参数校验失败：${messages.join('；')}`
-  } else if (detail) {
+  } else if (typeof detail === 'string' && detail) {
     return detail
+  } else if (detail && typeof detail === 'object') {
+    if (typeof detail.message === 'string' && detail.message) return detail.message
+    if (typeof detail.code === 'string' && detail.code) return detail.code
   }
-  return error?.message || fallback
+  return typeof error?.message === 'string' && error.message ? error.message : fallback
 }
 
 /** 触发浏览器下载（Blob → objectURL → <a download>）；副作用兜底见 AGENTS.md §5：

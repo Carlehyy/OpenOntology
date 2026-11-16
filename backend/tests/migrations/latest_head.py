@@ -2,7 +2,7 @@
 
 Every migration test that pins the single head imports this constant instead
 of duplicating a literal. Update it only when a new migration becomes the
-linear head; the tests still assert the exact revision and chain, so a broken
-or forked migration graph cannot pass by accident.
+single head; the tests still assert the exact revision and chain, so a broken
+or unmerged migration graph cannot pass by accident.
 """
-LATEST_HEAD = "0150_operations_dashboards"
+LATEST_HEAD = "0151_autoloop_merge"

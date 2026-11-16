@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
+from threading import Lock
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy import or_
@@ -28,6 +29,7 @@ from app.task_instances.models import (
 logger = logging.getLogger(__name__)
 
 _scheduler: BackgroundScheduler | None = None
+_scheduler_lock = Lock()
 _JOB_ID = "task-instances-reconcile"
 SCAN_INTERVAL_SECONDS = 30
 # dispatched 但长期无人认领 → 重投 NATS（传输层丢失的自愈窗口）
@@ -176,19 +178,28 @@ def _scan() -> None:
 
 def start() -> None:
     global _scheduler
-    if _scheduler is not None and _scheduler.running:
-        return
-    _scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
-    _scheduler.add_job(
-        _scan, "interval", seconds=SCAN_INTERVAL_SECONDS,
-        id=_JOB_ID, max_instances=1, coalesce=True, misfire_grace_time=60,
-    )
-    _scheduler.start()
+    with _scheduler_lock:
+        if _scheduler is not None and _scheduler.running:
+            return
+        scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
+        scheduler.add_job(
+            _scan, "interval", seconds=SCAN_INTERVAL_SECONDS,
+            id=_JOB_ID, max_instances=1, coalesce=True, misfire_grace_time=60,
+        )
+        try:
+            scheduler.start()
+        except BaseException:
+            if scheduler.running:
+                scheduler.shutdown(wait=True)
+            raise
+        _scheduler = scheduler
     logger.info("任务实例对账扫描器已启动（每 %s 秒）", SCAN_INTERVAL_SECONDS)
 
 
 def shutdown() -> None:
     global _scheduler
-    if _scheduler is not None and _scheduler.running:
-        _scheduler.shutdown(wait=False)
-    _scheduler = None
+    with _scheduler_lock:
+        if _scheduler is not None:
+            if _scheduler.running:
+                _scheduler.shutdown(wait=True)
+            _scheduler = None

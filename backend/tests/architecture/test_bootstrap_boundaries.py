@@ -17,6 +17,33 @@ BACKEND_DIR = Path(__file__).resolve().parents[2]
 MAIN_PATH = BACKEND_DIR / "app" / "main.py"
 
 
+@pytest.fixture(autouse=True)
+def isolate_auxiliary_lifecycle_workers(monkeypatch):
+    """Lifecycle contract tests own spies; scheduler modules have real-thread suites."""
+    from app.assistant_evaluation import autopilot_scheduler, service as evaluation_service
+    from app.data_channel.pipeline_tasks import dispatch
+    from app.notifications import delivery_scheduler
+    from app.ontologies.agent_confirmation import worker as confirmation_worker
+    from app.super_assistant import (
+        conversation_service, memory_scheduler, remote_agent_task_gc, scheduled_scheduler,
+    )
+    from app.super_assistant.autoloop import scheduler as autoloop_scheduler
+    from app.super_assistant.kernel import scheduler as kernel_scheduler
+    from app.task_instances import reconcile
+    from app.tasks import ontology_assistant_tasks
+
+    for module in (
+        autopilot_scheduler, delivery_scheduler, confirmation_worker, memory_scheduler,
+        remote_agent_task_gc, scheduled_scheduler, autoloop_scheduler, reconcile,
+        ontology_assistant_tasks,
+    ):
+        monkeypatch.setattr(module, "start", lambda: None)
+        monkeypatch.setattr(module, "shutdown", lambda: None)
+    monkeypatch.setattr(kernel_scheduler, "start", lambda: None)
+    monkeypatch.setattr(kernel_scheduler, "stop", lambda: None)
+    monkeypatch.setattr(evaluation_service, "recover_interrupted_tasks", lambda: {})
+    monkeypatch.setattr(conversation_service, "recover_interrupted_streams", lambda: {})
+    monkeypatch.setattr(dispatch, "shutdown_dispatch_loop", lambda: None)
 
 
 def _top_level_functions(tree: ast.Module) -> dict[str, ast.AST]:
@@ -239,6 +266,23 @@ async def test_canonical_lifecycle_preserves_startup_and_shutdown_order(
         "close_all",
         lambda: events.append("browser.close_all"),
     )
+    from app.notifications import delivery_scheduler
+    from app.super_assistant import memory_scheduler, remote_agent_task_gc, scheduled_scheduler
+    from app.super_assistant.autoloop import scheduler as autoloop_scheduler
+    from app.task_instances import reconcile
+    from app.data_channel.pipeline_tasks import dispatch
+
+    for name, module in (
+        ("remote_agent_task_gc", remote_agent_task_gc),
+        ("scheduled_scheduler", scheduled_scheduler),
+        ("memory_scheduler", memory_scheduler),
+        ("autoloop_scheduler", autoloop_scheduler),
+        ("delivery_scheduler", delivery_scheduler),
+        ("task_reconcile", reconcile),
+    ):
+        monkeypatch.setattr(module, "start", lambda name=name: events.append(f"{name}.start"))
+        monkeypatch.setattr(module, "shutdown", lambda name=name: events.append(f"{name}.shutdown"))
+    monkeypatch.setattr(dispatch, "shutdown_dispatch_loop", lambda: events.append("dispatch_loop.shutdown"))
 
     async with lifecycle.application_lifespan(
         object(),
@@ -255,13 +299,26 @@ async def test_canonical_lifecycle_preserves_startup_and_shutdown_order(
         "sentinel_cdc.register:True",
         "sentinel_scan.start",
         "data_scheduler.start",
+        "remote_agent_task_gc.start",
+        "scheduled_scheduler.start",
+        "memory_scheduler.start",
+        "autoloop_scheduler.start",
+        "delivery_scheduler.start",
+        "task_reconcile.start",
         "task.create.1",
         "task.create.2",
         "application.ready",
         "browser.close_all",
         "data_scheduler.shutdown",
+        "task_reconcile.shutdown",
         "sentinel_scan.stop",
         "sentinel_cdc.stop",
+        "scheduled_scheduler.shutdown",
+        "autoloop_scheduler.shutdown",
+        "memory_scheduler.shutdown",
+        "delivery_scheduler.shutdown",
+        "remote_agent_task_gc.shutdown",
+        "dispatch_loop.shutdown",
     ]
 
 
@@ -450,6 +507,12 @@ def _patch_startup_resources(monkeypatch):
         "close_all",
         lambda: events.append("browser.close_all"),
     )
+    from app.data_channel.pipeline_tasks import dispatch
+    from app.super_assistant.autoloop import scheduler as autoloop_scheduler
+
+    monkeypatch.setattr(autoloop_scheduler, "start", lambda: events.append("autoloop_scheduler.start"))
+    monkeypatch.setattr(autoloop_scheduler, "shutdown", lambda: events.append("autoloop_scheduler.shutdown"))
+    monkeypatch.setattr(dispatch, "shutdown_dispatch_loop", lambda: events.append("dispatch_loop.shutdown"))
     return events
 
 
@@ -503,7 +566,11 @@ async def test_weknora_service_failure_starts_no_workers(monkeypatch):
     with pytest.raises(RuntimeError, match="Required startup dependencies unavailable: WeKnora"):
         async with lifecycle.application_lifespan(object(), seed_database=lambda: events.append("database.seed")):
             pytest.fail("service failure must block startup")
-    assert events == ["database.seed"]
+    # A failed dependency probe still runs the lifespan's idempotent teardown.
+    # Neither scanner nor dispatcher was started before the probe completed.
+    assert events == [
+        "database.seed", "autoloop_scheduler.shutdown", "dispatch_loop.shutdown",
+    ]
 
 
 @pytest.mark.asyncio
@@ -542,9 +609,54 @@ async def test_lifecycle_shutdown_survives_remote_agent_task_gc_failure(
 
     assert events[0] == "database.seed"
     assert "application.ready" in events
-    assert events[-3:] == [
+    assert events[-5:] == [
         "scheduled_scheduler.shutdown",
+        "autoloop_scheduler.shutdown",
         "delivery_scheduler.shutdown",
         "remote_agent_task_gc.shutdown",
+        "dispatch_loop.shutdown",
     ]
     assert "Remote agent task GC cleanup failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_autoloop_start_failure_remains_visible_and_shutdown_drains_last(monkeypatch, caplog):
+    from app.bootstrap import lifecycle
+    from app.shared import dependency_probe
+    from app.super_assistant.autoloop import scheduler as autoloop_scheduler
+
+    events = _patch_startup_resources(monkeypatch)
+    monkeypatch.setattr(lifecycle.settings, "environment", "development")
+    monkeypatch.setattr(dependency_probe, "probe_startup_dependencies", lambda: None)
+
+    def fail_start():
+        events.append("autoloop_scheduler.start")
+        raise RuntimeError("injected AutoLoop scheduler start failure")
+
+    monkeypatch.setattr(autoloop_scheduler, "start", fail_start)
+    async with lifecycle.application_lifespan(object(), seed_database=lambda: None):
+        events.append("application.ready")
+    assert "application.ready" in events
+    assert "AutoLoop 派发扫描器启动失败" in caplog.text
+    assert events.index("autoloop_scheduler.start") < events.index("application.ready")
+    assert events[-2:] == ["autoloop_scheduler.shutdown", "dispatch_loop.shutdown"]
+
+
+@pytest.mark.asyncio
+async def test_autoloop_shutdown_failure_does_not_skip_dispatch_loop_cleanup(monkeypatch, caplog):
+    from app.bootstrap import lifecycle
+    from app.super_assistant.autoloop import scheduler as autoloop_scheduler
+
+    events = _patch_startup_resources(monkeypatch)
+    monkeypatch.setattr(lifecycle.settings, "environment", "test")
+
+    def fail_shutdown():
+        events.append("autoloop_scheduler.shutdown")
+        raise RuntimeError("injected AutoLoop scheduler shutdown failure")
+
+    monkeypatch.setattr(autoloop_scheduler, "shutdown", fail_shutdown)
+    async with lifecycle.application_lifespan(object(), seed_database=lambda: None):
+        events.append("application.ready")
+    assert "autoloop_scheduler.start" not in events
+    assert events[-2:] == ["autoloop_scheduler.shutdown", "dispatch_loop.shutdown"]
+    assert "AutoLoop dispatch scheduler cleanup failed" in caplog.text

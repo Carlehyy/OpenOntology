@@ -57,6 +57,7 @@ MODEL_MODULES = (
     "app.settings.object_storage.models",
     "app.settings.workflows.models",
     "app.super_assistant.models",
+    "app.super_assistant.autoloop.models",
     "app.super_assistant.kernel.models",
     "app.task_instances.models",
     "app.tickets.models",

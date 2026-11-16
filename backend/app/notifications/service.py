@@ -97,6 +97,7 @@ def create_message_ex(
     event_id: str | None = None,
     ingest_key_id: str | None = None,
     channel_ids: list[str] | None = None,
+    thread_id: str | None = None,
     user=None,
 ) -> tuple[NotificationMessage, bool]:
     """创建一条通知消息，返回 (消息, 是否新建)。
@@ -114,6 +115,7 @@ def create_message_ex(
     if normalized_event:
         existing = _find_by_source_event(db, normalized_source, normalized_event)
         if existing is not None:
+            _commit_replayed_admission(db, existing)
             return existing, False
 
     # 指定渠道须在消息落库前校验通过：任一不存在/停用即拒绝整次创建
@@ -138,15 +140,36 @@ def create_message_ex(
         # 且幂等重放走 existing 提前返回，无法自愈。
         db.flush()
         fan_out_deliveries(db, message, channels=fanout_channels)
+        _admit_autoloop(db, message, thread_id=thread_id)
         db.commit()
     except IntegrityError:
         db.rollback()
         existing = _find_by_source_event(db, normalized_source, normalized_event or "")
         if existing is None:
             raise
+        _commit_replayed_admission(db, existing)
         return existing, False
+    except Exception:
+        db.rollback()
+        raise
     db.refresh(message)
     return message, True
+
+
+def _commit_replayed_admission(db: Session, message: NotificationMessage) -> None:
+    try:
+        _admit_autoloop(db, message)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+
+def _admit_autoloop(db: Session, message: NotificationMessage, *, thread_id: str | None = None) -> None:
+    if message.source_type == "ingest":
+        from app.super_assistant.autoloop.ingress import accept_notification
+
+        accept_notification(db, message, **({"thread_id": thread_id} if thread_id else {}))
 
 
 def create_message(db: Session, **kwargs) -> NotificationMessage:
@@ -905,6 +928,9 @@ def ingest_message(db: Session, body: dict[str, Any], key: NotificationIngestKey
         raise HTTPException(422, "title 不能为空")
     body_md = _ingest_str_field(body, "body") or ""
     priority = _ingest_str_field(body, "priority") or PRIORITY_NORMAL
+    thread_id = _ingest_str_field(body, "threadId") or None
+    if thread_id and len(thread_id) > 512:
+        raise HTTPException(422, "threadId 过长（上限 512 个字符）")
 
     message, created = create_message_ex(
         db,
@@ -915,6 +941,7 @@ def ingest_message(db: Session, body: dict[str, Any], key: NotificationIngestKey
         source_type="ingest",
         event_id=event_id,
         ingest_key_id=key.id,
+        thread_id=thread_id,
     )
     # 扇出已在 create_message_ex 内与消息同事务完成
     return {

@@ -700,9 +700,9 @@ test('MCP 配置复制写入真实剪贴板并如实提示', async ({ page }) =>
   await page.getByTestId('agent-mcp-copy').click()
   // 如实提示：不宣称「已复制」，只说「已尝试写入剪贴板」（AGENTS.md §5）
   await expect(page.getByText('已尝试写入剪贴板')).toBeVisible()
-  // 验收作用在最终结果上：读取真实剪贴板核对全文
+  // 验收作用在最终结果上；Windows 剪贴板使用 CRLF，textarea 使用 LF。
   const clipped = await page.evaluate(() => navigator.clipboard.readText())
-  expect(clipped).toBe(expected)
+  expect(clipped.replace(/\r\n/g, '\n')).toBe(expected.replace(/\r\n/g, '\n'))
   expect(JSON.parse(clipped).mcpServers['openontology-ontology-1'].headers['X-OpenOntology-Password'])
     .toBe('REPLACE_WITH_YOUR_PASSWORD')
   // 模板不携带任何真实凭据（会话 token 等绝不进入配置）

@@ -5,6 +5,7 @@ CI 按时长表把后端回归分片；新增/删除测试后未重录 ``.test_d
 检查带进本地 ``uv run pytest``，消除"本地全绿、CI 拦截"的错位。
 """
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -13,6 +14,8 @@ BACKEND_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_all_collected_tests_have_duration_records():
+    child_env = os.environ.copy()
+    child_env["PYTHONIOENCODING"] = "utf-8"
     collected = subprocess.run(
         [
             sys.executable,
@@ -27,6 +30,8 @@ def test_all_collected_tests_have_duration_records():
         capture_output=True,
         text=True,
         check=True,
+        encoding="utf-8",
+        env=child_env,
     ).stdout
     ids = {line.strip() for line in collected.splitlines() if "::" in line}
     known = set(

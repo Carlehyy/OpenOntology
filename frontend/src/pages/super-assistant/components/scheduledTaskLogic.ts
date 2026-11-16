@@ -8,15 +8,12 @@
  * - 校验错误锚定到出错字段而非仅顶部横幅（P0-4）。
  */
 import type {
-  ScheduledKind, ScheduledRunStatus, ScheduledTargetKind, ScheduledTask,
+  ScheduledKind, ScheduledRunStatus, ScheduledTargetKind, ScheduledTask, ScheduledTaskPayload, ScheduledTaskUpdatePayload,
 } from '@/api/superAssistant'
 
 import { formatDateTime } from '../../../utils/datetime.ts'
 
 export const WEEKDAYS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'] as const
-
-/** 模板目标的任务内容即实例 goal，受其后端上限约束（字段级校验 + 控件 maxLength 双拦） */
-export const TEMPLATE_GOAL_MAX_CHARS = 20_000
 
 export const STATUS_LABEL: Record<ScheduledRunStatus, string> = {
   queued: '排队中',
@@ -110,6 +107,36 @@ export function isCreateFormDirty(form: CreateFormState, baseline: CreateFormSta
   )
 }
 
+/** 新建计划统一产生事件；目标和时区由服务端默认值管理。 */
+export function createScheduledPayload(form: CreateFormState): ScheduledTaskPayload {
+  const [hour, minute] = form.timeOfDay.split(':').map(Number)
+  return {
+    title: form.title.trim(), instruction: form.instruction.trim(), schedule_kind: form.kind,
+    run_at: form.kind === 'once' ? shanghaiIsoFromLocal(form.onceAt) : null,
+    hour: form.kind === 'once' ? null : hour, minute: form.kind === 'once' ? null : minute,
+    weekday: form.kind === 'weekly' ? Number(form.weekday) : null, enabled: true,
+  }
+}
+
+/** 仅发送实际编辑的字段，保留历史目标、时区和未编辑时间的完整精度。 */
+export function editScheduledPayload(form: CreateFormState, baseline: CreateFormState): ScheduledTaskUpdatePayload {
+  const payload: ScheduledTaskUpdatePayload = {}
+  if (form.title !== baseline.title) payload.title = form.title.trim()
+  if (form.instruction !== baseline.instruction) payload.instruction = form.instruction.trim()
+  if (form.kind !== baseline.kind) {
+    const schedule = createScheduledPayload(form)
+    Object.assign(payload, { schedule_kind: schedule.schedule_kind, run_at: schedule.run_at, hour: schedule.hour, minute: schedule.minute, weekday: schedule.weekday })
+  } else {
+    if (form.kind === 'once' && form.onceAt !== baseline.onceAt) payload.run_at = shanghaiIsoFromLocal(form.onceAt)
+    if (form.kind !== 'once' && form.timeOfDay !== baseline.timeOfDay) {
+      const [hour, minute] = form.timeOfDay.split(':').map(Number)
+      payload.hour = hour; payload.minute = minute
+    }
+    if (form.kind === 'weekly' && form.weekday !== baseline.weekday) payload.weekday = Number(form.weekday)
+  }
+  return payload
+}
+
 export interface CreateFormValidation {
   instruction?: string
   templateId?: string
@@ -121,21 +148,17 @@ export interface CreateFormValidation {
  * 字段级校验：错误文案与字段 label 对齐（S-2/S-3）。
  * now 可注入固定时刻供单测；过去时间在控件层拦截（min 只约束选择器，
  * 手动键入的过去值仍会提交，须在此兜住——对抗审查发现 6）。
- * 模板目标的任务内容受实例 goal 2 万字上限约束（后端最终校验，控件 maxLength 先拦）。
+ * 历史编辑允许保留已过的单次时间；所有目标的内容统一进入到期事件。
  */
-export function validateCreateForm(form: CreateFormState, now = new Date()): CreateFormValidation {
+export function validateCreateForm(form: CreateFormState, now = new Date(), editing = false): CreateFormValidation {
   const errors: CreateFormValidation = {}
   if (!form.instruction.trim()) {
     errors.instruction = '请输入任务内容'
-  } else if (form.target === 'task_template' && form.instruction.length > TEMPLATE_GOAL_MAX_CHARS) {
-    // 切换目标后存量长文不受控件 maxLength 约束，须在此字段级拦截
-    errors.instruction = `流程模板目标的任务内容不能超过 ${TEMPLATE_GOAL_MAX_CHARS} 字`
   }
-  if (form.target === 'task_template' && !form.templateId) errors.templateId = '请选择流程模板'
   if (form.kind === 'once') {
     if (!form.onceAt) errors.onceAt = '请选择执行时间'
     // 带秒的 19 字符值按分钟前缀归一后再比，否则同分钟的过去值绕过拦截
-    else if (form.onceAt.slice(0, 16) <= shanghaiDatetimeLocal(now)) errors.onceAt = '执行时间已过，请选择未来的时间'
+    else if (!editing && form.onceAt.slice(0, 16) <= shanghaiDatetimeLocal(now)) errors.onceAt = '执行时间已过，请选择未来的时间'
   } else if (!form.timeOfDay) {
     // time 输入清空后提交会静默创建 00:00 的任务（hour/minute 由 split('') 得 0）
     errors.timeOfDay = '请选择执行时间'

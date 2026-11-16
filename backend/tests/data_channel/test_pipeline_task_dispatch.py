@@ -1,9 +1,11 @@
 """流水线任务 NATS 派发与调用点切换的契约测试。"""
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from datetime import datetime, timedelta
+from threading import Event, Thread
 
 import pytest
 from fastapi import BackgroundTasks, HTTPException
@@ -24,6 +26,13 @@ from app.data_channel.pipeline_tasks.models import PipelineTask
 from app.data_channel.sync_tasks import scheduler as scheduler_module
 from app.data_channel.sync_tasks.scheduler import SyncScheduler
 from app.models.v2.pipeline import Pipeline
+
+
+@pytest.fixture(autouse=True)
+def dispatch_loop_owner():
+    dispatch_module.shutdown_dispatch_loop()
+    yield
+    dispatch_module.shutdown_dispatch_loop()
 
 
 class _FakeJS:
@@ -142,6 +151,7 @@ def test_dispatch_ensures_work_queue_stream_once(fake_nats, monkeypatch):
         "integrated.sync",
         "ontology.assistant.run",
         "super_assistant.memory.sync",
+        "super_assistant.autoloop.dispatch",
     ]
     assert config.subjects == list(PIPELINE_STREAM_SUBJECTS)
     assert config.retention == RetentionPolicy.WORK_QUEUE
@@ -199,8 +209,9 @@ def test_dispatch_ontology_assistant_run_uses_stable_msg_id(fake_nats):
 
     assert ONTOLOGY_ASSISTANT_RUN_SUBJECT == "ontology.assistant.run"
     assert ONTOLOGY_ASSISTANT_RUN_SUBJECT in PIPELINE_STREAM_SUBJECTS
-    assert PIPELINE_STREAM_SUBJECTS[-2:] == (
+    assert PIPELINE_STREAM_SUBJECTS[-3:] == (
         ONTOLOGY_ASSISTANT_RUN_SUBJECT, "super_assistant.memory.sync",
+        "super_assistant.autoloop.dispatch",
     )
     first, second = fake_nats["published"]
     for subject, payload, headers in (first, second):
@@ -508,3 +519,115 @@ async def test_dispatch_works_inside_running_event_loop(fake_nats):
     assert subject == "task.dataset.import"
     assert json.loads(payload.decode())["job_id"] == "job-async-ctx"
     assert headers["Nats-Msg-Id"]
+
+
+def test_autoloop_publish_reuses_durable_identity_and_version(fake_nats):
+    dispatch_module.dispatch_autoloop("dispatch-owned", 3)
+    dispatch_module.dispatch_autoloop("dispatch-owned", 3)
+    assert len(fake_nats["published"]) == 2
+    for subject, payload, headers in fake_nats["published"]:
+        assert subject == "super_assistant.autoloop.dispatch"
+        assert json.loads(payload)["dispatch_id"] == "dispatch-owned"
+        assert json.loads(payload)["version"] == 3
+        assert headers["Nats-Msg-Id"] == "super_assistant.autoloop.dispatch:dispatch-owned:3"
+
+
+@pytest.mark.parametrize("identity,version", [("", 1), ("  ", 1), (None, 1), ("id", 0), ("id", True)])
+def test_autoloop_publish_rejects_invalid_identity_before_connecting(fake_nats, identity, version):
+    with pytest.raises(ValueError):
+        dispatch_module.dispatch_autoloop(identity, version)
+    assert not fake_nats["published"] and "connect" not in fake_nats
+
+
+def test_dispatch_loop_reuses_thread_and_shutdown_joins_and_restarts(fake_nats):
+    dispatch_module.shutdown_dispatch_loop()
+    dispatch_module.dispatch_autoloop("dispatch-owned", 1)
+    owned_loop, owned_thread = dispatch_module._dispatch_loop, dispatch_module._dispatch_thread
+    dispatch_module.dispatch_autoloop("dispatch-owned", 1)
+    assert dispatch_module._dispatch_loop is owned_loop
+    assert dispatch_module._dispatch_thread is owned_thread and owned_thread.is_alive()
+    assert dispatch_module._stream_ensured
+    dispatch_module.shutdown_dispatch_loop()
+    assert owned_loop.is_closed() and not owned_thread.is_alive()
+    assert dispatch_module._dispatch_loop is None and dispatch_module._dispatch_thread is None
+    assert not dispatch_module._stream_ensured
+    dispatch_module.shutdown_dispatch_loop()
+    dispatch_module.dispatch_autoloop("dispatch-owned", 1)
+    restarted_loop, restarted_thread = dispatch_module._dispatch_loop, dispatch_module._dispatch_thread
+    try:
+        assert restarted_loop is not owned_loop and restarted_thread is not owned_thread
+    finally:
+        dispatch_module.shutdown_dispatch_loop()
+    assert restarted_loop.is_closed() and not restarted_thread.is_alive()
+
+
+def test_dispatch_loop_shutdown_waits_for_inflight_publish_and_drain(fake_nats, monkeypatch):
+    dispatch_module.shutdown_dispatch_loop()
+    entered, stopped = Event(), Event()
+    release = None
+    failures = []
+
+    async def controlled_publish(*_args, **_kwargs):
+        nonlocal release
+        release = asyncio.Event()
+        entered.set()
+        await release.wait()
+        fake_nats["published"].append("confirmed")
+
+    monkeypatch.setattr(dispatch_module, "_dispatch", controlled_publish)
+
+    def publish():
+        try:
+            dispatch_module.dispatch_autoloop("dispatch-owned", 1)
+        except BaseException as exc:
+            failures.append(exc)
+
+    def shutdown():
+        try:
+            dispatch_module.shutdown_dispatch_loop()
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            stopped.set()
+
+    publisher = Thread(target=publish, name="test-autoloop-publisher")
+    publisher.start()
+    assert entered.wait(timeout=5)
+    owned_loop, owned_thread = dispatch_module._dispatch_loop, dispatch_module._dispatch_thread
+    closer = Thread(target=shutdown, name="test-dispatch-loop-shutdown")
+    closer.start()
+    try:
+        assert not stopped.wait(timeout=0.1), "shutdown returned before the in-flight publish completed"
+    finally:
+        owned_loop.call_soon_threadsafe(release.set)
+        publisher.join(timeout=10)
+        closer.join(timeout=10)
+    assert not failures and stopped.is_set() and fake_nats["published"] == ["confirmed"]
+    assert not publisher.is_alive() and not closer.is_alive() and not owned_thread.is_alive()
+    assert owned_loop.is_closed() and dispatch_module._dispatch_loop is None
+
+
+def test_dispatch_loop_start_failure_closes_owned_loop_and_coroutine(monkeypatch):
+    dispatch_module.shutdown_dispatch_loop()
+    created = []
+    original = asyncio.new_event_loop
+
+    def make_loop():
+        loop = original()
+        created.append(loop)
+        return loop
+
+    def fail_start(_thread):
+        raise RuntimeError("injected dispatch loop start failure")
+
+    async def unused():
+        raise AssertionError("failed loop must never run the publish")
+
+    monkeypatch.setattr(dispatch_module.asyncio, "new_event_loop", make_loop)
+    monkeypatch.setattr(dispatch_module.threading.Thread, "start", fail_start)
+    coroutine = unused()
+    with pytest.raises(RuntimeError, match="start failure"):
+        dispatch_module._submit_dispatch(coroutine)
+    assert len(created) == 1 and created[0].is_closed()
+    assert coroutine.cr_frame is None
+    assert dispatch_module._dispatch_loop is None and dispatch_module._dispatch_thread is None
