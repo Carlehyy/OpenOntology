@@ -2,8 +2,8 @@ import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
-  Archive, ArchiveRestore, Bell, Brain, ChevronRight, Clock, Download, History, Inbox, LayoutDashboard, ListChecks, LogOut,
-  Megaphone, Mic, Network, Pencil, Plug, Plus, Route, Search, Sparkles, Trash2, Wrench, X,
+  Archive, ArchiveRestore, Bell, Brain, ChevronRight, Clock, Download, History, Inbox, LayoutDashboard,
+  LogOut, Megaphone, Mic, Network, Pencil, Plug, Plus, Route, Search, Sparkles, Trash2, Wrench, X,
 } from 'lucide-react'
 
 import { notificationsApi } from '@/api/notifications'
@@ -26,7 +26,6 @@ import {
   CONVERSATION_GROUP_VISIBLE_LIMIT,
   groupConversations,
 } from '../conversationGroups'
-import IntegrationsDialog from './IntegrationsDialog'
 import type { AssistantConfigTab } from './AssistantConfiguration'
 
 interface WorkbenchSidebarProps {
@@ -41,11 +40,8 @@ interface WorkbenchSidebarProps {
   onOpenSearch: () => void
   onOpenScheduled: () => void
   onOpenRuleRouting: () => void
-  onOpenTaskInstances: () => void
   /** 打开消息通知弹窗（仅 admin 入口可见） */
   onOpenNotifications: () => void
-  /** 能力拓展保存后回调（页面刷新 multica 配置以同步命令提示可用性） */
-  onIntegrationsSaved?: () => void | Promise<void>
   /** 会话行右键「重命名会话」：打开行级重命名弹窗 */
   onRename: (item: SuperConversation) => void
   /** 会话行右键「导出会话」：下载完整审计 JSON */
@@ -193,9 +189,7 @@ export default function WorkbenchSidebar({
   onOpenSearch,
   onOpenScheduled,
   onOpenRuleRouting,
-  onOpenTaskInstances,
   onOpenNotifications,
-  onIntegrationsSaved,
   onRename,
   onExport,
   onOpenConfigTab,
@@ -204,7 +198,6 @@ export default function WorkbenchSidebar({
   const user = useAuthStore(state => state.user)
   const logout = useAuthStore(state => state.logout)
   const navigate = useNavigate()
-  const [integrationsOpen, setIntegrationsOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
   const [archivedOpen, setArchivedOpen] = useState(false)
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({})
@@ -331,23 +324,9 @@ export default function WorkbenchSidebar({
         {hasMenuAccess(user, 'super_assistant') && <button type="button" onClick={() => { onOpenRuleRouting(); onCloseMobile() }} className={actionItemClass} data-workbench-rule-routing>
           <Route size={16} className="shrink-0" /> 规则路由
         </button>}
-        {/* 任务实例：DAG 流程模板与自动化任务轨道（弹窗入口收归超级助手） */}
-        <button
-          type="button"
-          onClick={() => { onOpenTaskInstances(); onCloseMobile() }}
-          className={actionItemClass}
-          data-workbench-task-instances
-        >
-          <ListChecks size={16} className="shrink-0" /> 任务实例
-        </button>
-        <button
-          type="button"
-          onClick={() => { setIntegrationsOpen(true); onCloseMobile() }}
-          className={actionItemClass}
-          data-workbench-integrations
-        >
-          <Plug size={16} className="shrink-0" /> 能力拓展
-        </button>
+        {/* 任务实例与能力拓展入口已移出工作台功能区（2026-11 确认）：任务实例
+            弹窗仍由「定时任务」记录的「查看实例」触发链打开，能力拓展入口迁至
+            页面头部图标行（SuperAssistantPage），本侧栏不再渲染 */}
         {hasMenuAccess(user, 'ontologies') && (
           <Link to="/ontologies" onClick={onCloseMobile} className={actionItemClass} data-workbench-governance>
             <LayoutDashboard size={16} className="shrink-0" /> 本体治理
@@ -486,12 +465,6 @@ export default function WorkbenchSidebar({
         {content}
       </aside>
 
-      {integrationsOpen && (
-        <IntegrationsDialog
-          onClose={() => setIntegrationsOpen(false)}
-          onSaved={onIntegrationsSaved}
-        />
-      )}
       <ProfileModal open={profileOpen} onClose={() => setProfileOpen(false)} />
     </>
   )

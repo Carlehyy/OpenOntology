@@ -3,7 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import { Sender } from '@ant-design/x'
 import { ConfigProvider, theme as antdTheme } from 'antd'
 import {
-  ArrowDown, Check, Cpu, Layers3, List, ListChecks, Loader2, Menu, Mic, Monitor, MoreHorizontal, Network, Paperclip, Pencil,
+  ArrowDown, Check, Cpu, Layers3, List, ListChecks, Loader2, Menu, Mic, Monitor, MoreHorizontal, Network, Paperclip, Pencil, Plug,
   ScrollText, Send, Settings2, Square, SquareKanban, X,
 } from 'lucide-react'
 
@@ -61,6 +61,7 @@ import BrowserModal, { type BrowserDisplayMode } from '@/components/browser-coll
 import NotificationsDialog from './components/NotificationsDialog'
 import ScheduledTasksDialog from './components/ScheduledTasksDialog'
 import TaskInstancesDialog from './components/TaskInstancesDialog'
+import IntegrationsDialog from './components/IntegrationsDialog'
 import WorkbenchSidebar from './components/WorkbenchSidebar'
 import KernelRunTaskCard from './components/KernelRunTaskCard'
 import KernelRunList from './components/KernelRunList'
@@ -144,6 +145,8 @@ export default function SuperAssistantPage() {
   const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [taskInstancesOpen, setTaskInstancesOpen] = useState(false)
   const [taskInstanceId, setTaskInstanceId] = useState<string | null>(null)
+  // 能力拓展入口（头部图标行）打开的常开弹层；保存后刷新 multica 配置
+  const [integrationsOpen, setIntegrationsOpen] = useState(false)
   useEffect(() => {
     if (scheduleId) setScheduledOpen(true)
   }, [scheduleId])
@@ -1603,9 +1606,7 @@ export default function SuperAssistantPage() {
           setRuleRoutingOpen(true)
           setSearchParams(previous => { const next = new URLSearchParams(previous); next.set('ruleRouting', '1'); return next }, { replace: true })
         }}
-        onOpenTaskInstances={() => setTaskInstancesOpen(true)}
         onOpenNotifications={() => setNotificationsOpen(true)}
-        onIntegrationsSaved={() => void refreshMulticaConfig()}
         onRename={setRenamingConversation}
         onExport={item => void exportConversation(item)}
         onOpenConfigTab={openAssistantConfigTab}
@@ -1620,6 +1621,14 @@ export default function SuperAssistantPage() {
         initialInstanceId={taskInstanceId}
         onClose={() => { setTaskInstancesOpen(false); setTaskInstanceId(null) }}
       />
+      {/* 能力拓展（条件挂载的常开弹层，不做 Dialog/DialogTrigger 包裹）：
+          入口已自侧栏迁至头部图标行；保存后刷新 multica 配置以同步命令可用性 */}
+      {integrationsOpen && (
+        <IntegrationsDialog
+          onClose={() => setIntegrationsOpen(false)}
+          onSaved={() => void refreshMulticaConfig()}
+        />
+      )}
       <ScheduledTasksDialog
         open={scheduledOpen}
         initialTaskId={scheduleId}
@@ -1817,6 +1826,20 @@ export default function SuperAssistantPage() {
               <Network size={16} aria-hidden="true" />
             </button>
           )}
+          {/* 能力拓展入口（原侧栏迁入头部图标行，用户确认插在「领域知识」与
+              「能力地图」之间）：打开条件挂载的 IntegrationsDialog，保存后刷新
+              multica 配置。窄屏（<md）让位标题/模型选择器，收进「更多操作」
+              溢出菜单。 */}
+          <button
+            type="button"
+            onClick={() => setIntegrationsOpen(true)}
+            aria-label="能力拓展"
+            title="能力拓展"
+            data-workbench-integrations
+            className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-brand-line bg-[var(--color-context-usage-bg)] text-brand-ink transition-colors hover:border-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:flex"
+          >
+            <Plug size={16} aria-hidden="true" />
+          </button>
           <Dialog>
             <DialogTrigger asChild>
               <button
@@ -1988,6 +2011,14 @@ export default function SuperAssistantPage() {
                   知识库（WeKnora）
                 </button>
               )}
+              <button
+                type="button"
+                onClick={() => { setHeaderOverflowOpen(false); setIntegrationsOpen(true) }}
+                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <Plug size={15} className="shrink-0 text-brand-ink" />
+                能力拓展
+              </button>
               <button
                 type="button"
                 onClick={() => { setHeaderOverflowOpen(false); void openBrowser() }}

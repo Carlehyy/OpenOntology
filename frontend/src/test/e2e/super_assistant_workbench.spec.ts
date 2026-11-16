@@ -1037,16 +1037,18 @@ test('工作台骨架：功能入口齐备，近期会话单列表，归档折�
 
   await expect(page.getByRole('button', { name: '新建会话' })).toBeVisible()
   await expect(page.getByRole('button', { name: /全局搜索/ })).toBeVisible()
-  // 消息通知与任务实例均已上线：可点击（任务实例打开弹窗）
+  // 消息通知可点击；任务实例与能力拓展入口已移出工作台功能区（2026-11 确认）：
+  // 任务实例弹窗保留「定时任务 → 查看实例」触发链，能力拓展迁入头部图标行
   const notificationsEntry = page.getByRole('button', { name: /消息通知/ })
   await expect(notificationsEntry).toBeVisible()
   await expect(notificationsEntry).toBeEnabled()
   await expect(notificationsEntry).toContainText('2')
   await expect(page.getByRole('button', { name: '定时任务' })).toBeVisible()
-  const taskInstancesEntry = page.getByRole('button', { name: /任务实例/ })
-  await expect(taskInstancesEntry).toBeVisible()
-  await expect(taskInstancesEntry).toBeEnabled()
+  const workbenchNav = page.locator('nav[aria-label="工作台功能"]')
+  await expect(workbenchNav.getByRole('button', { name: '任务实例', exact: true })).toHaveCount(0)
+  await expect(workbenchNav.getByRole('button', { name: '能力拓展', exact: true })).toHaveCount(0)
   await expect(page.getByRole('link', { name: '本体治理' })).toBeVisible()
+  // 能力拓展入口已迁入头部图标行（领域知识与能力地图之间）
   await expect(page.getByRole('button', { name: '能力拓展' })).toBeVisible()
   await expect(page.getByRole('button', { name: /退出登录/ })).toBeVisible()
   // 知识库（WeKnora）入口位于聊天头部，左侧工作台不再保留旧入口
@@ -1055,7 +1057,7 @@ test('工作台骨架：功能入口齐备，近期会话单列表，归档折�
 
   // 功能项顺序契约：规则路由紧邻定时任务。
   const navEntries = page.locator('nav[aria-label="工作台功能"] > *')
-  const expectedOrder = ['全局搜索', '消息通知', '定时任务', '规则路由', '任务实例', '能力拓展', '本体治理']
+  const expectedOrder = ['全局搜索', '消息通知', '定时任务', '规则路由', '本体治理']
   await expect(navEntries).toHaveCount(expectedOrder.length)
   for (let index = 0; index < expectedOrder.length; index += 1) {
     await expect(navEntries.nth(index)).toContainText(expectedOrder[index])
@@ -2530,12 +2532,12 @@ test('定时任务弹窗：存量模板记录保留实例关联，新建任务�
   await expect(dialog).toHaveCount(0)
   await expect(page.getByTestId('task-instances-dialog')).toBeVisible()
   await expect(page.getByTestId('task-instance-lite')).toBeVisible()
-  // 关闭再从侧栏重开：深链不残留、回到看板（TaskInstancesDialog 两个 effect 的顺序契约锚点）
+  // 关闭后重开仍走「查看实例」深链（侧栏入口已隐藏）：每次打开重新落位实例详情，
+  // 弹窗内状态随关闭重置、不残留上一次的视图；看板经弹窗内导航可达
   await page.keyboard.press('Escape')
   await expect(page.getByTestId('task-instances-dialog')).toHaveCount(0)
-  await page.getByRole('button', { name: /任务实例/ }).click()
-  await expect(page.getByTestId('task-instances-board')).toBeVisible()
-  await expect(page.getByTestId('task-instance-lite')).toHaveCount(0)
+  await openTaskInstancesDialog(page)
+  await expect(page.getByTestId('task-instance-lite')).toBeVisible()
   await page.keyboard.press('Escape')
   await expect(page.getByTestId('task-instances-dialog')).toHaveCount(0)
 
@@ -3381,9 +3383,22 @@ test('能力拓展：multica 测试连接、工作区下拉与保存', async ({ 
   const mocks = await mockApis(page)
   await page.goto('/#/super-assistant')
 
-  // 能力拓展已是真实功能：左侧集成类型 tabs（multica / 远程助手），
+  // 能力拓展已是真实功能：入口迁至头部图标行（用户确认插在「领域知识」与
+  // 「能力地图」之间），打开左侧集成类型 tabs（multica / 远程助手），
   // multica 默认选中并走通「测试连接 → 选工作区 → 保存」
-  await page.getByRole('button', { name: '能力拓展' }).click()
+  const weknoraEntry = page.locator('[data-workbench-weknora]')
+  const integrationsEntry = page.getByRole('button', { name: '能力拓展' })
+  const capabilityEntry = page.getByRole('button', { name: '查看能力地图' })
+  // 头部图标行相对位置契约：领域知识 → 能力拓展 → 能力地图
+  const [weknoraBox, integrationsBox, capabilityBox] = await Promise.all([
+    weknoraEntry.boundingBox(), integrationsEntry.boundingBox(), capabilityEntry.boundingBox(),
+  ])
+  expect(weknoraBox).not.toBeNull()
+  expect(integrationsBox).not.toBeNull()
+  expect(capabilityBox).not.toBeNull()
+  expect(weknoraBox!.x + weknoraBox!.width).toBeLessThanOrEqual(integrationsBox!.x + 1)
+  expect(integrationsBox!.x + integrationsBox!.width).toBeLessThanOrEqual(capabilityBox!.x + 1)
+  await integrationsEntry.click()
   const integrationsDialog = page.getByRole('dialog')
   await expect(integrationsDialog.getByRole('heading', { name: '能力拓展' })).toBeVisible()
   const multicaTab = integrationsDialog.locator('[data-integrations-tab="multica"]')
@@ -3428,6 +3443,14 @@ test('能力拓展：multica 测试连接、工作区下拉与保存', async ({ 
     enabled: true,
   })
   await expect(integrationsDialog).toHaveCount(0)
+
+  // 窄屏（<md）：头部入口让位标题/模型选择器，收进「更多操作」溢出菜单
+  // （与领域知识等头部入口同位），菜单内仍可打开同一弹窗
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect(page.getByRole('button', { name: '能力拓展' })).toBeHidden()
+  await page.getByRole('button', { name: '更多操作' }).click()
+  await page.getByRole('button', { name: '能力拓展' }).click()
+  await expect(page.getByRole('dialog').getByRole('heading', { name: '能力拓展' })).toBeVisible()
 })
 
 test('multica 配置弹窗：已配置时打开即拉取全量工作区，无需先点测试连接', async ({ page }) => {
@@ -3929,12 +3952,14 @@ test.describe('窄屏顶栏与会话操作（390px）', () => {
     await expect(page.getByRole('link', { name: '知识库（WeKnora）' })).toBeHidden()
     await page.getByRole('button', { name: '更多操作' }).click()
     const menu = page.getByRole('dialog')
-    // 溢出菜单顺序与头部一致：决策事项 → 会话纪要 → 项目管理（Kaneo）→ 知识库（WeKnora）
+    // 溢出菜单顺序与头部一致：决策事项 → 会话纪要 → 项目管理（Kaneo）→ 知识库（WeKnora）→ 能力拓展
     const menuItems = menu.locator('a, button')
     await expect(menuItems.first()).toHaveText(/决策事项\s*0/)
     await expect(menuItems.nth(1)).toHaveText('会话纪要')
     await expect(menuItems.nth(2)).toHaveAttribute('aria-label', '项目管理（Kaneo）')
     await expect(menuItems.nth(3)).toHaveAttribute('aria-label', '知识库（WeKnora）')
+    // 能力拓展自侧栏迁入头部（领域知识与能力地图之间）：溢出菜单同步复刻该入口
+    await expect(menuItems.nth(4)).toHaveText('能力拓展')
     const link = menu.getByRole('link', { name: '知识库（WeKnora）' })
     await expect(link).toBeVisible()
     await expect(link).toHaveAttribute('href', 'https://weknora.example.com:8443')
@@ -4214,13 +4239,38 @@ async function mockTaskInstancesApis(page: Page) {
   })
 }
 
+/**
+ * 任务实例弹窗的真实用户入口（侧栏「任务实例」按钮已隐藏，弹窗与路由保留）：
+ * 定时任务弹窗 →「变更评审例会」运行记录 →「查看实例」深链打开任务实例弹窗。
+ * 深链落点在实例轻量详情，需要看板视图的用例先经弹窗内左栏导航切回。
+ */
+async function openTaskInstancesDialog(page: Page) {
+  await page.getByRole('button', { name: '定时任务', exact: true }).click()
+  const scheduled = page.getByTestId('scheduled-tasks-dialog')
+  await expect(scheduled).toBeVisible()
+  // 定时任务弹窗跨开合保留已选状态：重开时可能停在运行详情（带同名返回按钮），
+  // 列表项按「标题 + 周期标签」定位以避开同名按钮；点击本身会复位到任务详情。
+  await scheduled.getByRole('button', { name: /变更评审例会 每周一/ }).click()
+  await scheduled.getByRole('button', { name: /\d{4}-\d{2}-\d{2}.*已完成/ }).click()
+  await scheduled.getByRole('button', { name: '查看实例' }).click()
+  await expect(page.getByTestId('task-instances-dialog')).toBeVisible()
+}
+
+/** 深链打开后切回实例看板视图（原用例从看板起步的等价路径） */
+async function openTaskInstancesBoard(page: Page) {
+  await openTaskInstancesDialog(page)
+  await page.getByRole('navigation', { name: '任务实例视图' })
+    .getByRole('button', { name: '实例看板' }).click()
+  await expect(page.getByTestId('task-instances-board')).toBeVisible()
+}
+
 test('任务实例弹窗：看板卡片可点进轻量详情（状态图+审批直达），完整详情跳独立页', async ({ page }) => {
   await seedAuth(page)
   await mockApis(page)
   await mockTaskInstancesApis(page)
   await page.goto('/#/super-assistant')
 
-  await page.getByRole('button', { name: /任务实例/ }).click()
+  await openTaskInstancesBoard(page)
   const dialog = page.getByTestId('task-instances-dialog')
   await expect(dialog).toBeVisible()
   await expect(page.getByText('需介入').first()).toBeVisible()
@@ -4280,10 +4330,10 @@ test('任务实例弹窗：激活表单内嵌只读流程结构，新建流程�
   await mockTaskInstancesApis(page)
   await page.goto('/#/super-assistant')
 
-  await page.getByRole('button', { name: /任务实例/ }).click()
+  await openTaskInstancesBoard(page)
   const nav = page.locator('nav[aria-label="任务实例视图"]')
 
-  // 初始看板视图：实例看板高亮
+  // 实例看板视图：实例看板高亮（深链入口落在实例详情，切回看板后同为高亮锚点）
   await expect(nav.getByRole('button', { name: '实例看板' })).toHaveAttribute('aria-pressed', 'true')
 
   // 模板区：头部有「新建流程」且全弹窗唯一（左下角入口已移除）
@@ -4316,12 +4366,21 @@ test('任务实例弹窗：零实例看板渲染引导空态并可直达流程�
   await seedAuth(page)
   await mockApis(page)
   await mockTaskInstancesApis(page)
-  // 覆盖实例列表为空（后注册的 route 优先）
-  await page.route('**/api/v2/task-instances/instances**', route =>
-    json(route, { total: 0, page: 1, size: 50, items: [] }))
+  // 覆盖实例列表为空（后注册的 route 优先）；深链入口指向的 ins-1 如实 404，
+  // 轻量详情落「实例不存在或已被删除」后再切回看板看引导空态
+  await page.route('**/api/v2/task-instances/instances**', route => {
+    if (route.request().url().match(/\/instances\/[^/]+$/)) {
+      return route.fulfill({
+        status: 404, contentType: 'application/json',
+        body: JSON.stringify({ detail: { code: 'instance_not_found', message: '实例不存在' } }),
+      })
+    }
+    return json(route, { total: 0, page: 1, size: 50, items: [] })
+  })
 
   await page.goto('/#/super-assistant')
-  await page.getByRole('button', { name: /任务实例/ }).click()
+  // 深链入口的实例在空列表下落「实例不存在或已被删除」，切回看板看引导空态
+  await openTaskInstancesBoard(page)
   const board = page.getByTestId('task-instances-board')
   await expect(board).toBeVisible()
   await expect(board.getByText('还没有任务实例')).toBeVisible()
@@ -4353,11 +4412,19 @@ test('任务实例弹窗：失败实例展示人话失败原因，可展开技�
       return route.fulfill({ status: 200, contentType: 'text/event-stream', body: '' })
     }
     if (url.match(/instances\/ins-fail$/)) return json(route, failedDetail)
+    // 深链入口指向的 ins-1 在本夹具的实例域中不存在（侧栏入口已隐藏，打开
+    // 必经「查看实例」深链）：如实 404，轻量详情落「实例不存在或已被删除」
+    if (url.match(/instances\/ins-1$/)) {
+      return route.fulfill({
+        status: 404, contentType: 'application/json',
+        body: JSON.stringify({ detail: { code: 'instance_not_found', message: '实例不存在' } }),
+      })
+    }
     return json(route, { total: 1, page: 1, size: 50, items: [failedSummary] })
   })
 
   await page.goto('/#/super-assistant')
-  await page.getByRole('button', { name: /任务实例/ }).click()
+  await openTaskInstancesBoard(page)
   await page.getByTestId('task-instance-card').filter({ hasText: 'E2E失败实例' }).click()
   const lite = page.getByTestId('task-instance-lite')
   await expect(lite).toBeVisible()
@@ -4389,7 +4456,7 @@ test('任务实例弹窗：画布保存门禁——名称必填且写入 metadat
   })
 
   await page.goto('/#/super-assistant')
-  await page.getByRole('button', { name: /任务实例/ }).click()
+  await openTaskInstancesDialog(page)
   await page.getByRole('navigation', { name: '任务实例视图' })
     .getByRole('button', { name: '流程模板' }).click()
   await page.getByTestId('new-flow-button').click()
@@ -4428,7 +4495,7 @@ test('任务实例弹窗：激活表单必填校验与提交链路（POST 载荷
   })
 
   await page.goto('/#/super-assistant')
-  await page.getByRole('button', { name: /任务实例/ }).click()
+  await openTaskInstancesDialog(page)
   await page.getByRole('navigation', { name: '任务实例视图' })
     .getByRole('button', { name: '流程模板' }).click()
   await page.getByTestId('template-card').filter({ hasText: '代码变更评审' }).click()
@@ -4456,7 +4523,7 @@ test('任务实例弹窗：模板搜索仅匹配名称，来源单选与关键�
   await mockTaskInstancesApis(page)
 
   await page.goto('/#/super-assistant')
-  await page.getByRole('button', { name: /任务实例/ }).click()
+  await openTaskInstancesDialog(page)
   await page.getByRole('navigation', { name: '任务实例视图' })
     .getByRole('button', { name: '流程模板' }).click()
   const panel = page.getByTestId('task-instances-templates')
@@ -4500,7 +4567,7 @@ test('任务实例弹窗：个人分类空态与全局空态区分', async ({ pa
   })
 
   await page.goto('/#/super-assistant')
-  await page.getByRole('button', { name: /任务实例/ }).click()
+  await openTaskInstancesDialog(page)
   await page.getByRole('navigation', { name: '任务实例视图' })
     .getByRole('button', { name: '流程模板' }).click()
 
@@ -4516,7 +4583,7 @@ test('任务实例弹窗：个人分类空态与全局空态区分', async ({ pa
   })
   await page.getByTestId('template-source-group').getByRole('radio', { name: '预置' }).click()
   await page.reload()
-  await page.getByRole('button', { name: /任务实例/ }).click()
+  await openTaskInstancesDialog(page)
   await page.getByRole('navigation', { name: '任务实例视图' })
     .getByRole('button', { name: '流程模板' }).click()
   await expect(page.getByText('还没有流程模板')).toBeVisible()
@@ -4528,7 +4595,7 @@ test('任务实例弹窗：模板卡四操作——预置编辑/删除禁用不�
   await mockTaskInstancesApis(page)
 
   await page.goto('/#/super-assistant')
-  await page.getByRole('button', { name: /任务实例/ }).click()
+  await openTaskInstancesDialog(page)
   await page.getByRole('navigation', { name: '任务实例视图' })
     .getByRole('button', { name: '流程模板' }).click()
 
@@ -4581,7 +4648,7 @@ test('任务实例弹窗：个人模板查看/编辑/激活可用，编辑载入
   })
 
   await page.goto('/#/super-assistant')
-  await page.getByRole('button', { name: /任务实例/ }).click()
+  await openTaskInstancesDialog(page)
   await page.getByRole('navigation', { name: '任务实例视图' })
     .getByRole('button', { name: '流程模板' }).click()
   await page.getByTestId('template-source-group').getByRole('radio', { name: '个人' }).click()
@@ -4647,7 +4714,7 @@ test('任务实例弹窗：编辑脏稿出口守卫——Esc/左栏切视图/右
   }
 
   const openDirtyEditor = async () => {
-    await page.getByRole('button', { name: /任务实例/ }).click()
+    await openTaskInstancesDialog(page)
     await page.getByRole('navigation', { name: '任务实例视图' })
       .getByRole('button', { name: '流程模板' }).click()
     await page.getByTestId('template-source-group').getByRole('radio', { name: '个人' }).click()
@@ -4699,7 +4766,7 @@ test('任务实例弹窗：编辑脏稿出口守卫——Esc/左栏切视图/右
   await expect(page.getByTestId('task-instances-dialog')).toHaveCount(0)
 
   // 干净状态：遮罩空白点击直接关闭，不弹守卫确认
-  await page.getByRole('button', { name: /任务实例/ }).click()
+  await openTaskInstancesDialog(page)
   await expect(page.getByTestId('task-instances-dialog')).toBeVisible()
   await page.mouse.click(5, 400)
   await expect(page.getByTestId('task-instances-dialog')).toHaveCount(0)
@@ -4726,7 +4793,7 @@ test('任务实例弹窗：保存失败保留草稿，确认后才退出', async
   })
 
   await page.goto('/#/super-assistant')
-  await page.getByRole('button', { name: /任务实例/ }).click()
+  await openTaskInstancesDialog(page)
   await page.getByRole('navigation', { name: '任务实例视图' })
     .getByRole('button', { name: '流程模板' }).click()
   await page.getByTestId('template-source-group').getByRole('radio', { name: '个人' }).click()
@@ -4769,7 +4836,7 @@ test('任务实例弹窗：个人删除走确认框——取消不发请求，�
   })
 
   await page.goto('/#/super-assistant')
-  await page.getByRole('button', { name: /任务实例/ }).click()
+  await openTaskInstancesDialog(page)
   await page.getByRole('navigation', { name: '任务实例视图' })
     .getByRole('button', { name: '流程模板' }).click()
   await page.getByTestId('template-source-group').getByRole('radio', { name: '个人' }).click()
@@ -4814,7 +4881,7 @@ test('任务实例弹窗：新建保存成功归位「个人」并清空关键�
   })
 
   await page.goto('/#/super-assistant')
-  await page.getByRole('button', { name: /任务实例/ }).click()
+  await openTaskInstancesDialog(page)
   await page.getByRole('navigation', { name: '任务实例视图' })
     .getByRole('button', { name: '流程模板' }).click()
   // 预置来源 + 无关关键词：新建成功后必须切换到「个人」并清空关键词
