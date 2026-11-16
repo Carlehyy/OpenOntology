@@ -12,6 +12,8 @@
   与 `weknora_docreader_tmp`；
 - Kaneo 独立 `kaneo_postgres_data`（项目数据权威）与 `kaneo_data`
   （`/var/lib/kaneo` 运行时资源，不是附件持久化）；
+- Grafana 独立 `grafana_data` 卷（看板数据权威：SQLite/WAL/SHM、数据源、
+  面板、用户），必须与平台 PostgreSQL 作为同一恢复点成对备份恢复；
 - 启用 Hindsight 记忆 profile 时，其 `hindsight_postgres_data` 卷与 `.env` 中
   的 `HINDSIGHT_API_KEY`/`HINDSIGHT_SERVICE_TOKEN` 同恢复点保存
   （`hindsight_model_cache` 仅是模型缓存，可重新下载/预填，不属于恢复权威）；
@@ -39,6 +41,17 @@ Kaneo 的 `kaneo_postgres_data` 必须与服务器 `.env` 中的
 `KANEO_ADMIN_PASSWORD` 只是部署初始密码，账号事实源在 Kaneo 数据库内（原生
 页面改密后 `.env` 同步新值，一键免登录中继依赖它做服务端登录）。首版
 没有 S3/SMTP，不存在需要一并恢复的附件对象存储。
+
+Grafana 的 `grafana_data` 卷与平台 PostgreSQL 的 `operations_dashboards`
+表（卡片元数据：名称/描述/图标/UID/排序/revision）必须作为同一恢复点成对
+备份与恢复：只恢复一边会出现「库里有但 Grafana 没有」（卡片显示已失效）或
+Grafana 内孤儿看板（平台列表不显示、也不自动清理）。维护窗口应先阻止平台
+写入与 Grafana 原生界面写入并等待在途请求结束，再停止平台写进程与 Grafana
+容器后做 PostgreSQL dump 与整个 `grafana_data` 卷快照（Grafana 使用
+SQLite；运行中只复制 `grafana.db` 不构成一致备份）。恢复到全新独立
+PostgreSQL 与卷后，须核对卡片元数据/UID 与 Grafana 内面板、数据源及共享
+管理员一致，并验证预览/编排入口。`GRAFANA_ADMIN_PASSWORD` 随服务器 `.env`
+同恢复点保存（原生改密后已同步的值）。
 
 服务器 `.env` 与 PostgreSQL/API Hub 数据必须作为同一恢复点管理。
 `ENCRYPTION_KEY`（历史环境中可能由当时的 `SECRET_KEY` 派生）是模型、Connection、

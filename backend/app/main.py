@@ -622,6 +622,25 @@ app.include_router(
     dependencies=operations_reports_guard,
 )
 
+# 智能运营 — 监控看板：卡片元数据 CRUD/全量排序 + 独立看板会话签发。
+# 固定路径（/reorder、/grafana-session）先于 /{dashboard_id} 注册。
+# grafana-auth 是 nginx auth_request / Vite dev 代理的 cookie 校验端点，
+# 只依赖签名看板 cookie（不挂 Bearer/菜单/DB 依赖），故单独挂载在
+# 无守卫的 auth_router 上。
+operations_dashboards_guard = menu_guard("operations.dashboard")
+from app.operations.dashboards import router as operations_dashboards_router
+app.include_router(
+    operations_dashboards_router.router,
+    prefix="/api/v2/operations/dashboards",
+    tags=["operations-dashboards"],
+    dependencies=operations_dashboards_guard,
+)
+app.include_router(
+    operations_dashboards_router.auth_router,
+    prefix="/api/v2/operations/dashboards",
+    tags=["operations-dashboards"],
+)
+
 def get_db():
     db = SessionLocal()
     try:

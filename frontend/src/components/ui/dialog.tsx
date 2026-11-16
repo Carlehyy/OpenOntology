@@ -42,6 +42,7 @@ function DialogContent({
   className,
   children,
   dismissible = true,
+  showCloseButton = true,
   layer = 'base',
   overlayProps,
   onEscapeKeyDown,
@@ -49,6 +50,8 @@ function DialogContent({
   ...props
 }: React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> & {
   dismissible?: boolean
+  /** 自定义关闭控件时隐藏默认按钮，保留 Esc 与遮罩关闭语义。 */
+  showCloseButton?: boolean
   layer?: DialogLayer
   /** 透传遮罩属性（现有调用方用 data-testid 锁定标准壳的遮罩契约）。 */
   overlayProps?: React.ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay>
@@ -75,7 +78,7 @@ function DialogContent({
         {...props}
       >
         {children}
-        {dismissible && (
+        {dismissible && showCloseButton && (
           <DialogPrimitive.Close
             aria-label="关闭"
             className="absolute right-4 top-4 flex h-7 w-7 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"

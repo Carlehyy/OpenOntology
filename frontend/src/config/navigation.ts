@@ -103,7 +103,7 @@ export const PLATFORM_NAV_ITEMS: PlatformNavItem[] = [
   },
   {
     key: 'operations', to: '/operations', icon: Radar, label: '智能运营', description: '运营监控与分析报告', subItems: [
-      { key: 'operations.dashboard', to: '/operations/dashboard', icon: MonitorDot, label: '监控看板', description: '运行态势监控与告警' },
+      { key: 'operations.dashboard', to: '/operations/dashboard', icon: MonitorDot, label: '监控看板', description: '看板卡片工作台，数据源与面板在 Grafana 中自行配置' },
       { key: 'operations.reports', to: '/operations/reports', icon: FileChartColumn, label: '运营报告', description: '运营分析与报告' },
     ],
   },

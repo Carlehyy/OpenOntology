@@ -37,6 +37,21 @@ Hindsight 记忆 profile 是可选特性：回滚包含它的新版本时，把�
 的 `HINDSIGHT_ENABLED` 置回 false 并重跑部署即可停用（卷保留）；回滚目标
 版本不含该 profile 时无需任何额外步骤，平台其余回滚流程不变。
 
+Grafana 是平台 fail-closed 强依赖（随平台 Compose 启动，无独立公网入口）：
+回滚目标是本接入版本时，部署会先确认 Grafana 在本次部署前是否已运行
+（`compose ps --status running -q grafana`；查询失败即部署非零退出，不把
+查询失败当作无容器），随后启动并执行 grafana-bootstrap 校验。启动/健康等待
+失败且此前未运行时，仅停止 Grafana 服务；此前已在运行则保留现场、不主动
+停止。grafana-bootstrap/`--verify` 失败保持原有收尾语义：停止 Grafana 服务。
+所有失败收尾都不停止其他业务服务。完成回滚并确认 bootstrap `--verify` 通过后
+再随 Compose 重新开放；回滚到接入 Grafana 之前的版本则不受影响。
+Grafana 使用自身 SQLite（`grafana_data` 卷），不参与平台 Alembic
+迁移；回滚平台版本不要求回滚或清空 `grafana_data` 卷。若回滚跨越
+`operations_dashboards` 表的引入（迁移 `0150`），schema downgrade 只回退
+表结构、不恢复数据——必须按 [备份与恢复](./backup-restore.md) 的成对恢复
+点（平台 PostgreSQL + `grafana_data` 卷 + 受控 `.env`）恢复，否则会出现
+「已失效」卡片或 Grafana 侧孤儿看板。
+
 ## 目录治理期间
 
 每个迁移 PR 必须保留旧 import/facade 或提供可逆提交。目录移动和删除兼容层

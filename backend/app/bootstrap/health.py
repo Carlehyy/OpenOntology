@@ -46,6 +46,7 @@ def readiness_response(
         "n8n": "unknown",
         "weknora": "unknown",
         "kaneo": "unknown",
+        "grafana": "unknown",
         "sentinel_scheduler": "unknown",
         "sentinel_cdc": "unknown",
         "data_scheduler": "unknown",
@@ -159,6 +160,17 @@ def readiness_response(
     except Exception:
         checks["kaneo"] = "unavailable"
 
+    # Grafana readiness is not a static health ping: the database state and
+    # the shared-admin identity are both verified. Runtime failure marks
+    # readiness 503 without stopping other services.
+    try:
+        from app.shared.dependency_probe import probe_grafana
+
+        probe_grafana()
+        checks["grafana"] = "ok"
+    except Exception:
+        checks["grafana"] = "unavailable"
+
     if is_production:
         # Reuse the pinned adapter's bounded status probe. It authenticates and
         # verifies the pinned version without exposing URL/password/error text.
@@ -269,6 +281,7 @@ def readiness_response(
         "n8n",
         "weknora",
         "kaneo",
+        "grafana",
         *(("dbx",) if is_production else ()),
         "sentinel_scheduler",
         "data_scheduler",

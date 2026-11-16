@@ -6,6 +6,7 @@ These tests run against the FastAPI TestClient. Required external services that
 are absent in a pure-unit context must make readiness fail closed with 503;
 process liveness remains dependency-independent.
 """
+import pytest
 from fastapi.testclient import TestClient
 from app.main import app, _probe_http_service
 from app.shared import dependency_probe
@@ -208,6 +209,115 @@ def test_kaneo_probe_success_reports_ok(monkeypatch):
     assert calls == ["probe"]
     assert data["kaneo"] == "ok"
     assert "kaneo" not in data["unavailable"]
+
+
+def test_grafana_probe_failure_fails_readiness_without_leaking_runtime_config(
+    monkeypatch,
+):
+    password = "synthetic_grafana_password_not_a_secret"
+    base_url = "http://grafana:3000"
+
+    def reject_grafana():
+        raise RuntimeError(f"GRAFANA_DB_UNAVAILABLE password={password} url={base_url}")
+
+    monkeypatch.setattr(dependency_probe, "probe_grafana", reject_grafana)
+
+    response = client.get("/health/ready")
+    data = response.json()
+
+    assert response.status_code == 503
+    assert data["grafana"] == "unavailable"
+    assert "grafana" in data["unavailable"]
+    for secret in (password, base_url):
+        assert secret not in response.text
+
+
+def test_grafana_probe_success_reports_ok(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(
+        dependency_probe, "probe_grafana", lambda: calls.append("probe"),
+    )
+
+    response = client.get("/health/ready")
+    data = response.json()
+
+    assert calls == ["probe"]
+    assert data["grafana"] == "ok"
+    assert "grafana" not in data["unavailable"]
+
+
+def test_grafana_probe_requires_database_and_admin_not_static_health(monkeypatch):
+    """readiness 探针必须校验 database=ok 与共享管理员，不只静态 200。"""
+    import httpx
+
+    from app.operations.grafana import client as grafana_client
+    from app.shared import config as shared_config
+
+    monkeypatch.setattr(
+        shared_config.settings, "grafana_admin_password", "SyntheticAdmin2026!"
+    )
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if request.url.path == "/grafana/api/health":
+            return httpx.Response(200, json={"database": "ok", "version": "13.3.1"})
+        if request.url.path == "/grafana/api/user":
+            return httpx.Response(200, json={"login": "admin", "isGrafanaAdmin": True})
+        raise AssertionError(f"unexpected probe call: {request.url.path}")
+
+    probe_client = grafana_client.GrafanaClient(
+        base_url="http://grafana-stub", password="SyntheticAdmin2026!",
+        transport=httpx.MockTransport(handler),
+    )
+    monkeypatch.setattr(
+        grafana_client, "build_client", lambda *, transport=None: probe_client
+    )
+    dependency_probe.probe_grafana()
+    assert seen == ["/grafana/api/health", "/grafana/api/user"]
+
+    # database != ok 必须失败（不只静态 200）。
+    seen.clear()
+
+    def database_down(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if request.url.path == "/grafana/api/health":
+            return httpx.Response(200, json={"database": "unavailable"})
+        raise AssertionError("database check must fail before /user")
+
+    down_client = grafana_client.GrafanaClient(
+        base_url="http://grafana-stub", password="SyntheticAdmin2026!",
+        transport=httpx.MockTransport(database_down),
+    )
+    monkeypatch.setattr(
+        grafana_client, "build_client", lambda *, transport=None: down_client
+    )
+    with pytest.raises(RuntimeError, match="health database"):
+        dependency_probe.probe_grafana()
+    assert seen == ["/grafana/api/health"]
+
+
+def test_grafana_startup_probe_is_advisory_not_blocking(monkeypatch):
+    """Grafana 运行期故障只降级 readiness（503），不阻断 API 启动。"""
+
+    def unavailable():
+        raise RuntimeError("grafana down at startup")
+
+    monkeypatch.setattr(dependency_probe, "PROBES", (("Grafana", unavailable),))
+    # 不抛异常：其他服务继续运行。
+    dependency_probe.probe_startup_dependencies()
+
+
+def test_grafana_startup_preflight_reports_advisory_without_failing(monkeypatch, capsys):
+    def unavailable():
+        raise RuntimeError("grafana down")
+
+    monkeypatch.setattr(dependency_probe, "PROBES", (("Grafana", unavailable),))
+    assert dependency_probe.main() == 0
+    captured = capsys.readouterr()
+    assert "Grafana: unavailable (RuntimeError) advisory" in captured.err
+    assert "grafana down" not in captured.out + captured.err
 
 
 def test_health_status_reflects_dependencies():

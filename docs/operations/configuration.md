@@ -261,6 +261,123 @@ Kaneo 自带登录页；中键/修饰键/右键点击按钮仍直开原生地址
 未配置 S3/SMTP，因此附件上传与邮件找回密码不可用——不得把 `kaneo_data`
 当作附件持久化，也不得以本地卷 workaround 冒充附件能力。
 
+### Grafana 监控看板（13.3.1）
+
+Grafana 是随平台 Compose 同启的监控看板工作台：官方
+`grafana/grafana:13.3.1` 固定 multiarch digest 镜像（实测 linux/amd64），
+生产不发布任何宿主端口，唯一浏览器入口是平台 frontend（nginx）的同源子
+路径 `/grafana/`。空看板由使用者自行配置：平台不 provisioning 任何数据源
+或面板（无 provisioning 挂载），使用者在 Grafana 原生界面（经平台「编排」
+入口）完成配置。
+
+服务拓扑与免登录机制：
+
+- `grafana`：`grafana_internal` 私网成员（仅 grafana、grafana-bootstrap、
+  backend、frontend），子路径模式（`GF_SERVER_SERVE_FROM_SUB_PATH=true`），
+  auth-proxy 免登录（`GF_AUTH_PROXY_*`：可信网关注入 `X-WEBAUTH-USER`
+  共享管理员；`GF_AUTH_DISABLE_LOGIN_FORM=true` 使绕过网关也没有密码登录
+  入口，`GF_SECURITY_ALLOW_EMBEDDING=true` 允许平台预览弹窗 iframe 嵌入）。
+- `frontend`（nginx）：`/grafana/` 对 HTTP 与 WebSocket 统一
+  `auth_request`——子请求显式转发原始 `Cookie` 头到 backend 的
+  `/api/v2/operations/dashboards/grafana-auth` 校验端点，204 且携带可信
+  身份才放行并覆盖客户端身份头；否则 401（中文提示页）。无 cookie、伪造
+  身份头、篡改/过期 cookie 的 HTTP/API/WS 全部拒绝；裸 `/grafana` 301 到
+  `/grafana/`。
+- 看板会话独立：平台登录态（localStorage JWT）与 Grafana 访问解耦，
+  `POST /api/v2/operations/dashboards/grafana-session`（Bearer + 菜单授权）
+  签发 8 小时 `oo_grafana_session` HttpOnly cookie（`Path=/grafana/`，
+  SameSite=Lax，HTTPS 加 Secure），HMAC-SHA256 独立域前缀签名。平台退出、
+  Bearer 过期或改密不撤销已签发的看板 cookie；到期后重新续签即可。有效
+  cookie 下原生编辑器、`/grafana/api/*` 与 Grafana Live WebSocket 全部
+  正常，全程不出现 Grafana 登录页。
+- viewer 限制（单用户共享管理员）：任何持有看板 cookie 的平台用户在
+  Grafana 内都是共享管理员。平台角色（viewer/custom）只约束平台卡片操作
+  与会话签发，不构成 Grafana 内的只读边界；未建立独立只读账号。
+- readiness：`/health/ready` 的 `grafana` 检查要求
+  `/grafana/api/health` `database=ok` 且 basic `/grafana/api/user`
+  `isGrafanaAdmin=true`；运行期 Grafana 故障使 `/health/ready` 返回 503
+  并在 `checks.unavailable` 标注 `grafana`，其他服务继续运行，恢复后自动
+  转绿，无需重启任何业务。
+
+变量表（全部经 `.env`/环境变量，不用配置文件）：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `GRAFANA_IMAGE` | 固定 digest | 固定 `grafana/grafana:13.3.1@sha256:0615…c13cf`；漂移被生产 digest 门禁拒绝 |
+| `GRAFANA_BASE_URL` | `http://grafana:3000` | 私网 API 地址；生产/本地 Compose 契约值 |
+| `GRAFANA_ADMIN_USER` | `admin` | 共享管理员用户名（网关注入的 `X-Grafana-User`） |
+| `GRAFANA_ADMIN_PASSWORD` | 部署脚本随机生成 | 8–32 位无空白；只进 grafana/backend/grafana-bootstrap |
+| `GRAFANA_TIMEOUT_SECONDS` | `15`（3–60） | backend 对 Grafana HTTP API 的超时 |
+| `GRAFANA_FOLDER_UID` / `GRAFANA_FOLDER_TITLE` | `openontology` / `OpenOntology 监控看板` | 平台创建的看板统一放入该文件夹 |
+| `GRAFANA_SESSION_TTL_SECONDS` | `28800`（8 小时，60–86400） | 独立看板会话 cookie 有效期 |
+| `GRAFANA_APP_LOOPBACK_PORT` | `13001` | 仅本地：grafana 的 127.0.0.1 回环端口 |
+| `GRAFANA_PROXY_TARGET` | `http://grafana:3000` | 仅本地：vite 容器 `/grafana/` dev 代理上游 |
+
+账号与密钥：
+
+- `GRAFANA_ADMIN_PASSWORD` 仅进入 `grafana`（首次卷初始化创建管理员）、
+  `backend`（内网 HTTP API：文件夹/建删看板/存在性对账）与
+  `grafana-bootstrap`（健康+管理员+文件夹校验）；`pipeline_executor`、
+  `task_worker` 等其余运行时容器由 Compose 掩码锚点合法置空。密码不进
+  日志、接口响应与前端。
+- `GF_SECURITY_ADMIN_PASSWORD` 只在首次卷初始化生效：原生界面改密后，
+  运维须同步服务器 `.env` 的 `GRAFANA_ADMIN_PASSWORD` 并重启 backend 与
+  grafana-bootstrap；环境变量无法重置已有卷的管理员密码。部署脚本不会
+  回显或覆盖已持久化的密码。
+
+本地开发差异：`docker-compose.local.yml` 同样默认启动 grafana 与
+grafana-bootstrap（与生产同构）；本地例外是 grafana 仅在 `127.0.0.1:13001`
+回环端口发布（供宿主机源码运行的 backend/Vite 使用），vite 容器经
+`GRAFANA_PROXY_TARGET` 访问内网 grafana。宿主机 Vite 的 `/grafana/` 代理
+（`frontend/vite.config.ts` 的 dev 插件）与 nginx `auth_request` 语义一致：
+每个 HTTP/WS 请求先带原始 cookie 调 backend 校验端点，204 且身份有效才注入
+`X-WEBAUTH-USER` 代理，禁止也不存在静态注入 admin 的旁路。
+
+可直接复制的无秘密示例（`GRAFANA_ADMIN_PASSWORD` 一律从受控环境注入，
+不在任何示例或文档中携带真实值）：
+
+- 生产/本地 Compose（grafana 容器与 backend、grafana-bootstrap 同在
+  `grafana_internal`，走容器 DNS，不发布宿主端口）：
+
+  ```dotenv
+  GRAFANA_IMAGE=grafana/grafana:13.3.1@sha256:0615ec4fbd4072004b7d86b46ded63013a74b7d6eb1119273dd89e8fa25c13cf
+  GRAFANA_BASE_URL=http://grafana:3000
+  GRAFANA_TIMEOUT_SECONDS=15
+  GRAFANA_ADMIN_USER=admin
+  GRAFANA_ADMIN_PASSWORD=<由 deploy-prod.sh 首次部署随机生成；本地 Compose 默认 localGrafanaAdmin2026!>
+  GRAFANA_FOLDER_UID=openontology
+  GRAFANA_FOLDER_TITLE=OpenOntology 监控看板
+  GRAFANA_SESSION_TTL_SECONDS=28800
+  ```
+
+  首次/旧版服务器 `.env` 缺少上述键时，`deploy-prod.sh` 会按固定契约物化
+  （镜像钉扎 digest、密码随机生成且不回显、其余按默认值；已持久化的合法值
+  一律保留不改）。
+
+- 宿主机源码运行（backend 与 Vite 不在 Compose 网内，必须用回环地址，
+  不得把容器 DNS `grafana:3000` 写进宿主源码配置）：
+
+  ```dotenv
+  # config/generated/local/.env 或启动环境（backend）
+  GRAFANA_BASE_URL=http://127.0.0.1:13001   # GRAFANA_APP_LOOPBACK_PORT
+  GRAFANA_TIMEOUT_SECONDS=15
+  GRAFANA_ADMIN_USER=admin
+  GRAFANA_ADMIN_PASSWORD=<从受控本地环境注入；不写进示例文件>
+  GRAFANA_SESSION_TTL_SECONDS=28800
+
+  # Vite（frontend dev，GRAFANA_PROXY_TARGET 默认同回环地址）
+  GRAFANA_PROXY_TARGET=http://127.0.0.1:13001
+  ```
+
+  Vite 校验端点复用既有 `VITE_API_PROXY_TARGET`（指向宿主 backend），不需要
+  额外代理变量。管理员密码不进配置中心、不进任何示例 env 文件。
+
+存储边界：Grafana 看板数据的权威存储是 `grafana_data` 卷（SQLite/数据源/
+面板/用户）；平台侧 `operations_dashboards` 表只保存卡片元数据（名称/
+描述/图标/UID/排序）。两者必须成对备份与恢复（见 backup-restore.md）。
+平台「改名」只改卡片元数据，不读不写 Grafana dashboard 的标题/JSON；
+用户随后在 Grafana 原生界面改标题或移动目录不影响平台 UID 对账。
+
 ### Hindsight 长期记忆（生产默认启用）
 
 Hindsight 1.2.0 以独立 Compose profile `hindsight` 提供超级助手长期记忆，

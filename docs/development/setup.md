@@ -104,6 +104,10 @@ API、executor 和前端都启动后，再由管理员登录“模型配置”�
 - Kaneo 原生 Web：`8090`（HTTP，仅 308 跳转 HTTPS）与 `8445`（本地自签
   HTTPS）；app 另在 loopback `18090` 暴露给源码后端探活；Kaneo 独立
   PostgreSQL 无宿主端口。
+- Grafana：仅 loopback `13001`（`GRAFANA_APP_LOOPBACK_PORT`，供宿主机源码
+  运行的 backend/Vite 使用）；本地 Compose 内 vite 容器经
+  `GRAFANA_PROXY_TARGET=http://grafana:3000` 走内网。浏览器统一走 Vite
+  dev server 的 `/grafana/` 子路径（无独立宿主入口）。
 
 ## WeKnora 本地初始化
 
@@ -184,6 +188,57 @@ Kaneo，使页面 API、认证来源和平台入口一致；不会按当前访�
 首版未接 S3/SMTP：附件上传（官方仅支持 S3 存储）与邮件找回密码不可用；
 `kaneo_data` 卷（`/var/lib/kaneo`）只是运行时资源，不是附件持久化，项目数据
 的权威存储是 `kaneo_postgres_data`。
+
+## Grafana 监控看板本地启动
+
+Grafana（官方 13.3.1 固定 digest）随 `docker-compose.local.yml` 默认启动，
+与生产同构：`grafana` 健康 → `grafana-bootstrap` 一次性容器确保共享管理员
+可登录并创建 `openontology` 文件夹（本地默认密码
+`localGrafanaAdmin2026!`，仅用于本地，可在根 `.env` 用 `GRAFANA_*` 覆盖；
+`GF_SECURITY_ADMIN_PASSWORD` 只在首次卷初始化生效，原生改密后须同步根
+`.env` 并重启 backend/grafana-bootstrap）。空看板不预置数据源/面板，使用者
+经平台「编排」入口在 Grafana 原生界面自行配置。
+
+本地 Compose 完整栈（`docker compose -f docker-compose.local.yml up --build`）
+中浏览器走 vite 容器的 `/grafana/` 子路径；宿主机源码运行（backend + Vite
+`npm --prefix frontend run dev`）时，Vite 的 dev 代理（`frontend/vite.config.ts`
+的 `grafanaSessionProxyPlugin`）自动把 `/grafana/` 代理到
+`http://127.0.0.1:13001`（`GRAFANA_APP_LOOPBACK_PORT`）：每个 HTTP/WS 请求
+先带原始 cookie 调本地 backend 的 `grafana-auth` 校验端点，204 且身份有效
+才注入 `X-WEBAUTH-USER` 代理到 Grafana——与生产 nginx `auth_request` 语义
+一致，没有也不允许静态注入 admin 的旁路。校验失败返回与生产一致的 401
+中文提示页。宿主机源码运行的无秘密配置（容器 DNS `grafana:3000` 不适用于
+宿主进程，backend 与 Vite 都用回环地址；管理员密码从受控本地环境注入，
+不写进示例文件或配置中心）：
+
+```dotenv
+# config/generated/local/.env 或 backend 启动环境
+GRAFANA_BASE_URL=http://127.0.0.1:13001     # 对应 GRAFANA_APP_LOOPBACK_PORT
+GRAFANA_ADMIN_USER=admin
+GRAFANA_ADMIN_PASSWORD=<受控本地环境注入>
+GRAFANA_TIMEOUT_SECONDS=15
+GRAFANA_SESSION_TTL_SECONDS=28800
+# Vite（dev）：校验端点复用 VITE_API_PROXY_TARGET（指向宿主 backend）
+GRAFANA_PROXY_TARGET=http://127.0.0.1:13001
+```
+
+本地启动只需 Grafana 相关容器时：
+
+```bash
+docker compose -f docker-compose.local.yml up -d --build grafana grafana-bootstrap
+# 确认 bootstrap 以 0 退出（健康 + 共享管理员 + 文件夹）
+docker compose -f docker-compose.local.yml logs grafana-bootstrap
+```
+
+验收核对（本地/隔离 staging）：
+
+- 平台登录后进入「智能运营 → 监控看板」：签发看板会话后「编排」新标签与
+  「预览」kiosk iframe 直接进入 Grafana，全程无登录页；Grafana Live
+  WebSocket 正常；
+- 无看板会话 cookie 或 cookie 过期后，`/grafana/` 与 `/grafana/api/*` 均 401，
+  重新进入页面自动续签后恢复；
+- 停止 `grafana` 容器后平台 `/health/ready` 返回 503 且 unavailable 含
+  `grafana`，其他业务继续运行，恢复后自动转绿。
 
 ## Hindsight 长期记忆（生产默认启用，本地手动开启）
 

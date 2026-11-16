@@ -453,6 +453,65 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  # Grafana 监控看板（与生产同一固定 13.3.1 digest；无 provisioning 预置）。
+  # 本地例外：仅绑定 127.0.0.1 的回环端口（GRAFANA_APP_LOOPBACK_PORT，默认
+  # 13001），供宿主机源码运行的 backend/Vite 访问；不发布 0.0.0.0，也不影响
+  # 生产（生产 Compose 不发布任何宿主端口）。
+  grafana:
+    image: ${GRAFANA_IMAGE:-grafana/grafana:13.3.1@sha256:0615ec4fbd4072004b7d86b46ded63013a74b7d6eb1119273dd89e8fa25c13cf}
+    ports:
+      - "127.0.0.1:${GRAFANA_APP_LOOPBACK_PORT:-13001}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      # 本地默认仅用于本机开发；生产密码由 deploy-prod.sh 随机生成。
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-localGrafanaAdmin2026!}
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s/grafana/"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_AUTH_PROXY_ENABLED: "true"
+      GF_AUTH_PROXY_HEADER_NAME: X-WEBAUTH-USER
+      GF_AUTH_PROXY_HEADER_PROPERTY: username
+      GF_AUTH_PROXY_AUTO_SIGN_UP: "false"
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_AUTH_DISABLE_SIGNOUT_MENU: "true"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/grafana/api/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 60s
+      retries: 20
+    networks:
+      - grafana_internal
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  # 一次性 bootstrap（与生产同一入口/凭据边界；本地默认密码仅供本机开发）。
+  grafana-bootstrap:
+    build: ./backend
+    command: ["/bin/sh", "-ec", "python -m app.operations.grafana.bootstrap && python -m app.operations.grafana.bootstrap --verify"]
+    environment:
+      GRAFANA_BASE_URL: http://grafana:3000
+      GRAFANA_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GRAFANA_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-localGrafanaAdmin2026!}
+      GRAFANA_TIMEOUT_SECONDS: ${GRAFANA_TIMEOUT_SECONDS:-15}
+      GRAFANA_FOLDER_UID: ${GRAFANA_FOLDER_UID:-openontology}
+      GRAFANA_FOLDER_TITLE: ${GRAFANA_FOLDER_TITLE:-OpenOntology 监控看板}
+    depends_on:
+      grafana:
+        condition: service_healthy
+    networks:
+      - grafana_internal
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+
   # Hindsight 长期记忆栈（opt-in：docker compose --profile hindsight up -d，
   # 或在 .env 写 COMPOSE_PROFILES=hindsight）。它是可选特性，不是 backend 的
   # depends_on 依赖：LLM 代理懒加载、记忆调用失败只降级记忆特性，聊天与全局
@@ -628,6 +687,16 @@ services:
       # kaneo-bootstrap 的本地默认保持一致；其余运行时容器仍被锚点掩码。
       KANEO_ADMIN_EMAIL: ${KANEO_ADMIN_EMAIL:-admin@kaneo.local}
       KANEO_ADMIN_PASSWORD: ${KANEO_ADMIN_PASSWORD:-localKaneoAdmin2026!}
+      # Grafana 监控看板：backend 用共享管理员凭据走内网 HTTP API；本地默认
+      # 密码与 grafana/grafana-bootstrap 的本地默认保持一致。
+      GRAFANA_BASE_URL: ${GRAFANA_BASE_URL:-http://grafana:3000}
+      GRAFANA_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GRAFANA_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-localGrafanaAdmin2026!}
+      GRAFANA_TIMEOUT_SECONDS: ${GRAFANA_TIMEOUT_SECONDS:-15}
+      GRAFANA_FOLDER_UID: ${GRAFANA_FOLDER_UID:-openontology}
+      GRAFANA_FOLDER_TITLE: ${GRAFANA_FOLDER_TITLE:-OpenOntology 监控看板}
+      # 独立看板会话 cookie（oo_grafana_session）TTL；交付运行配置 28800 秒。
+      GRAFANA_SESSION_TTL_SECONDS: ${GRAFANA_SESSION_TTL_SECONDS:-28800}
       SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS: http://weknora-app:8080/mcp
       # 本地默认也不在 backend 内直接执行用户插件；协议 fixture 可在
       # 源码测试中显式选择 direct_dev。
@@ -674,6 +743,10 @@ services:
       # operator can still inspect diagnostics when Chromium is unhealthy.
       browser:
         condition: service_started
+      # Grafana 健康才允许 API 启动（部署级 fail-closed 由 grafana-bootstrap
+      # 承担；运行期故障只影响 /health/ready 的 grafana 检查，不停止本服务）。
+      grafana:
+        condition: service_healthy
     # /app/.venv 匿名卷保留镜像 venv，原因同 migrate 服务。
     volumes: [./backend:/app, /app/.venv, ./uploads:/uploads]
     networks:
@@ -681,6 +754,7 @@ services:
       - weknora_internal
       - kaneo_internal
       - hindsight_internal
+      - grafana_internal
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 
@@ -850,7 +924,20 @@ services:
     ports: ["5173:5173"]
     environment:
       VITE_API_PROXY_TARGET: http://backend:8000
-    depends_on: [backend]
+      # Vite dev 中间件代理 /grafana/ 的上游（校验端点走上方 API 代理目标）。
+      # 宿主机源码运行时用 GRAFANA_APP_LOOPBACK_PORT 推导的回环地址覆盖。
+      GRAFANA_PROXY_TARGET: ${GRAFANA_PROXY_TARGET:-http://grafana:3000}
+    # /grafana/ 鉴权代理需要访问 grafana_internal 上的 grafana。
+    networks:
+      - default
+      - grafana_internal
+    depends_on:
+      backend:
+        condition: service_started
+      grafana:
+        condition: service_healthy
+      grafana-bootstrap:
+        condition: service_completed_successfully
     volumes: [./frontend:/app, /app/node_modules]
     command: npm run dev -- --host
 
@@ -871,6 +958,8 @@ volumes:
   # integrated_replica_executor 的偏移/模式历史专用卷（单宿主共享，
   # 每 capture 由 SourceLease 单写者围栏）。
   integrated_replica_state:
+  # Grafana 原生数据（SQLite/数据源/看板/用户）；与平台 PG 成对备份恢复。
+  grafana_data:
 
 networks:
   kaneo_internal:
@@ -881,4 +970,9 @@ networks:
   # 模型，运行期需回调 backend 内部 LLM 代理）。不发布公网端口；仅 backend
   # 与 pipeline_executor 以成员身份访问。
   hindsight_internal:
+    driver: bridge
+  # Grafana 私网：成员限定为 grafana、grafana-bootstrap、backend、frontend
+  # （vite dev）。宿主机源码运行的 backend/Vite 走 grafana 的 127.0.0.1
+  # 回环端口（GRAFANA_APP_LOOPBACK_PORT），不加入该网络。
+  grafana_internal:
     driver: bridge

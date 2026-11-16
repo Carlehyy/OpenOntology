@@ -197,6 +197,25 @@ def probe_dbx() -> None:
         raise RuntimeError(str(status.get("reason") or "DBX_UNAVAILABLE"))
 
 
+def probe_grafana() -> None:
+    """Probe the pinned Grafana via its real client surface.
+
+    Readiness is not a static health ping: ``/api/health`` must report
+    ``database=ok`` AND an authenticated basic ``/api/user`` must be the
+    shared admin (``isGrafanaAdmin=true``). The probe reuses the pinned
+    13.3.1 client, whose errors never expose URLs, credentials, or upstream
+    bodies. Missing credentials fail closed here (readiness marks Grafana
+    unavailable); importing config without credentials stays legal.
+    """
+    from app.operations.grafana import client as grafana_client
+
+    client = grafana_client.build_client()
+    if not client.health_database_ok():
+        raise RuntimeError("Grafana health database is not ok")
+    if not client.current_user_is_admin():
+        raise RuntimeError("Grafana shared admin check failed")
+
+
 PROBES: tuple[tuple[str, Callable[[], None]], ...] = (
     ("PostgreSQL", probe_postgresql),
     ("Redis", probe_redis),
@@ -205,9 +224,13 @@ PROBES: tuple[tuple[str, Callable[[], None]], ...] = (
     ("n8n", probe_n8n),
     ("WeKnora", probe_weknora),
     ("Kaneo", probe_kaneo),
+    ("Grafana", probe_grafana),
     ("Chromium CDP", probe_browser),
 )
-NON_BLOCKING_PROBES = frozenset({"Chromium CDP"})
+# Grafana is deliberately advisory at startup: a runtime failure marks deep
+# readiness 503 while every other service keeps running; deployment-level
+# fail-closed startup is owned by the grafana-bootstrap service.
+NON_BLOCKING_PROBES = frozenset({"Chromium CDP", "Grafana"})
 
 
 def probe_startup_dependencies() -> None:

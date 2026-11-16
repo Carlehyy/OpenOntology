@@ -337,7 +337,7 @@ def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
     assert compose["networks"]["weknora_internal"] == {"driver": "bridge"}
     assert backend["networks"] == [
         "default", "dbx_bridge", "weknora_internal", "kaneo_internal",
-        "hindsight_internal",
+        "hindsight_internal", "grafana_internal",
     ]
     assert compose["networks"]["hindsight_internal"] == {"driver": "bridge"}
     assert "hindsight" not in backend["depends_on"]
