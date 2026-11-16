@@ -56,7 +56,7 @@ def test_mysql_cli_declares_utf8_for_seed_and_oracle(stack, monkeypatch):
     import io
 
     commands = []
-    monkeypatch.setattr(stack, "require_owned", lambda service: "owned-mysql-fixture")
+    monkeypatch.setattr(stack, "require_owned", lambda service, project=None: "owned-mysql-fixture")
 
     def run(args, *, text=None):
         commands.append(args)
