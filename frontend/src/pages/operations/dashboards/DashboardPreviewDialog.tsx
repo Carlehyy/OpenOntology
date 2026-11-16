@@ -136,7 +136,7 @@ export function DashboardPreviewDialog({
         }}
       >
         <DialogDescription className="sr-only">
-          在 Grafana kiosk 模式中预览该看板，可切换全屏或关闭弹窗。
+          以全屏模式预览该看板，可切换全屏或关闭弹窗。
         </DialogDescription>
         <div
           ref={containerRef}
@@ -205,7 +205,7 @@ export function DashboardPreviewDialog({
               <>
                 {!iframeLoaded && (
                   <div className="pointer-events-none absolute inset-0 z-[1] flex items-center justify-center bg-background">
-                    <LoadingState message="正在加载 Grafana 看板..." />
+                    <LoadingState message="正在加载监控看板..." />
                   </div>
                 )}
                 {/* 同源可信内容：不加 sandbox；src 只使用后端给出的受控相对路径。 */}

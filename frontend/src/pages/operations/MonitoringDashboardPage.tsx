@@ -52,7 +52,7 @@ function CreateDashboardCard({ onCreate }: { onCreate: () => void }) {
       </div>
       <h2 className="mt-3 text-base font-semibold text-foreground">新建看板</h2>
       <p className="mt-1 max-w-[210px] text-xs leading-5 text-muted-foreground">
-        先在平台建卡片，再到 Grafana 中配置数据源与面板
+        先在平台建卡片，再通过「编排」配置数据源与面板
       </p>
       <button
         type="button"
@@ -116,7 +116,7 @@ export default function MonitoringDashboardPage() {
     onSuccess: () => {
       void refreshList()
       setEditId(null)
-      toast.success('看板信息已更新', { description: '仅更新平台卡片，未改动 Grafana 看板。' })
+      toast.success('看板信息已更新', { description: '仅更新平台卡片，未改动监控看板。' })
     },
   })
 
@@ -125,7 +125,7 @@ export default function MonitoringDashboardPage() {
     onSuccess: () => {
       void refreshList()
       setDeleteTarget(null)
-      toast.success('看板已删除', { description: 'Grafana 中对应的看板已一并移除。' })
+      toast.success('看板已删除', { description: '远端对应的看板已一并移除。' })
     },
     onError: error => {
       // 失败保留卡片与确认弹窗，用户可重试或取消。
@@ -238,17 +238,6 @@ export default function MonitoringDashboardPage() {
 
   return (
     <div className="min-h-full" data-testid="operations-dashboard-workbench">
-      <header className="mb-4">
-        <h1 className="text-xl font-semibold tracking-tight text-foreground">监控看板</h1>
-        <p className="mt-1 max-w-3xl text-sm leading-6 text-muted-foreground">
-          以卡片管理看板入口：平台只保存名称、描述、图标与顺序，数据源和面板请在「编排」打开的
-          Grafana 原生界面中自行配置。
-        </p>
-        <p className="mt-1 max-w-3xl text-xs leading-5 text-[var(--color-text-tertiary)]">
-          Grafana 使用共享管理员身份；平台角色只约束卡片管理，不构成 Grafana 内的权限隔离。
-        </p>
-      </header>
-
       <section
         className="mb-4 flex flex-wrap items-center gap-3 rounded-xl border border-border bg-card px-4 py-3 shadow-[var(--shadow-sm)]"
         aria-label="看板筛选"
@@ -339,7 +328,7 @@ export default function MonitoringDashboardPage() {
             <p className="mt-1 text-xs text-[var(--color-text-tertiary)]">
               {filterActive
                 ? '请调整筛选条件'
-                : '创建第一个看板卡片，再在 Grafana 中配置运行态势面板'}
+                : '创建第一个看板卡片，再通过「编排」配置运行态势面板'}
             </p>
             {!filterActive && canWrite && (
               <Button size="sm" className="mt-3" onClick={() => setCreateOpen(true)}>

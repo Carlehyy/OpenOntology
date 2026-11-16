@@ -121,7 +121,7 @@ export function dashboardActionBlockReason(
   grafanaAvailable: boolean,
 ): string | null {
   if (card.grafana_status === 'missing') {
-    return 'Grafana 中已找不到该看板；可删除卡片后重新创建'
+    return '监控服务中已找不到该看板；可删除卡片后重新创建'
   }
   if (!grafanaAvailable || card.grafana_status === 'unknown') {
     return 'Grafana 服务暂不可用，无法编排或预览；卡片信息仍可查看与修改'

@@ -6,7 +6,7 @@
  *   不能只靠 toast；
  * - 编辑总是携带列表 revision（expected_revision）；409 冲突时保留输入、
  *   展示最新 revision，并提供「刷新最新数据」后再次保存的可恢复路径；
- * - 编辑文案明确「只改平台卡片，不改 Grafana 标题与面板」。
+ * - 编辑文案明确「仅影响平台卡片，看板内的标题、数据源与面板不会被改动」。
  */
 import { useState, type FormEvent } from 'react'
 import { AlertCircle } from 'lucide-react'
@@ -140,8 +140,8 @@ export function DashboardFormDialog({
           <DialogTitle>{isEdit ? '编辑看板信息' : '新建监控看板'}</DialogTitle>
           <DialogDescription>
             {isEdit
-              ? '修改只影响平台卡片；Grafana 内的看板标题、数据源与面板不会被改动。'
-              : '创建后会在 Grafana 中生成一个空白看板；数据源与面板请通过「编排」在 Grafana 原生界面自行配置。'}
+              ? '修改监控看板基本信息，仅影响平台卡片；看板内的标题、数据源与面板不会被改动。'
+              : '创建后会在 Grafana 中生成一个空白看板。'}
           </DialogDescription>
         </DialogHeader>
 

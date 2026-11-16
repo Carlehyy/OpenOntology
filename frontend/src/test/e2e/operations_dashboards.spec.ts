@@ -319,7 +319,7 @@ async function gotoWorkbench(page: Page) {
   await expect(page.getByTestId('operations-dashboard-workbench')).toBeVisible()
 }
 
-test('看板工作台：菜单/深链/刷新可达，筛选计数与空态正确，文案表达自行配置', async ({ page }) => {
+test('看板工作台：菜单/深链/刷新可达，筛选计数与空态正确，顶部无标题文案块', async ({ page }) => {
   await mockSession(page, admin)
   const state = newState([
     makeCard({ id: 'dash-core', name: '核心链路运行态势', description: '订单与支付链路', sort_order: 0 }),
@@ -336,12 +336,17 @@ test('看板工作台：菜单/深链/刷新可达，筛选计数与空态正确
   await nav.getByRole('button', { name: '智能运营', exact: true }).click()
   await nav.getByRole('link', { name: '监控看板', exact: true }).click()
   await expect(page).toHaveURL(/\/#\/operations\/dashboard$/)
-  await expect(page.getByRole('heading', { name: '监控看板', exact: true })).toBeVisible()
+  await expect(page.getByTestId('operations-dashboard-workbench')).toBeVisible()
 
-  // 页面文案准确表达「使用者自行配置数据源与面板」
+  // 顶部文案块（h1 + 说明段落）已删除：与本体管理页对齐，筛选栏即首屏首个元素
+  await expect(page.getByRole('heading', { name: '监控看板' })).toHaveCount(0)
+  const firstSectionLabel = await page.getByTestId('operations-dashboard-workbench').evaluate(
+    node => node.firstElementChild?.getAttribute('aria-label') ?? null,
+  )
+  expect(firstSectionLabel).toBe('看板筛选')
+
+  // 页面不回显任何敏感凭证
   const bodyText = await page.locator('body').innerText()
-  expect(bodyText).toContain('自行配置')
-  expect(bodyText).toContain('共享管理员')
   expect(bodyText).not.toMatch(/GRAFANA_ADMIN_PASSWORD|oo_grafana_session|SECRET_KEY/)
   await expect(page.getByText('共 2 个看板')).toBeVisible()
   await expect.poll(() => cardOrder(page)).toEqual(['dash-core', 'dash-resource'])
@@ -375,8 +380,10 @@ test('看板工作台：空列表引导创建第一个看板', async ({ page }) 
   await gotoWorkbench(page)
 
   await expect(page.getByText('还没有监控看板')).toBeVisible()
+  await expect(page.getByText('创建第一个看板卡片，再通过「编排」配置运行态势面板')).toBeVisible()
   await expect(page.getByTestId('dashboard-create')).toBeVisible()
   await expect(page.getByRole('button', { name: '立即创建' })).toBeVisible()
+  await expect(page.getByText('先在平台建卡片，再通过「编排」配置数据源与面板')).toBeVisible()
 })
 
 test('看板工作台：列表加载失败显示 role=alert 并可重新加载', async ({ page }) => {
@@ -443,7 +450,7 @@ test('看板工作台：新建校验/提交载荷/失败保留输入，编辑只
   const uidBefore = state.cards[0].grafana_uid
   await page.getByRole('button', { name: '信息 核心链路运行态势' }).click()
   const editDialog = page.getByRole('dialog')
-  await expect(editDialog.getByText('修改只影响平台卡片', { exact: false })).toBeVisible()
+  await expect(editDialog.getByText('修改监控看板基本信息', { exact: false })).toBeVisible()
   await editDialog.getByLabel('看板名称').fill('核心链路运行态势（新）')
   await editDialog.getByRole('button', { name: '趋势图' }).click()
   await editDialog.getByTestId('dashboard-form-submit').click()

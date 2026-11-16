@@ -110,6 +110,10 @@ describe('监控看板权限与三态（冻结契约 §1/§7）', () => {
     assert.equal(shouldShowMissingBadge({ grafana_status: 'ok' }), false)
 
     assert.match(dashboardActionBlockReason({ grafana_status: 'missing' }, true) ?? '', /已找不到该看板/)
+    assert.equal(
+      dashboardActionBlockReason({ grafana_status: 'missing' }, true),
+      '监控服务中已找不到该看板；可删除卡片后重新创建',
+    )
     assert.match(dashboardActionBlockReason({ grafana_status: 'unknown' }, false) ?? '', /暂不可用/)
     assert.match(dashboardActionBlockReason({ grafana_status: 'ok' }, false) ?? '', /暂不可用/)
     assert.equal(dashboardActionBlockReason({ grafana_status: 'ok' }, true), null)
