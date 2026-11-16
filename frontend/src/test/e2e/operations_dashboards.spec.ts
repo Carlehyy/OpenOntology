@@ -346,6 +346,12 @@ test('看板工作台：菜单/深链/刷新可达，筛选计数与空态正确
   )
   expect(firstSectionLabel).toBe('看板筛选')
 
+  // 安全提示迁移：原 header 第二段的共享管理员身份披露落到编排入口 tooltip
+  const orchestrateHint = page
+    .locator('[data-dashboard-id="dash-core"]')
+    .getByTestId('dashboard-orchestrate-entry')
+  await expect(orchestrateHint).toHaveAttribute('title', /Grafana 使用共享管理员身份/)
+
   // 页面不回显任何敏感凭证
   const bodyText = await page.locator('body').innerText()
   expect(bodyText).not.toMatch(/GRAFANA_ADMIN_PASSWORD|oo_grafana_session|SECRET_KEY/)

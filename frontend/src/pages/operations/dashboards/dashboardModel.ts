@@ -31,6 +31,14 @@ export const DEFAULT_DASHBOARD_ICON: DashboardIconKey = 'activity'
  */
 export const DASHBOARD_TILE_MIN_H = 'min-h-[190px]'
 
+/**
+ * 编排入口承载的安全提示（自页面顶部 header 第二段迁移，信息不消失）：
+ * 共享管理员身份意味着平台角色不构成 Grafana 内的权限隔离，随「编排」
+ * 入口的 tooltip 披露给可写角色。
+ */
+export const DASHBOARD_ORCHESTRATE_SECURITY_HINT =
+  'Grafana 使用共享管理员身份；平台角色只约束卡片管理，不构成 Grafana 内的权限隔离。'
+
 /** 名称与描述长度上限（后端 schema 同值）。 */
 export const DASHBOARD_NAME_MAX_LENGTH = 200
 export const DASHBOARD_DESCRIPTION_MAX_LENGTH = 500

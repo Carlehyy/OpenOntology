@@ -146,7 +146,7 @@ export function DashboardPreviewDialog({
         }}
       >
         <DialogDescription className="sr-only">
-          以全屏模式预览该看板，可切换全屏或关闭弹窗。
+          在 Grafana kiosk 模式中预览该看板，可切换全屏或关闭弹窗。
         </DialogDescription>
         <div
           ref={containerRef}

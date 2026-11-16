@@ -117,7 +117,7 @@ export default function MonitoringDashboardPage() {
     onSuccess: () => {
       void refreshList()
       setEditId(null)
-      toast.success('看板信息已更新', { description: '仅更新平台卡片，未改动监控看板。' })
+      toast.success('看板信息已更新', { description: '仅更新平台卡片，未改动看板内容' })
     },
   })
 
@@ -126,7 +126,7 @@ export default function MonitoringDashboardPage() {
     onSuccess: () => {
       void refreshList()
       setDeleteTarget(null)
-      toast.success('看板已删除', { description: '远端对应的看板已一并移除。' })
+      toast.success('看板已删除', { description: '远端看板已一并移除' })
     },
     onError: error => {
       // 失败保留卡片与确认弹窗，用户可重试或取消。

@@ -5,7 +5,8 @@
  *   unknown 不显示徽标（Grafana 探测失败不能误判为已失效）。
  * - 底部：信息 / 编排 / 预览（左）、删除（右）。编排与预览在 missing 或
  *   Grafana 不可用时置灰，并用外层 span 的 title 解释原因（disabled 按钮
- *   自身不触发 title 悬浮）。
+ *   自身不触发 title 悬浮）；编排入口可用时同一 title 承载共享管理员
+ *   安全提示（自页面顶部 header 迁移）。
  * - 拖拽排序用原生 HTML5 drag（与本体卡一致），筛选激活或只读角色时禁用。
  */
 import type { DragEvent } from 'react'
@@ -14,6 +15,7 @@ import { Badge } from '@/components/ui/Badge'
 import { Eye, Pencil, SlidersHorizontal, Trash2 } from 'lucide-react'
 import type { OperationsDashboardCard } from '@/api/v2/operations-dashboards'
 import {
+  DASHBOARD_ORCHESTRATE_SECURITY_HINT,
   DASHBOARD_TILE_MIN_H,
   dashboardTimeLabel,
   shouldShowMissingBadge,
@@ -142,7 +144,11 @@ export function DashboardCardView({
           </button>
         )}
         {canWrite && (
-          <span title={actionBlockReason ?? undefined} className="inline-flex shrink-0">
+          <span
+            title={actionBlockReason ?? DASHBOARD_ORCHESTRATE_SECURITY_HINT}
+            data-testid="dashboard-orchestrate-entry"
+            className="inline-flex shrink-0"
+          >
             <button
               type="button"
               onClick={onOrchestrate}
