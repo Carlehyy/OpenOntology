@@ -161,6 +161,16 @@ async function seedAuth(page: Page, role: 'admin' | 'editor' | 'viewer' | 'custo
   }, { role, menuPermissions })
 }
 
+/** 聊天区域右键菜单：右键聊天空白处弹出五大功能入口（决策事项/项目管理/领域知识/能力拓展/会话纪要）。
+    空会话态与消息滚动区两个互斥宿主共用 data-testid（同一时刻仅其一在 DOM）；
+    点击点固定在宿主左上内边距的空白处，避开居中的消息气泡与空态输入框。 */
+async function openChatActionsMenu(page: Page) {
+  await page.getByTestId('super-assistant-chat-area').click({ button: 'right', position: { x: 12, y: 12 } })
+  const menu = page.locator('[data-ctx-menu="super-assistant-chat"]')
+  await expect(menu).toBeVisible()
+  return menu
+}
+
 const mcpServerFixture = (
   id: string,
   overrides: Record<string, unknown> = {},
@@ -407,7 +417,7 @@ async function mockApis(page: Page, options: MockOptions = {}) {
       weknoraEntryCalls.push(request.url())
       return json(route, { redirect_url: `${weknoraFixture.web_url}/sso/entry?ticket=ticket-1.signature` })
     }
-    // 项目管理（Kaneo）：页面加载读入口配置（原生 URL 作右键/中键兜底）
+    // 项目管理（Kaneo）：页面加载读入口配置（供右键菜单跳转/重试判定）
     if (path === '/api/v2/super-assistant/kaneo' && request.method() === 'GET') {
       kaneoCalls.push(request.url())
       return json(route, kaneoFixture)
@@ -1038,7 +1048,7 @@ test('工作台骨架：功能入口齐备，近期会话单列表，归档折�
   await expect(page.getByRole('button', { name: '新建会话' })).toBeVisible()
   await expect(page.getByRole('button', { name: /全局搜索/ })).toBeVisible()
   // 消息通知可点击；任务实例与能力拓展入口已移出工作台功能区（2026-11 确认）：
-  // 任务实例弹窗保留「定时任务 → 查看实例」触发链，能力拓展迁入头部图标行
+  // 任务实例弹窗保留「定时任务 → 查看实例」触发链，五大功能入口迁入聊天区域右键菜单
   const notificationsEntry = page.getByRole('button', { name: /消息通知/ })
   await expect(notificationsEntry).toBeVisible()
   await expect(notificationsEntry).toBeEnabled()
@@ -1048,11 +1058,10 @@ test('工作台骨架：功能入口齐备，近期会话单列表，归档折�
   await expect(workbenchNav.getByRole('button', { name: '任务实例', exact: true })).toHaveCount(0)
   await expect(workbenchNav.getByRole('button', { name: '能力拓展', exact: true })).toHaveCount(0)
   await expect(page.getByRole('link', { name: '本体治理' })).toBeVisible()
-  // 能力拓展入口已迁入头部图标行（领域知识与能力地图之间）
-  await expect(page.getByRole('button', { name: '能力拓展' })).toBeVisible()
+  // 五大功能入口已迁入聊天区域右键菜单：头部不再保留对应按钮/链接
+  await expect(page.getByRole('button', { name: '能力拓展' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: /退出登录/ })).toBeVisible()
-  // 知识库（WeKnora）入口位于聊天头部，左侧工作台不再保留旧入口
-  await expect(page.getByRole('link', { name: '知识库（WeKnora）' })).toBeVisible()
+  await expect(page.getByRole('link', { name: '知识库（WeKnora）' })).toHaveCount(0)
   await expect(page.locator('[data-workbench-palace]')).toHaveCount(0)
 
   // 功能项顺序契约：规则路由紧邻定时任务。
@@ -1076,16 +1085,16 @@ test('工作台骨架：功能入口齐备，近期会话单列表，归档折�
   await expect(page.getByTestId('super-assistant-composer')).toBeVisible()
 })
 
-test('规则路由：侧栏入口打开规则和事件流水，决策事项位于纪要左侧', async ({ page }) => {
+test('规则路由：侧栏入口打开规则和事件流水，头部五按钮已迁入聊天右键菜单', async ({ page }) => {
   await seedAuth(page)
   await mockApis(page)
   await page.goto('/#/super-assistant')
 
   await expect(page.getByRole('button', { name: '事件路由', exact: true })).toHaveCount(0)
-  const decisions = page.getByRole('button', { name: /决策事项，0 项未完成/ })
-  const summary = page.getByRole('button', { name: '查看会话纪要' })
-  const [decisionsBox, summaryBox] = await Promise.all([decisions.boundingBox(), summary.boundingBox()])
-  expect(decisionsBox!.x + decisionsBox!.width).toBeLessThanOrEqual(summaryBox!.x + 1)
+  // 头部五颗功能按钮（决策事项/会话纪要/项目管理/领域知识/能力拓展）已迁入
+  // 聊天区域右键菜单，头部不再保留
+  await expect(page.getByRole('button', { name: /决策事项，\d+ 项未完成/ })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '查看会话纪要' })).toHaveCount(0)
   await page.getByRole('button', { name: '规则路由', exact: true }).click()
   const dialog = page.getByRole('dialog')
   await expect(dialog.getByRole('heading', { name: '规则路由', exact: true })).toBeVisible()
@@ -1215,7 +1224,9 @@ for (const role of ['admin', 'editor', 'viewer', 'custom'] as const) {
     await expect(rules.getByRole('heading', { name: '已授权规则', exact: true })).toBeVisible()
     await page.keyboard.press('Escape')
     await expect(page.getByRole('button', { name: '规则路由', exact: true })).toBeVisible()
-    await page.getByRole('button', { name: '决策事项，1 项未完成', exact: true }).click()
+    // 决策事项入口已迁入聊天区域右键菜单
+    const menu = await openChatActionsMenu(page)
+    await menu.locator('[data-ctx-item="decisions"]').click()
     const decisions = page.getByRole('dialog', { name: '决策事项', exact: true })
     await decisions.getByRole('button', { name: /决策 authorized/ }).click()
     await expect(page).toHaveURL(/decision=authorized/)
@@ -1239,7 +1250,7 @@ for (const role of ['editor', 'viewer', 'custom'] as const) {
       await expect(page.getByRole('heading', { name: '当前页面无法访问', exact: true })).toBeVisible()
       await expect(page.getByRole('button', { name: '规则路由', exact: true })).toHaveCount(0)
       await expect(page.getByRole('dialog')).toHaveCount(0)
-      await expect(page.locator('[data-workbench-decisions]')).toHaveCount(0)
+      await expect(page.locator('[data-ctx-item="decisions"]')).toHaveCount(0)
     }
     await page.reload()
     await expect(page.getByRole('heading', { name: '当前页面无法访问', exact: true })).toBeVisible()
@@ -1415,7 +1426,8 @@ test('AutoLoop 模拟：全部未完成计数、分组排序、提交非终态�
     decisionFixture('history', { status: 'completed', resolution: { kind: 'completed', optionId: 'continue', optionLabel: '继续当前方案', freeText: '历史补充', actor: 'fixture-user', at: autoloopAt } }),
   ] })
   await page.goto('/#/super-assistant')
-  await page.getByRole('button', { name: '决策事项，7 项未完成' }).click()
+  const menu7 = await openChatActionsMenu(page)
+  await menu7.locator('[data-ctx-item="decisions"]').click()
   const dialog = page.getByRole('dialog', { name: '决策事项', exact: true })
   const cards = dialog.locator('button[aria-pressed]')
   await expect(cards).toHaveCount(3)
@@ -1502,7 +1514,8 @@ test('AutoLoop 模拟：未知请求关闭重开后沿用原幂等键，提交�
   await expect(dialog.getByRole('button', { name: '重试原请求', exact: true })).toBeEnabled()
   await page.keyboard.press('Escape')
   await expect(dialog).toHaveCount(0)
-  await page.getByRole('button', { name: '决策事项，1 项未完成' }).click()
+  const retryMenu = await openChatActionsMenu(page)
+  await retryMenu.locator('[data-ctx-item="decisions"]').click()
   await dialog.getByRole('tab', { name: /^处理中/ }).click()
   await dialog.getByRole('button', { name: /决策 retry/ }).click()
   await expect(dialog.getByRole('button', { name: '已人工处理', exact: true })).toBeDisabled()
@@ -1604,8 +1617,10 @@ test('AutoLoop 模拟：窄屏菜单顺序、规则入口与决策详情可返�
   await page.keyboard.press('Escape')
   await page.getByRole('button', { name: '更多操作', exact: true }).click()
   const menu = page.getByRole('dialog')
-  await expect(menu.getByRole('button').nth(0)).toHaveText(/决策事项\s*1/)
-  await expect(menu.getByRole('button').nth(1)).toHaveText('会话纪要')
+  // 五大功能入口已迁入聊天区域右键菜单：溢出菜单只保留实时浏览器/助手配置
+  await expect(menu.getByRole('button')).toHaveCount(2)
+  await expect(menu.getByRole('button').nth(0)).toHaveText(/实时浏览器/)
+  await expect(menu.getByRole('button').nth(1)).toHaveText(/助手配置/)
   await page.keyboard.press('Escape')
   await page.getByRole('button', { name: '打开工作台导航' }).click()
   await page.getByRole('button', { name: '规则路由', exact: true }).click()
@@ -3052,77 +3067,63 @@ test('重命名会话：点击其它处自动取消，Enter 仍可保存', async
   expect(JSON.parse(mocks.patchBodies[0])).toMatchObject({ title: '新名称' })
 })
 
-test('知识库（WeKnora）：头部会话纪要右侧入口，一键免登录新标签进入原生页面（新会话可用）', async ({ page }) => {
+test('聊天区域右键菜单：空白处弹出五项入口，气泡与输入框放行原生菜单', async ({ page }) => {
   await seedAuth(page)
-  const mocks = await mockApis(page)
-  // 原生 WeKnora 页面在测试网络外：本地兜底响应只验证新标签跳转与 opener 隔离
-  await page.context().route(/^https:\/\/weknora\.example\.com:8443(?:\/.*)?$/, route => route.fulfill({
-    status: 200,
-    contentType: 'text/html',
-    body: '<!doctype html><title>WeKnora</title><p>WeKnora 原生登录</p>',
-  }))
-  // 有消息会话上点击「新建会话」进入未落地视图（selectedId 为 null）：
-  // 既有空会话上点击只会聚焦输入框，不切换视图，不能用来制造新会话态。
+  await mockApis(page)
+  // 有消息会话：消息滚动区空白处右键弹菜单，五项齐备且顺序固定
   await page.goto('/#/super-assistant?conversation=c-earlier')
   await expect(page.getByText('上周的答复')).toBeVisible()
+  const menu = await openChatActionsMenu(page)
+  const itemKeys = await menu.locator('[data-ctx-item]').evaluateAll(
+    els => els.map(el => (el as HTMLElement).dataset.ctxItem),
+  )
+  expect(itemKeys).toEqual(['decisions', 'kaneo', 'weknora', 'integrations', 'summary'])
+  for (const label of ['决策事项', '项目管理', '领域知识', '能力拓展', '会话纪要']) {
+    await expect(menu.getByText(label, { exact: true })).toBeVisible()
+  }
+  await page.keyboard.press('Escape')
+  await expect(menu).toHaveCount(0)
+
+  // 消息气泡（用户/助手消息内容）上右键：放行浏览器原生菜单，不弹自研菜单
+  await page.locator('#super-assistant-msg-m-e1').click({ button: 'right' })
+  await expect(page.locator('[data-ctx-menu="super-assistant-chat"]')).toHaveCount(0)
+  await page.locator('#super-assistant-msg-m-e2').click({ button: 'right' })
+  await expect(page.locator('[data-ctx-menu="super-assistant-chat"]')).toHaveCount(0)
+
+  // 空会话态（新会话，未落地视图）空白处同样弹出五项
   await page.getByRole('button', { name: '新建会话' }).click()
   await expect(page).not.toHaveURL(/conversation=/)
   await expect(page.getByTestId('super-assistant-composer')).toBeVisible()
+  const emptyMenu = await openChatActionsMenu(page)
+  await expect(emptyMenu.locator('[data-ctx-item]')).toHaveCount(5)
+  await page.keyboard.press('Escape')
 
-  // 左侧工作台不再提供旧知识库入口
-  const nav = page.locator('nav[aria-label="工作台功能"]')
-  await expect(nav.getByText('知识库（WeKnora）')).toHaveCount(0)
-  await expect(page.locator('[data-workbench-palace]')).toHaveCount(0)
-
-  // 入口位于「会话纪要」右侧，使用后端返回的原生 Web URL；悬停文案为「领域知识」
-  const link = page.getByRole('link', { name: '知识库（WeKnora）' })
-  await expect(link).toBeVisible()
-  await expect(link).toHaveAttribute('href', 'https://weknora.example.com:8443')
-  await expect(link).toHaveAttribute('target', '_blank')
-  await expect(link).toHaveAttribute('rel', 'noopener noreferrer')
-  await expect(link).toHaveAttribute('title', '领域知识')
-  const summary = page.getByRole('button', { name: '查看会话纪要' })
-  const [summaryBox, linkBox] = await Promise.all([summary.boundingBox(), link.boundingBox()])
-  expect(summaryBox!.x + summaryBox!.width).toBeLessThanOrEqual(linkBox!.x + 1)
-  await expect.poll(() => mocks.weknoraCalls.length).toBeGreaterThanOrEqual(1)
-  expect(mocks.weknoraCalls[0]).toContain('/api/v2/super-assistant/weknora')
-  // 页面加载不领票：票据只在点击时签发（90s 一次性）
-  expect(mocks.weknoraEntryCalls).toHaveLength(0)
-
-  // 普通左键：领一次性票据后新标签进入 WeKnora origin 的免登录入口（登录由
-  // 网关中继完成），window.opener 已被隔离
-  const popupPromise = page.waitForEvent('popup')
-  await link.click()
-  const popup = await popupPromise
-  await popup.waitForURL('https://weknora.example.com:8443/sso/entry?ticket=ticket-1.signature')
-  expect(mocks.weknoraEntryCalls).toHaveLength(1)
-  expect(mocks.weknoraEntryCalls[0]).toContain('/api/v2/super-assistant/weknora/entry')
-  expect(await popup.evaluate(() => window.opener)).toBeNull()
-  await popup.close()
+  // 输入框（空会话态下位于聊天区菜单宿主内）右键保留浏览器原生菜单
+  await page.getByRole('textbox', { name: '向超级助手发送消息' }).click({ button: 'right' })
+  await expect(page.locator('[data-ctx-menu="super-assistant-chat"]')).toHaveCount(0)
 })
 
-test('知识库（WeKnora）：后端下发回环地址时改写为当前访问主机，协议端口保留', async ({ page, baseURL }) => {
+test('知识库（WeKnora）：入口配置异常协议时不领票不跳转，右键菜单退化为就地重试', async ({ page }) => {
   await seedAuth(page)
-  // 选取与页面不同的回环主机，让两种本地启动地址都能验证实际改写。
-  const hostname = new URL(baseURL!).hostname
-  const backendHost = hostname === 'localhost' ? '127.0.0.1' : 'localhost'
-  const expectedUrl = `http://${hostname}:8089`
-  await mockApis(page, { weknoraWebUrl: `http://${backendHost}:8089` })
+  const mocks = await mockApis(page)
+  // 入口配置下发非法协议：右键菜单不提供跳转（不领票），退化为重新拉取入口配置
+  let weknoraServed = 0
+  await page.route('**/api/v2/super-assistant/weknora', route => {
+    weknoraServed += 1
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { web_url: 'javascript:alert(1)' } }),
+    })
+  })
   await page.goto('/#/super-assistant')
 
-  const link = page.getByRole('link', { name: '知识库（WeKnora）' })
-  await expect(link).toBeVisible()
-  await expect(link).toHaveAttribute('href', expectedUrl)
-  await expect(link).toHaveAttribute('target', '_blank')
-  await expect(link).toHaveAttribute('rel', 'noopener noreferrer')
-
-  // 窄屏溢出菜单入口走同一派生结果
-  await page.setViewportSize({ width: 375, height: 720 })
-  await expect(page.getByRole('link', { name: '知识库（WeKnora）' })).toBeHidden()
-  await page.getByRole('button', { name: '更多操作' }).click()
-  const menuLink = page.getByRole('dialog').getByRole('link', { name: '知识库（WeKnora）' })
-  await expect(menuLink).toBeVisible()
-  await expect(menuLink).toHaveAttribute('href', expectedUrl)
+  const menu = await openChatActionsMenu(page)
+  await menu.locator('[data-ctx-item="weknora"]').click()
+  // StrictMode 挂载期双发（2 次）+ 菜单项触发的重拉（1 次）
+  await expect.poll(() => weknoraServed).toBeGreaterThanOrEqual(3)
+  expect(mocks.weknoraEntryCalls).toHaveLength(0)
+  expect(await page.locator('a[href^="javascript:"]').count()).toBe(0)
 })
 
 test('知识库（WeKnora）：免登录跳转地址回环时改写为当前访问主机，票据保留', async ({ page, baseURL }) => {
@@ -3152,10 +3153,10 @@ test('知识库（WeKnora）：免登录跳转地址回环时改写为当前访�
   }))
   await page.goto('/#/super-assistant')
 
-  const link = page.getByRole('link', { name: '知识库（WeKnora）' })
-  await expect(link).toBeVisible()
+  // 聊天区域右键菜单「领域知识」点击：领一次性票据新标签进入改写后的入口地址
+  const menu = await openChatActionsMenu(page)
   const popupPromise = page.waitForEvent('popup')
-  await link.click()
+  await menu.locator('[data-ctx-item="weknora"]').click()
   const popup = await popupPromise
   await popup.waitForURL(expectedUrl)
   expect(entryCalls).toBe(1)
@@ -3173,21 +3174,27 @@ test('知识库（WeKnora）：免登录票据领取失败时如实报错，空�
   }))
   await page.goto('/#/super-assistant')
 
-  const weknoraLink = page.getByRole('link', { name: '知识库（WeKnora）' })
-  await expect(weknoraLink).toBeVisible()
-  // 同步打开的空白标签在失败后被关闭，不残留任何新标签
+  // 聊天区域右键菜单「领域知识」点击：同步打开的空白标签在票据失败后被关闭
+  const menu = await openChatActionsMenu(page)
   const popupPromise = page.waitForEvent('popup')
-  await weknoraLink.click()
+  await menu.locator('[data-ctx-item="weknora"]').click()
   const popup = await popupPromise
   await expect(page.getByText('领域知识入口打开失败')).toBeVisible()
   await expect.poll(() => popup.isClosed()).toBe(true)
-  // 入口保留：原生 URL 直开（WeKnora 自己的登录页）仍是可用兜底
-  await expect(weknoraLink).toHaveAttribute('href', 'https://weknora.example.com:8443')
+  // 入口保留：右键菜单再次弹出且领域知识项仍在（原生 Web 直开仍是可用兜底）
+  const menuAgain = await openChatActionsMenu(page)
+  await expect(menuAgain.locator('[data-ctx-item="weknora"]')).toBeVisible()
 })
 
-test('知识库（WeKnora）：修饰键点击保留原生直开兜底，不领取免登录票据', async ({ page }) => {
+test('聊天区域右键菜单：五项点击行为与原头部入口一致', async ({ page }) => {
   await seedAuth(page)
   const mocks = await mockApis(page)
+  // Kaneo/WeKnora 原生页面在测试网络外：本地兜底响应只验证新标签跳转与 opener 隔离
+  await page.context().route(/^https:\/\/kaneo\.example\.com:8445(?:\/.*)?$/, route => route.fulfill({
+    status: 200,
+    contentType: 'text/html',
+    body: '<!doctype html><title>Kaneo</title><p>Kaneo 项目管理</p>',
+  }))
   await page.context().route(/^https:\/\/weknora\.example\.com:8443(?:\/.*)?$/, route => route.fulfill({
     status: 200,
     contentType: 'text/html',
@@ -3195,98 +3202,94 @@ test('知识库（WeKnora）：修饰键点击保留原生直开兜底，不领�
   }))
   await page.goto('/#/super-assistant')
 
-  // Ctrl/Cmd+点击走浏览器原生行为：新标签直开原生 URL（WeKnora 登录页手动
-  // 兜底），不触发免登录票据领取
-  const weknoraLink = page.getByRole('link', { name: '知识库（WeKnora）' })
-  await expect(weknoraLink).toBeVisible()
-  const popupPromise = page.context().waitForEvent('page')
-  await weknoraLink.click({ modifiers: ['ControlOrMeta'] })
-  const popup = await popupPromise
-  expect(page.context().pages().length).toBe(2)
-  expect(mocks.weknoraEntryCalls).toHaveLength(0)
-  expect(page.url()).toContain('/super-assistant')
-  await popup.close()
-})
-
-test('项目管理（Kaneo）：位于领域知识左侧，一键免登录新标签进入原生页面且 opener 隔离', async ({ page }) => {
-  await seedAuth(page)
-  const mocks = await mockApis(page)
-  // Kaneo 原生页面在测试网络外：本地兜底响应只验证新标签跳转与 opener 隔离
-  await page.context().route(/^https:\/\/kaneo\.example\.com:8445(?:\/.*)?$/, route => route.fulfill({
-    status: 200,
-    contentType: 'text/html',
-    body: '<!doctype html><title>Kaneo</title><p>Kaneo 项目管理</p>',
-  }))
-  await page.goto('/#/super-assistant')
-
-  // 头部顺序：决策事项、会话纪要、项目管理、知识库。规则路由从侧栏进入。
-  const kaneoLink = page.getByRole('link', { name: '项目管理（Kaneo）' })
-  const weknoraLink = page.getByRole('link', { name: '知识库（WeKnora）' })
-  const summary = page.getByRole('button', { name: '查看会话纪要' })
-  const decisions = page.getByRole('button', { name: /决策事项，0 项未完成/ })
-  await expect(kaneoLink).toBeVisible()
-  // href/target/rel 保留原生直开语义：中键/修饰键/右键落到 Kaneo 登录页作手动兜底
-  await expect(kaneoLink).toHaveAttribute('href', 'https://kaneo.example.com:8445')
-  await expect(kaneoLink).toHaveAttribute('target', '_blank')
-  await expect(kaneoLink).toHaveAttribute('rel', 'noopener noreferrer')
-  await expect(kaneoLink).toHaveAttribute('title', '项目管理')
-  const [decisionsBox, summaryBox, kaneoBox, weknoraBox] = await Promise.all([
-    decisions.boundingBox(), summary.boundingBox(), kaneoLink.boundingBox(), weknoraLink.boundingBox(),
-  ])
-  expect(decisionsBox!.x + decisionsBox!.width).toBeLessThanOrEqual(summaryBox!.x + 1)
-  expect(summaryBox!.x + summaryBox!.width).toBeLessThanOrEqual(kaneoBox!.x + 1)
-  expect(kaneoBox!.x + kaneoBox!.width).toBeLessThanOrEqual(weknoraBox!.x + 1)
   await expect.poll(() => mocks.kaneoCalls.length).toBeGreaterThanOrEqual(1)
   expect(mocks.kaneoCalls[0]).toContain('/api/v2/super-assistant/kaneo')
   // 页面加载不领票：票据只在点击时签发（90s 一次性）
   expect(mocks.kaneoEntryCalls).toHaveLength(0)
 
-  // 普通左键：领一次性票据后新标签进入 Kaneo origin 的免登录入口（登录由网关
-  // 中继完成），window.opener 已被隔离
-  const popupPromise = page.waitForEvent('popup')
-  await kaneoLink.click()
-  const popup = await popupPromise
-  await popup.waitForURL('https://kaneo.example.com:8445/sso/entry?ticket=ticket-1.signature')
+  // 决策事项：打开弹窗并回写 ?decisions=1 深链（canUseAutoLoop 门控与原按钮一致）
+  let menu = await openChatActionsMenu(page)
+  await menu.locator('[data-ctx-item="decisions"]').click()
+  const decisionsDialog = page.getByRole('dialog', { name: '决策事项', exact: true })
+  await expect(decisionsDialog).toBeVisible()
+  await expect(page).toHaveURL(/decisions=1/)
+  // 菜单项点击后菜单层可能仍在卸载（动画/清理竞态）：先等菜单完全卸载再按 Esc，
+  // 否则 Esc 被菜单层吞掉、弹窗保持打开（高负载下曾复现）
+  await expect(page.locator('[data-ctx-menu="super-assistant-chat"]')).toHaveCount(0)
+  await page.keyboard.press('Escape')
+  await expect(decisionsDialog).toHaveCount(0)
+
+  // 能力拓展：打开条件挂载的常开弹层
+  menu = await openChatActionsMenu(page)
+  await menu.locator('[data-ctx-item="integrations"]').click()
+  const integrationsDialog = page.getByRole('dialog')
+  await expect(integrationsDialog.getByRole('heading', { name: '能力拓展' })).toBeVisible()
+  await expect(page.locator('[data-ctx-menu="super-assistant-chat"]')).toHaveCount(0)
+  await page.keyboard.press('Escape')
+  await expect(integrationsDialog).toHaveCount(0)
+
+  // 会话纪要：打开纪要弹窗
+  menu = await openChatActionsMenu(page)
+  await menu.locator('[data-ctx-item="summary"]').click()
+  const summaryDialog = page.getByRole('dialog', { name: '会话纪要' })
+  await expect(summaryDialog).toBeVisible()
+  await expect(page.locator('[data-ctx-menu="super-assistant-chat"]')).toHaveCount(0)
+  await page.keyboard.press('Escape')
+  await expect(summaryDialog).toHaveCount(0)
+
+  // 项目管理（Kaneo）：领一次性票据后新标签进入 Kaneo origin 的免登录入口
+  // （登录由网关中继完成），window.opener 已被隔离
+  menu = await openChatActionsMenu(page)
+  const kaneoPopupPromise = page.waitForEvent('popup')
+  await menu.locator('[data-ctx-item="kaneo"]').click()
+  const kaneoPopup = await kaneoPopupPromise
+  await kaneoPopup.waitForURL('https://kaneo.example.com:8445/sso/entry?ticket=ticket-1.signature')
   expect(mocks.kaneoEntryCalls).toHaveLength(1)
   expect(mocks.kaneoEntryCalls[0]).toContain('/api/v2/super-assistant/kaneo/entry')
-  expect(await popup.evaluate(() => window.opener)).toBeNull()
-  await popup.close()
+  expect(await kaneoPopup.evaluate(() => window.opener)).toBeNull()
+  await kaneoPopup.close()
+
+  // 领域知识（WeKnora）：同样领一次性票据新标签进入免登录入口
+  menu = await openChatActionsMenu(page)
+  const weknoraPopupPromise = page.waitForEvent('popup')
+  await menu.locator('[data-ctx-item="weknora"]').click()
+  const weknoraPopup = await weknoraPopupPromise
+  await weknoraPopup.waitForURL('https://weknora.example.com:8443/sso/entry?ticket=ticket-1.signature')
+  expect(mocks.weknoraEntryCalls).toHaveLength(1)
+  expect(mocks.weknoraEntryCalls[0]).toContain('/api/v2/super-assistant/weknora/entry')
+  expect(await weknoraPopup.evaluate(() => window.opener)).toBeNull()
+  await weknoraPopup.close()
 })
 
-test('项目管理（Kaneo）：回环下发保留后端 canonical origin，窄屏更多菜单顺序与头部一致', async ({ page }) => {
-  await seedAuth(page)
-  // Kaneo 与 WeKnora 不同：其前端 API/认证 origin 固定注入自 KANEO_WEB_URL，
-  // 回环主机改写成当前访问主机会与上游 trustedOrigins/cookie/API 不一致
-  // （登录 403）。因此严格保留后端下发值（未显式配置即默认 https://localhost:8445，
-  // HTTP 8090 由 nginx 跳 HTTPS）；本地 localhost 默认可用，远程访问须部署方
-  // 显式配置 KANEO_WEB_URL。夹具取 127.0.0.1 以验证不改写。
-  await mockApis(page, { kaneoWebUrl: 'https://127.0.0.1:8445' })
-  await page.goto('/#/super-assistant')
-
-  const kaneoLink = page.getByRole('link', { name: '项目管理（Kaneo）' })
-  await expect(kaneoLink).toBeVisible()
-  await expect(kaneoLink).toHaveAttribute('href', 'https://127.0.0.1:8445')
-
-  // 窄屏溢出菜单顺序与头部一致：决策事项 → 会话纪要 → 项目管理（Kaneo）→ 知识库（WeKnora）
-  await page.setViewportSize({ width: 375, height: 720 })
-  await expect(page.getByRole('link', { name: '项目管理（Kaneo）' })).toBeHidden()
-  await page.getByRole('button', { name: '更多操作' }).click()
-  const menu = page.getByRole('dialog')
-  const menuItems = menu.locator('a, button')
-  await expect(menuItems.first()).toHaveText(/决策事项\s*0/)
-  await expect(menuItems.nth(1)).toHaveText('会话纪要')
-  await expect(menuItems.nth(2)).toHaveAttribute('aria-label', '项目管理（Kaneo）')
-  await expect(menuItems.nth(3)).toHaveAttribute('aria-label', '知识库（WeKnora）')
-  const menuKaneoLink = menu.getByRole('link', { name: '项目管理（Kaneo）' })
-  await expect(menuKaneoLink).toBeVisible()
-  await expect(menuKaneoLink).toHaveAttribute('href', 'https://127.0.0.1:8445')
-  await expect(menuKaneoLink).toHaveAttribute('rel', 'noopener noreferrer')
-  await expect(menuKaneoLink).toHaveAttribute('title', '项目管理')
-})
-
-test('项目管理（Kaneo）：加载失败与非法协议不提供跳转，重试后恢复入口', async ({ page }) => {
+test('窄屏：溢出菜单移除五大入口仅留实时浏览器/助手配置，聊天右键菜单同样可用', async ({ page }) => {
   await seedAuth(page)
   await mockApis(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/#/super-assistant?conversation=c-earlier')
+
+  // 窄屏「更多操作」溢出菜单：五大入口已迁入聊天区域右键菜单，仅保留
+  // 实时浏览器/助手配置两项
+  await page.getByRole('button', { name: '更多操作' }).click()
+  const menu = page.getByRole('dialog')
+  await expect(menu.getByRole('button')).toHaveCount(2)
+  await expect(menu.getByRole('button').nth(0)).toHaveText(/实时浏览器/)
+  await expect(menu.getByRole('button').nth(1)).toHaveText(/助手配置/)
+  await page.keyboard.press('Escape')
+
+  // 聊天区域右键菜单在窄屏同样弹出且五项齐备
+  const chatMenu = await openChatActionsMenu(page)
+  await expect(chatMenu.locator('[data-ctx-item]')).toHaveCount(5)
+})
+
+test('项目管理（Kaneo）：加载失败与非法协议不领票不跳转，恢复后免登录新标签可达', async ({ page }) => {
+  await seedAuth(page)
+  const mocks = await mockApis(page)
+  // Kaneo 原生页面在测试网络外：本地兜底响应只验证新标签跳转
+  await page.context().route(/^https:\/\/kaneo\.example\.com:8445(?:\/.*)?$/, route => route.fulfill({
+    status: 200,
+    contentType: 'text/html',
+    body: '<!doctype html><title>Kaneo</title><p>Kaneo 项目管理</p>',
+  }))
   // 依次制造三种后端态：500（加载失败）→ javascript:（异常协议）→ 公网地址（恢复）；
   // 用 phase 而非调用序号取值，兼容 StrictMode 挂载期 effect 双发
   let phase = 0
@@ -3301,32 +3304,33 @@ test('项目管理（Kaneo）：加载失败与非法协议不提供跳转，重
   })
   await page.goto('/#/super-assistant')
 
-  // 初次加载失败：不出现跳转链接，入口退为可重试按钮（初始失败不打扰用户）
-  const retryButton = page.getByRole('button', { name: '项目管理（Kaneo）' })
-  await expect(retryButton).toBeVisible()
-  await expect(retryButton).toHaveAttribute('title', '项目管理')
-  await expect(page.getByRole('link', { name: '项目管理（Kaneo）' })).toHaveCount(0)
-
-  // 手动重试再遇 500：如实报错，入口保留
-  await retryButton.click()
+  // 初次加载失败：右键菜单点击「项目管理」→ 就地重试并如实报错（不领票、不跳转）
+  let menu = await openChatActionsMenu(page)
+  await menu.locator('[data-ctx-item="kaneo"]').click()
   await expect(page.getByText('项目管理入口加载失败')).toBeVisible()
-  await expect(page.getByRole('link', { name: '项目管理（Kaneo）' })).toHaveCount(0)
+  expect(mocks.kaneoEntryCalls).toHaveLength(0)
 
-  // 重试落到非法协议：仍不提供跳转，页面不出现 javascript: 链接
+  // 重试落到非法协议：仍不提供跳转（不领票），页面不出现 javascript: 链接
   phase = 1
-  await retryButton.click()
+  menu = await openChatActionsMenu(page)
+  await menu.locator('[data-ctx-item="kaneo"]').click()
   await expect.poll(() => kaneoServed).toBeGreaterThanOrEqual(4)
-  await expect(page.getByRole('link', { name: '项目管理（Kaneo）' })).toHaveCount(0)
-  await expect(retryButton).toBeVisible()
+  expect(mocks.kaneoEntryCalls).toHaveLength(0)
   expect(await page.locator('a[href^="javascript:"]').count()).toBe(0)
 
-  // 再次重试拿到公网地址：入口恢复为新标签链接
+  // 再次重试拿到公网地址：入口恢复，再次点击即免登录新标签跳转
+  // （拉取期间菜单项禁用，点击自动等待恢复；跳转 URL 来自 entry 票据）
   phase = 2
-  await retryButton.click()
-  const kaneoLink = page.getByRole('link', { name: '项目管理（Kaneo）' })
-  await expect(kaneoLink).toBeVisible()
-  await expect(kaneoLink).toHaveAttribute('href', 'https://kaneo.example.com:8445')
-  await expect(kaneoLink).toHaveAttribute('rel', 'noopener noreferrer')
+  menu = await openChatActionsMenu(page)
+  await menu.locator('[data-ctx-item="kaneo"]').click()
+  await expect.poll(() => kaneoServed).toBeGreaterThanOrEqual(5)
+  menu = await openChatActionsMenu(page)
+  const popupPromise = page.waitForEvent('popup')
+  await menu.locator('[data-ctx-item="kaneo"]').click()
+  const popup = await popupPromise
+  await popup.waitForURL('https://kaneo.example.com:8445/sso/entry?ticket=ticket-1.signature')
+  expect(mocks.kaneoEntryCalls).toHaveLength(1)
+  await popup.close()
 })
 
 test('项目管理（Kaneo）：免登录票据领取失败时如实报错，空白标签被关闭，入口保留', async ({ page }) => {
@@ -3340,42 +3344,16 @@ test('项目管理（Kaneo）：免登录票据领取失败时如实报错，空
   }))
   await page.goto('/#/super-assistant')
 
-  const kaneoLink = page.getByRole('link', { name: '项目管理（Kaneo）' })
-  await expect(kaneoLink).toBeVisible()
-  // 同步打开的空白标签在失败后被关闭，不残留任何新标签
+  // 聊天区域右键菜单「项目管理」点击：同步打开的空白标签在票据失败后被关闭
+  const menu = await openChatActionsMenu(page)
   const popupPromise = page.waitForEvent('popup')
-  await kaneoLink.click()
+  await menu.locator('[data-ctx-item="kaneo"]').click()
   const popup = await popupPromise
   await expect(page.getByText('项目管理入口打开失败')).toBeVisible()
   await expect.poll(() => popup.isClosed()).toBe(true)
-  // 入口保留：原生 URL 直开（Kaneo 自己的登录页）仍是可用兜底
-  await expect(kaneoLink).toHaveAttribute('href', 'https://kaneo.example.com:8445')
-})
-
-test('项目管理（Kaneo）：修饰键点击保留原生直开兜底，不领取免登录票据', async ({ page }) => {
-  await seedAuth(page)
-  const mocks = await mockApis(page)
-  await page.context().route(/^https:\/\/kaneo\.example\.com:8445(?:\/.*)?$/, route => route.fulfill({
-    status: 200,
-    contentType: 'text/html',
-    body: '<!doctype html><title>Kaneo</title><p>Kaneo 项目管理登录</p>',
-  }))
-  await page.goto('/#/super-assistant')
-
-  // Ctrl/Cmd+点击走浏览器原生行为：新标签直开原生 URL（Kaneo 登录页手动兜底），
-  // 不触发免登录票据领取
-  const kaneoLink = page.getByRole('link', { name: '项目管理（Kaneo）' })
-  await expect(kaneoLink).toBeVisible()
-  const popupPromise = page.context().waitForEvent('page')
-  await kaneoLink.click({ modifiers: ['ControlOrMeta'] })
-  const popup = await popupPromise
-  // 断言原生行为本身：新标签已开（落点即 href 原生地址，由浏览器保证）、
-  // 主页面未被导航走、未领取免登录票据；后台标签在 headless 下会延迟
-  // 渲染，不断言其加载完成
-  expect(page.context().pages().length).toBe(2)
-  expect(mocks.kaneoEntryCalls).toHaveLength(0)
-  expect(page.url()).toContain('/super-assistant')
-  await popup.close()
+  // 入口保留：右键菜单再次弹出且项目管理项仍在（原生 Web 直开仍是可用兜底）
+  const menuAgain = await openChatActionsMenu(page)
+  await expect(menuAgain.locator('[data-ctx-item="kaneo"]')).toBeVisible()
 })
 
 test('能力拓展：multica 测试连接、工作区下拉与保存', async ({ page }) => {
@@ -3383,22 +3361,11 @@ test('能力拓展：multica 测试连接、工作区下拉与保存', async ({ 
   const mocks = await mockApis(page)
   await page.goto('/#/super-assistant')
 
-  // 能力拓展已是真实功能：入口迁至头部图标行（用户确认插在「领域知识」与
-  // 「能力地图」之间），打开左侧集成类型 tabs（multica / 远程助手），
-  // multica 默认选中并走通「测试连接 → 选工作区 → 保存」
-  const weknoraEntry = page.locator('[data-workbench-weknora]')
-  const integrationsEntry = page.getByRole('button', { name: '能力拓展' })
-  const capabilityEntry = page.getByRole('button', { name: '查看能力地图' })
-  // 头部图标行相对位置契约：领域知识 → 能力拓展 → 能力地图
-  const [weknoraBox, integrationsBox, capabilityBox] = await Promise.all([
-    weknoraEntry.boundingBox(), integrationsEntry.boundingBox(), capabilityEntry.boundingBox(),
-  ])
-  expect(weknoraBox).not.toBeNull()
-  expect(integrationsBox).not.toBeNull()
-  expect(capabilityBox).not.toBeNull()
-  expect(weknoraBox!.x + weknoraBox!.width).toBeLessThanOrEqual(integrationsBox!.x + 1)
-  expect(integrationsBox!.x + integrationsBox!.width).toBeLessThanOrEqual(capabilityBox!.x + 1)
-  await integrationsEntry.click()
+  // 能力拓展已是真实功能：入口已迁入聊天区域右键菜单（原头部按钮移除），
+  // 打开左侧集成类型 tabs（multica / 远程助手），multica 默认选中并走通
+  // 「测试连接 → 选工作区 → 保存」
+  const menu = await openChatActionsMenu(page)
+  await menu.locator('[data-ctx-item="integrations"]').click()
   const integrationsDialog = page.getByRole('dialog')
   await expect(integrationsDialog.getByRole('heading', { name: '能力拓展' })).toBeVisible()
   const multicaTab = integrationsDialog.locator('[data-integrations-tab="multica"]')
@@ -3444,12 +3411,10 @@ test('能力拓展：multica 测试连接、工作区下拉与保存', async ({ 
   })
   await expect(integrationsDialog).toHaveCount(0)
 
-  // 窄屏（<md）：头部入口让位标题/模型选择器，收进「更多操作」溢出菜单
-  // （与领域知识等头部入口同位），菜单内仍可打开同一弹窗
+  // 窄屏（<md）：头部五按钮已迁入聊天区域右键菜单，弹窗能力不变
   await page.setViewportSize({ width: 390, height: 844 })
-  await expect(page.getByRole('button', { name: '能力拓展' })).toBeHidden()
-  await page.getByRole('button', { name: '更多操作' }).click()
-  await page.getByRole('button', { name: '能力拓展' }).click()
+  const narrowMenu = await openChatActionsMenu(page)
+  await narrowMenu.locator('[data-ctx-item="integrations"]').click()
   await expect(page.getByRole('dialog').getByRole('heading', { name: '能力拓展' })).toBeVisible()
 })
 
@@ -3458,7 +3423,8 @@ test('multica 配置弹窗：已配置时打开即拉取全量工作区，无需
   const mocks = await mockApis(page, { multicaConfig: multicaEnabledFixture })
   await page.goto('/#/super-assistant')
 
-  await page.getByRole('button', { name: '能力拓展' }).click()
+  const configuredMenu = await openChatActionsMenu(page)
+  await configuredMenu.locator('[data-ctx-item="integrations"]').click()
   const dialog = page.getByRole('dialog')
   await expect(dialog.getByRole('heading', { name: '能力拓展' })).toBeVisible()
   await expect(dialog.getByTestId('multica-config-card')).toBeVisible()
@@ -3600,7 +3566,8 @@ test('远程助手：邀请函自助接入主路径，手动配置为高级路�
   const mocks = await mockApis(page)
   await page.goto('/#/super-assistant')
 
-  await page.getByRole('button', { name: '能力拓展' }).click()
+  const remoteMenu = await openChatActionsMenu(page)
+  await remoteMenu.locator('[data-ctx-item="integrations"]').click()
   const integrationsDialog = page.getByRole('dialog')
   await expect(integrationsDialog.getByRole('heading', { name: '能力拓展' })).toBeVisible()
   await integrationsDialog.locator('[data-integrations-tab="remote-agents"]').click()
@@ -3659,7 +3626,8 @@ test('远程助手：空目录展示首次邀请文案，加载完成前不闪�
     remoteAgentsDelayMs: 1200,
   })
   await page.goto('/#/super-assistant')
-  await page.getByRole('button', { name: '能力拓展' }).click()
+  const emptyDirMenu = await openChatActionsMenu(page)
+  await emptyDirMenu.locator('[data-ctx-item="integrations"]').click()
   const integrationsDialog = page.getByRole('dialog')
   await integrationsDialog.locator('[data-integrations-tab="remote-agents"]').click()
 
@@ -3943,29 +3911,25 @@ test.describe('窄屏顶栏与会话操作（390px）', () => {
     await expect(page.getByRole('button', { name: '关闭助手配置' })).toBeVisible()
   })
 
-  test('知识库（WeKnora）入口收进更多操作，窄屏仍指向原生页面', async ({ page }) => {
+  test('聊天区域右键菜单窄屏可用：领域知识项免登录新标签进入原生页面', async ({ page }) => {
     await seedAuth(page)
     await mockApis(page)
+    await page.context().route(/^https:\/\/weknora\.example\.com:8443(?:\/.*)?$/, route => route.fulfill({
+      status: 200,
+      contentType: 'text/html',
+      body: '<!doctype html><title>WeKnora</title><p>WeKnora 原生登录</p>',
+    }))
     await page.goto('/#/super-assistant')
 
-    // 头部图标入口让位标题/模型选择器，但能力本身仍可从溢出菜单进入
-    await expect(page.getByRole('link', { name: '知识库（WeKnora）' })).toBeHidden()
-    await page.getByRole('button', { name: '更多操作' }).click()
-    const menu = page.getByRole('dialog')
-    // 溢出菜单顺序与头部一致：决策事项 → 会话纪要 → 项目管理（Kaneo）→ 知识库（WeKnora）→ 能力拓展
-    const menuItems = menu.locator('a, button')
-    await expect(menuItems.first()).toHaveText(/决策事项\s*0/)
-    await expect(menuItems.nth(1)).toHaveText('会话纪要')
-    await expect(menuItems.nth(2)).toHaveAttribute('aria-label', '项目管理（Kaneo）')
-    await expect(menuItems.nth(3)).toHaveAttribute('aria-label', '知识库（WeKnora）')
-    // 能力拓展自侧栏迁入头部（领域知识与能力地图之间）：溢出菜单同步复刻该入口
-    await expect(menuItems.nth(4)).toHaveText('能力拓展')
-    const link = menu.getByRole('link', { name: '知识库（WeKnora）' })
-    await expect(link).toBeVisible()
-    await expect(link).toHaveAttribute('href', 'https://weknora.example.com:8443')
-    await expect(link).toHaveAttribute('target', '_blank')
-    await expect(link).toHaveAttribute('rel', 'noopener noreferrer')
-    await expect(link).toHaveAttribute('title', '领域知识')
+    // 五大入口已迁入聊天区域右键菜单：窄屏同样弹出且五项齐备
+    const menu = await openChatActionsMenu(page)
+    await expect(menu.locator('[data-ctx-item]')).toHaveCount(5)
+    // 领域知识项：领一次性票据新标签进入 WeKnora origin 的免登录入口
+    const popupPromise = page.waitForEvent('popup')
+    await menu.locator('[data-ctx-item="weknora"]').click()
+    const popup = await popupPromise
+    await popup.waitForURL('https://weknora.example.com:8443/sso/entry?ticket=ticket-1.signature')
+    await popup.close()
   })
 
   test('触屏无悬停：会话行归档/删除常显可达', async ({ page }) => {
@@ -5195,24 +5159,16 @@ test('能力地图：暗色令牌、无导航授权账号可读说明且不增�
 
 // 会话纪要是旁路能力：展示每会话最新一份结构化纪要与生成时间，模型配置为
 // 用户级全局设置（对所有会话生效），自动生成不打扰对话主流程。
-test('会话纪要：能力地图左侧入口、结构化卡片、生成时间与全局模型配置', async ({ page }) => {
+test('会话纪要：聊天右键菜单入口、结构化卡片、生成时间与全局模型配置', async ({ page }) => {
   await seedAuth(page)
   const api = await mockApis(page)
   await page.goto('/#/super-assistant?conversation=c-today')
 
-  // 位置契约：纪要入口在能力地图左侧
-  const summaryEntry = page.getByRole('button', { name: '查看会话纪要' })
-  const capabilityEntry = page.getByRole('button', { name: '查看能力地图' })
-  await expect(summaryEntry).toBeVisible()
-  const summaryBox = await summaryEntry.boundingBox()
-  const capabilityBox = await capabilityEntry.boundingBox()
-  expect(summaryBox).not.toBeNull()
-  expect(capabilityBox).not.toBeNull()
-  expect(summaryBox!.x + summaryBox!.width).toBeLessThanOrEqual(capabilityBox!.x)
-
+  // 入口已迁入聊天区域右键菜单（原头部按钮移除）
   const failures: string[] = []
   page.on('pageerror', error => failures.push(error.message))
-  await summaryEntry.click()
+  const menu = await openChatActionsMenu(page)
+  await menu.locator('[data-ctx-item="summary"]').click()
   const dialog = page.getByRole('dialog', { name: '会话纪要' })
   await expect(dialog).toBeVisible()
   // 垂直锚点上移（top 45% 而非视口居中的 50%）：弹窗中心高于视口中线，顶边不越出视口
@@ -5266,30 +5222,33 @@ test('会话纪要：发送消息与回复结束后自动触发生成', async ({
   expect(api.summaryGenerateCalls[0]).toBe('c-today')
 
   // 生成落定后弹窗可看到最新纪要
-  await page.getByRole('button', { name: '查看会话纪要' }).click()
+  const genMenu = await openChatActionsMenu(page)
+  await genMenu.locator('[data-ctx-item="summary"]').click()
   const dialog = page.getByRole('dialog', { name: '会话纪要' })
   await expect(dialog).toBeVisible()
   await expect(dialog.getByRole('heading', { name: '查询平台Skill列表' })).toBeVisible()
 })
 
-test('会话纪要：无纪要会话展示空态引导；窄屏入口收进更多操作', async ({ page }) => {
+test('会话纪要：无纪要会话展示空态引导；窄屏聊天右键菜单入口可达', async ({ page }) => {
   await seedAuth(page)
   await mockApis(page)
   // c-yesterday 无纪要夹具：GET 返回 null → 空态引导
   await page.goto('/#/super-assistant?conversation=c-yesterday')
-  await page.getByRole('button', { name: '查看会话纪要' }).click()
+  const menu = await openChatActionsMenu(page)
+  await menu.locator('[data-ctx-item="summary"]').click()
   const dialog = page.getByRole('dialog', { name: '会话纪要' })
   await expect(dialog).toBeVisible()
   await expect(dialog).toContainText('暂无会话纪要')
   await expect(dialog).toContainText('发送消息后约 1 秒、以及超级助手回复结束后约 1 秒')
+  // 菜单项点击后菜单层可能仍在卸载（动画/清理竞态）：先等菜单卸载再按 Esc
+  await expect(page.locator('[data-ctx-menu="super-assistant-chat"]')).toHaveCount(0)
   await page.keyboard.press('Escape')
   await expect(dialog).toHaveCount(0)
 
-  // 窄屏：头部入口让位标题/模型选择器，收进「更多操作」溢出菜单
+  // 窄屏：头部入口已迁入聊天区域右键菜单，同样可达
   await page.setViewportSize({ width: 390, height: 844 })
-  await expect(page.getByRole('button', { name: '查看会话纪要' })).toBeHidden()
-  await page.getByRole('button', { name: '更多操作' }).click()
-  await page.getByRole('button', { name: '会话纪要', exact: true }).click()
+  const narrowMenu = await openChatActionsMenu(page)
+  await narrowMenu.locator('[data-ctx-item="summary"]').click()
   await expect(dialog).toBeVisible()
   await expect(dialog).toContainText('暂无会话纪要')
 })

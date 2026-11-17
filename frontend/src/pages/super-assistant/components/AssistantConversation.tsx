@@ -357,7 +357,9 @@ export function ChatMessage({ message, onRetry, onFillRuleDraft }: { message: Su
 
   if (message.role !== 'assistant') {
     return (
-      <div id={`super-assistant-msg-${message.id}`} className="flex justify-end scroll-mt-6">
+      // 右键放行浏览器原生菜单（文本选择的复制/搜索等）：阻断冒泡到聊天区
+      // 右键菜单宿主，只有聊天空白处的右键才弹自研菜单
+      <div id={`super-assistant-msg-${message.id}`} className="flex justify-end scroll-mt-6" onContextMenu={event => event.stopPropagation()}>
         <div className="max-w-[min(36rem,82%)] rounded-2xl bg-[var(--color-bubble-accent)] px-4 py-2.5 text-sm leading-6 text-[var(--color-text-inverse)] whitespace-pre-wrap break-words">
           {message.content}
         </div>
@@ -366,7 +368,9 @@ export function ChatMessage({ message, onRetry, onFillRuleDraft }: { message: Su
   }
 
   return (
-    <article id={`super-assistant-msg-${message.id}`} className="group min-w-0 max-w-3xl space-y-3 scroll-mt-6">
+    // 右键放行浏览器原生菜单（文本选择/代码块复制的右键）：阻断冒泡到聊天区
+    // 右键菜单宿主，只有聊天空白处的右键才弹自研菜单
+    <article id={`super-assistant-msg-${message.id}`} className="group min-w-0 max-w-3xl space-y-3 scroll-mt-6" onContextMenu={event => event.stopPropagation()}>
       <TurnProcess
         steps={message.steps}
         status={message.status}

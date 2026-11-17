@@ -39,6 +39,7 @@ import { createDecisionSession } from './components/autoloopLogic'
 import { createSummaryScheduler } from './summaryScheduler'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Dialog, DialogTrigger } from '@/components/ui/dialog'
+import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from '@/components/ui/context-menu'
 import CapabilityMapDialog from './components/CapabilityMapDialog'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -145,7 +146,7 @@ export default function SuperAssistantPage() {
   const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [taskInstancesOpen, setTaskInstancesOpen] = useState(false)
   const [taskInstanceId, setTaskInstanceId] = useState<string | null>(null)
-  // 能力拓展入口（头部图标行）打开的常开弹层；保存后刷新 multica 配置
+  // 能力拓展入口（聊天区域右键菜单）打开的常开弹层；保存后刷新 multica 配置
   const [integrationsOpen, setIntegrationsOpen] = useState(false)
   useEffect(() => {
     if (scheduleId) setScheduledOpen(true)
@@ -187,7 +188,7 @@ export default function SuperAssistantPage() {
   // 快捷输入：小卡片（Popover）与设置弹窗互斥打开——从卡片跳设置时先收卡片
   const [quickInputOpen, setQuickInputOpen] = useState(false)
   const [quickInputsSettingsOpen, setQuickInputsSettingsOpen] = useState(false)
-  // 会话纪要：头部按钮弹窗 + 自动生成落定计数（+1 时若弹窗打开则刷新展示）
+  // 会话纪要：聊天区域右键菜单入口的弹窗 + 自动生成落定计数（+1 时若弹窗打开则刷新展示）
   const [summaryOpen, setSummaryOpen] = useState(false)
   const [summaryRefreshKey, setSummaryRefreshKey] = useState(0)
   // 用户级 Hindsight 记忆运行时状态（SSE memory_status 事件更新）：与消息生成、
@@ -235,14 +236,13 @@ export default function SuperAssistantPage() {
     setSearchParams(previous => { const next = new URLSearchParams(previous); next.delete('autoloopEvent'); next.delete('decision'); next.delete('decisions'); next.delete('schedule'); next.delete('scheduleRun'); next.set('ruleRouting', '1'); return next }, { replace: true })
   }
   // 知识库（WeKnora）：页面加载只读后端返回的原生 Web URL；入口不依赖 state、
-  // 知识库或模型可用性，也不代表知识检索已就绪。普通点击走一键免登录（后端
-  // 签发一次性票据，网关中继在 WeKnora origin 完成登录），右键/中键/修饰键
-  // 直开原生 URL 作手动登录兜底。
+  // 知识库或模型可用性，也不代表知识检索已就绪。聊天区右键菜单「领域知识」点击走
+  // 一键免登录（后端签发一次性票据，网关中继在 WeKnora origin 完成登录）。
   const [weknora, setWeknora] = useState<WeKnoraIntegration | null>(null)
   const [weknoraLoading, setWeknoraLoading] = useState(true)
-  // 项目管理（Kaneo）：页面加载只读后端返回的原生 Web URL；普通点击走
-  // 一键免登录（后端签发一次性票据，网关中继在 Kaneo origin 完成登录），
-  // 右键/中键/修饰键直开原生 URL 作手动登录兜底。
+  // 项目管理（Kaneo）：页面加载只读后端返回的原生 Web URL；聊天区右键菜单
+  // 「项目管理」点击走一键免登录（后端签发一次性票据，网关中继在 Kaneo origin
+  // 完成登录）。
   const [kaneo, setKaneo] = useState<KaneoIntegration | null>(null)
   const [kaneoLoading, setKaneoLoading] = useState(true)
   const [searchOpen, setSearchOpen] = useState(false)
@@ -357,13 +357,7 @@ export default function SuperAssistantPage() {
       toast.error('领域知识入口打开失败', { description: errorText(error) })
     }
   }, [])
-  // 普通（无修饰键）左键点击走免登录；中键/修饰键/右键保留 <a> 原生行为，
-  // 落到 WeKnora 登录页作手动兜底
-  const handleWeknoraClick = useCallback((event: React.MouseEvent) => {
-    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
-    event.preventDefault()
-    void openWeknora()
-  }, [openWeknora])
+
   /** 项目管理（Kaneo）入口配置：页面加载即取；失败时保留可重试入口，不在加载期打断工作台 */
   const refreshKaneo = useCallback(async (notifyFailure = false) => {
     setKaneoLoading(true)
@@ -402,13 +396,6 @@ export default function SuperAssistantPage() {
       toast.error('项目管理入口打开失败', { description: errorText(error) })
     }
   }, [])
-  // 普通（无修饰键）左键点击走免登录；中键/修饰键/右键保留 <a> 原生行为，
-  // 落到 Kaneo 登录页作手动兜底
-  const handleKaneoClick = useCallback((event: React.MouseEvent) => {
-    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
-    event.preventDefault()
-    void openKaneo()
-  }, [openKaneo])
 
   useEffect(() => {
     let alive = true
@@ -1346,6 +1333,9 @@ export default function SuperAssistantPage() {
       <div
         data-testid="super-assistant-composer"
         className={`relative overflow-visible rounded-xl border border-border bg-card transition-colors focus-within:border-brand focus-within:ring-2 focus-within:ring-ring ${prominent ? 'shadow-sm' : ''}`}
+        // 输入框保留浏览器原生右键（剪切/复制/粘贴）：空会话态下输入框位于聊天区
+        // 右键菜单宿主内，这里阻断冒泡让 Radix 触发器收不到事件
+        onContextMenu={event => event.stopPropagation()}
       >
         {conversationFiles.length > 0 && (
           <div data-testid="super-assistant-attachments" className="flex flex-wrap items-center gap-1.5 border-b border-border px-2.5 py-2">
@@ -1622,7 +1612,7 @@ export default function SuperAssistantPage() {
         onClose={() => { setTaskInstancesOpen(false); setTaskInstanceId(null) }}
       />
       {/* 能力拓展（条件挂载的常开弹层，不做 Dialog/DialogTrigger 包裹）：
-          入口已自侧栏迁至头部图标行；保存后刷新 multica 配置以同步命令可用性 */}
+          入口已自头部图标行迁至聊天区域右键菜单；保存后刷新 multica 配置以同步命令可用性 */}
       {integrationsOpen && (
         <IntegrationsDialog
           onClose={() => setIntegrationsOpen(false)}
@@ -1753,93 +1743,8 @@ export default function SuperAssistantPage() {
               </button>
             )}
           </div>
-          {canUseAutoLoop && <button type="button" onClick={() => openDecisionItems()} aria-label={`决策事项，${decisionSummary?.unfinishedTotal ?? '—'} 项未完成`} title="决策事项" data-workbench-decisions className="relative hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-brand-line bg-[var(--color-context-usage-bg)] text-brand-ink transition-colors hover:border-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:flex">
-            <ListChecks size={16} aria-hidden="true" />
-            {!!decisionSummary?.unfinishedTotal && <span className="absolute -right-1 -top-1 min-w-4 rounded-full bg-brand px-1 text-[10px] leading-4 text-white">{decisionSummary.unfinishedTotal > 99 ? '99+' : decisionSummary.unfinishedTotal}</span>}
-          </button>}
-          {/* 窄屏入口同序收进更多操作。 */}
-          <button
-            type="button"
-            onClick={() => setSummaryOpen(true)}
-            aria-label="查看会话纪要"
-            title="会话纪要"
-            className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-brand-line bg-[var(--color-context-usage-bg)] text-brand-ink transition-colors hover:border-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:flex"
-          >
-            <ScrollText size={16} aria-hidden="true" />
-          </button>
-          {/* 项目管理（Kaneo）入口：位于知识库（WeKnora）入口紧左（会话纪要右侧）；普通左键
-              一键免登录（领一次性票据新标签进入原生 Web），中键/修饰键/右键直开原生 URL 作
-              手动登录兜底。窄屏（<md）收进「更多操作」溢出菜单。 */}
-          {kaneoUrl ? (
-            <a
-              href={kaneoUrl}
-              onClick={handleKaneoClick}
-              target="_blank"
-              rel="noopener noreferrer"
-              aria-label="项目管理（Kaneo）"
-              title="项目管理"
-              data-workbench-kaneo
-              className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-brand-line bg-[var(--color-context-usage-bg)] text-brand-ink transition-colors hover:border-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:flex"
-            >
-              <SquareKanban size={16} aria-hidden="true" />
-            </a>
-          ) : (
-            <button
-              type="button"
-              onClick={() => { void refreshKaneo(true) }}
-              disabled={kaneoLoading}
-              aria-label="项目管理（Kaneo）"
-              title="项目管理"
-              data-workbench-kaneo
-              className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-brand-line bg-[var(--color-context-usage-bg)] text-brand-ink transition-colors hover:border-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 md:flex"
-            >
-              <SquareKanban size={16} aria-hidden="true" />
-            </button>
-          )}
-          {/* 知识库（WeKnora）入口：位于项目管理（Kaneo）入口右侧、所有会话（含新会话）可用；
-              普通左键一键免登录（领一次性票据新标签进入原生 Web），中键/修饰键/右键直开
-              原生 URL 作手动登录兜底，不在入口上宣称知识已就绪；悬停文案「领域知识」。
-              窄屏（<md）让位标题/模型选择器，收进「更多操作」溢出菜单。 */}
-          {weknoraUrl ? (
-            <a
-              href={weknoraUrl}
-              onClick={handleWeknoraClick}
-              target="_blank"
-              rel="noopener noreferrer"
-              aria-label="知识库（WeKnora）"
-              title="领域知识"
-              data-workbench-weknora
-              className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-brand-line bg-[var(--color-context-usage-bg)] text-brand-ink transition-colors hover:border-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:flex"
-            >
-              <Network size={16} aria-hidden="true" />
-            </a>
-          ) : (
-            <button
-              type="button"
-              onClick={() => { void refreshWeknora(true) }}
-              disabled={weknoraLoading}
-              aria-label="知识库（WeKnora）"
-              title="领域知识"
-              data-workbench-weknora
-              className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-brand-line bg-[var(--color-context-usage-bg)] text-brand-ink transition-colors hover:border-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 md:flex"
-            >
-              <Network size={16} aria-hidden="true" />
-            </button>
-          )}
-          {/* 能力拓展入口（原侧栏迁入头部图标行，用户确认插在「领域知识」与
-              「能力地图」之间）：打开条件挂载的 IntegrationsDialog，保存后刷新
-              multica 配置。窄屏（<md）让位标题/模型选择器，收进「更多操作」
-              溢出菜单。 */}
-          <button
-            type="button"
-            onClick={() => setIntegrationsOpen(true)}
-            aria-label="能力拓展"
-            title="能力拓展"
-            data-workbench-integrations
-            className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-brand-line bg-[var(--color-context-usage-bg)] text-brand-ink transition-colors hover:border-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:flex"
-          >
-            <Plug size={16} aria-hidden="true" />
-          </button>
+          {/* 头部五大功能入口（决策事项/会话纪要/项目管理/领域知识/能力拓展）已整体迁入
+              聊天区域右键菜单（见 main 内 ContextMenu），头部仅保留能力地图及其右侧入口 */}
           <Dialog>
             <DialogTrigger asChild>
               <button
@@ -1936,89 +1841,8 @@ export default function SuperAssistantPage() {
               </button>
             </PopoverTrigger>
             <PopoverContent align="end" side="bottom" sideOffset={8} className="w-44 p-1">
-              {canUseAutoLoop && <button type="button" onClick={() => { setHeaderOverflowOpen(false); openDecisionItems() }} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-                <ListChecks size={15} className="shrink-0 text-brand-ink" />决策事项 <span className="ml-auto text-xs">{decisionSummary?.unfinishedTotal ?? '—'}</span>
-              </button>}
-              <button
-                type="button"
-                onClick={() => { setHeaderOverflowOpen(false); setSummaryOpen(true) }}
-                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                <ScrollText size={15} className="shrink-0 text-brand-ink" />
-                会话纪要
-              </button>
-              {kaneoUrl ? (
-                <a
-                  href={kaneoUrl}
-                  onClick={(event) => {
-                    event.preventDefault()
-                    setHeaderOverflowOpen(false)
-                    void openKaneo()
-                  }}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  aria-label="项目管理（Kaneo）"
-                  title="项目管理"
-                  data-workbench-kaneo
-                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                >
-                  <SquareKanban size={15} className="shrink-0 text-brand-ink" aria-hidden="true" />
-                  项目管理（Kaneo）
-                </a>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => { setHeaderOverflowOpen(false); void refreshKaneo(true) }}
-                  disabled={kaneoLoading}
-                  aria-label="项目管理（Kaneo）"
-                  title="项目管理"
-                  data-workbench-kaneo
-                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
-                >
-                  <SquareKanban size={15} className="shrink-0 text-brand-ink" aria-hidden="true" />
-                  项目管理（Kaneo）
-                </button>
-              )}
-              {weknoraUrl ? (
-                <a
-                  href={weknoraUrl}
-                  onClick={(event) => {
-                    event.preventDefault()
-                    setHeaderOverflowOpen(false)
-                    void openWeknora()
-                  }}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  aria-label="知识库（WeKnora）"
-                  title="领域知识"
-                  data-workbench-weknora
-                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                >
-                  <Network size={15} className="shrink-0 text-brand-ink" aria-hidden="true" />
-                  知识库（WeKnora）
-                </a>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => { setHeaderOverflowOpen(false); void refreshWeknora(true) }}
-                  disabled={weknoraLoading}
-                  aria-label="知识库（WeKnora）"
-                  title="领域知识"
-                  data-workbench-weknora
-                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
-                >
-                  <Network size={15} className="shrink-0 text-brand-ink" aria-hidden="true" />
-                  知识库（WeKnora）
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={() => { setHeaderOverflowOpen(false); setIntegrationsOpen(true) }}
-                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                <Plug size={15} className="shrink-0 text-brand-ink" />
-                能力拓展
-              </button>
+              {/* 五大功能入口（决策事项/会话纪要/项目管理/领域知识/能力拓展）已迁入聊天区域
+                  右键菜单，窄屏溢出菜单不再保留对应项 */}
               <button
                 type="button"
                 onClick={() => { setHeaderOverflowOpen(false); void openBrowser() }}
@@ -2071,43 +1895,85 @@ export default function SuperAssistantPage() {
               </div>
             )}
             {!kernelRunId && selectedId && <KernelRunList conversationId={selectedId} />}
+            {/* 聊天区域右键菜单：头部五大功能入口（决策事项/会话纪要/项目管理/领域知识/能力拓展）
+                迁入此处。仅空白处触发——消息气泡与输入框根节点自行 stopPropagation 放行浏览器
+                原生菜单（气泡内文本选择/代码块复制的右键不被吞掉）；modal={false} 对齐会话列表
+                右键菜单惯例，避免菜单与弹窗同批开合时 react-remove-scroll 的 body 锁竞态。 */}
+            <ContextMenu modal={false}>
             {loading ? (
               <div className="flex flex-1 items-center justify-center"><Loader2 size={22} className="animate-spin text-brand-ink" /></div>
             ) : !hasMessages ? (
-              <div className="flex flex-1 items-center justify-center px-4 sm:px-8">
-                <div className="relative w-full max-w-3xl -translate-y-14 sm:-translate-y-20">
-                  <p className="super-assistant-hero-shimmer absolute inset-x-0 bottom-full z-10 mb-12 pb-1 text-center text-3xl font-semibold tracking-tight sm:text-4xl">
-                    SuperAgent 工作空间 2.0
-                  </p>
-                  {renderComposer(true)}
+              <ContextMenuTrigger asChild>
+                <div data-testid="super-assistant-chat-area" className="flex flex-1 items-center justify-center px-4 sm:px-8">
+                  <div className="relative w-full max-w-3xl -translate-y-14 sm:-translate-y-20">
+                    <p className="super-assistant-hero-shimmer absolute inset-x-0 bottom-full z-10 mb-12 pb-1 text-center text-3xl font-semibold tracking-tight sm:text-4xl">
+                      SuperAgent 工作空间 2.0
+                    </p>
+                    {renderComposer(true)}
+                  </div>
                 </div>
-              </div>
+              </ContextMenuTrigger>
             ) : (
-              <div
-                ref={node => { scrollHostRef.current = node }}
-                className="h-full overflow-y-auto"
-                onScroll={event => {
-                  if (jumpFlightRef.current) return
-                  const node = event.currentTarget
-                  const atBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 96
-                  stickToBottomRef.current = atBottom
-                  setShowJumpToLatest(!atBottom)
-                }}
-              >
-                <div className="mx-auto w-full max-w-4xl space-y-8 px-4 pb-10 pt-8 sm:px-8">
-                  {messages.map(message => (
-                    <ChatMessage
-                      key={message.id}
-                      message={message}
-                      onFillRuleDraft={canUseAutoLoop ? fillRuleDraft : undefined}
-                      onRetry={canRetryFailedMessage(message) ? () => retryFailedMessage(message) : undefined}
-                    />
-                  ))}
-                  {pendingHere && <ConfirmationCard pending={pendingHere} busyDecision={pendingDecision} onDecision={decision => void decide(decision)} />}
-                  <div ref={messagesEndRef} />
+              <ContextMenuTrigger asChild>
+                <div
+                  data-testid="super-assistant-chat-area"
+                  ref={node => { scrollHostRef.current = node }}
+                  className="h-full overflow-y-auto"
+                  onScroll={event => {
+                    if (jumpFlightRef.current) return
+                    const node = event.currentTarget
+                    const atBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 96
+                    stickToBottomRef.current = atBottom
+                    setShowJumpToLatest(!atBottom)
+                  }}
+                >
+                  <div className="mx-auto w-full max-w-4xl space-y-8 px-4 pb-10 pt-8 sm:px-8">
+                    {messages.map(message => (
+                      <ChatMessage
+                        key={message.id}
+                        message={message}
+                        onFillRuleDraft={canUseAutoLoop ? fillRuleDraft : undefined}
+                        onRetry={canRetryFailedMessage(message) ? () => retryFailedMessage(message) : undefined}
+                      />
+                    ))}
+                    {pendingHere && <ConfirmationCard pending={pendingHere} busyDecision={pendingDecision} onDecision={decision => void decide(decision)} />}
+                    <div ref={messagesEndRef} />
+                  </div>
                 </div>
-              </div>
+              </ContextMenuTrigger>
             )}
+            {/* 五项固定顺序：决策事项、项目管理、领域知识、能力拓展、会话纪要；
+                决策事项保留 canUseAutoLoop 门控与 ?decisions=1 深链；项目管理/领域知识走
+                openKaneo()/openWeknora() 一键免登录新标签（入口配置未就绪时退化为就地重试，
+                拉取期间菜单项禁用防重复请求） */}
+            <ContextMenuContent data-ctx-menu="super-assistant-chat" className="w-52">
+              {canUseAutoLoop && (
+                <ContextMenuItem data-ctx-item="decisions" onSelect={() => openDecisionItems()}>
+                  <ListChecks size={14} className="shrink-0" /> 决策事项
+                </ContextMenuItem>
+              )}
+              <ContextMenuItem
+                data-ctx-item="kaneo"
+                disabled={kaneoLoading}
+                onSelect={() => { if (kaneoUrl) void openKaneo(); else void refreshKaneo(true) }}
+              >
+                <SquareKanban size={14} className="shrink-0" /> 项目管理
+              </ContextMenuItem>
+              <ContextMenuItem
+                data-ctx-item="weknora"
+                disabled={weknoraLoading}
+                onSelect={() => { if (weknoraUrl) void openWeknora(); else void refreshWeknora(true) }}
+              >
+                <Network size={14} className="shrink-0" /> 领域知识
+              </ContextMenuItem>
+              <ContextMenuItem data-ctx-item="integrations" onSelect={() => setIntegrationsOpen(true)}>
+                <Plug size={14} className="shrink-0" /> 能力拓展
+              </ContextMenuItem>
+              <ContextMenuItem data-ctx-item="summary" onSelect={() => setSummaryOpen(true)}>
+                <ScrollText size={14} className="shrink-0" /> 会话纪要
+              </ContextMenuItem>
+            </ContextMenuContent>
+            </ContextMenu>
             {/* 离底较远时的兜底入口：一键回到最新消息（与贴底判定同一 96px 阈值） */}
             {hasMessages && showJumpToLatest && (
               <button
