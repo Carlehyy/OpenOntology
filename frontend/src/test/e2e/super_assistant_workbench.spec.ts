@@ -1100,7 +1100,7 @@ test('规则路由：侧栏入口打开规则和事件流水，头部五按钮�
   await expect(dialog.getByRole('heading', { name: '规则路由', exact: true })).toBeVisible()
   await expect(dialog.getByRole('button', { name: '新建规则' })).toBeVisible()
   await dialog.getByRole('tab', { name: '事件流水' }).click()
-  await expect(dialog.getByText('没有符合条件的事件。')).toBeVisible()
+  await expect(dialog.getByText('尚无任何事件。')).toBeVisible()
   await page.keyboard.press('Escape')
   await expect(dialog).toHaveCount(0)
 })
@@ -1140,6 +1140,7 @@ interface AutoLoopMockOptions {
   rules?: AutoLoopRule[]
   decisions?: DecisionItem[]
   events?: AutoLoopEventDetail[]
+  ruleMutation?: (path: string, body: Record<string, unknown>, call: number) => { status?: number; detail?: string; delay?: Promise<void> }
   mutation?: (item: DecisionItem, kind: 'decide' | 'mark-handled', body: Record<string, unknown>, call: number) => { status?: number; item?: DecisionItem; detail?: string; delay?: Promise<void> }
 }
 async function mockAutoLoop(page: Page, options: AutoLoopMockOptions = {}) {
@@ -1149,6 +1150,7 @@ async function mockAutoLoop(page: Page, options: AutoLoopMockOptions = {}) {
   const calls: { method: string; path: string; body: Record<string, unknown> }[] = []
   const eventQueries: URLSearchParams[] = []
   let mutationCalls = 0
+  let ruleMutationCalls = 0
   await page.route('**/api/v2/super-assistant/autoloop/**', async route => {
     const request = route.request()
     const url = new URL(request.url())
@@ -1157,17 +1159,22 @@ async function mockAutoLoop(page: Page, options: AutoLoopMockOptions = {}) {
     const body = request.postDataJSON() as Record<string, unknown> | null
     if (method !== 'GET') calls.push({ method, path, body: body ?? {} })
     if (path === '/rules/preview' || /^\/rules\/[^/]+\/preview$/.test(path)) return json(route, {
-      renderedTitle: '预览标题', renderedDescription: '预览描述', ruleVersion: 4,
+      renderedTitle: '预览标题', renderedDescription: '预览描述', ruleVersion: path === '/rules/preview' ? 0 : rules.find(rule => path === `/rules/${rule.id}/preview`)!.version,
       priority: 'high', assignee: 'assistant-fixture', bindingTarget: 'ISS-42', warnings: ['仅试渲染，不会创建任务'],
       untrustedOriginal: '<img src=x onerror="window.__autoloopRawExecuted=true">',
     })
+    if ((path === '/rules' && method === 'POST') || (/^\/rules\/[^/]+$/.test(path) && method === 'PATCH')) {
+      const result = options.ruleMutation?.(path, body ?? {}, ++ruleMutationCalls)
+      if (result?.delay) await result.delay
+      if (result?.status && result.status >= 400) return route.fulfill({ status: result.status, contentType: 'application/json', body: JSON.stringify({ detail: result.detail ?? '模拟规则保存失败' }) })
+    }
     if (path === '/rules') {
       if (method === 'POST') {
         const item: AutoLoopRule = { ...(body as unknown as AutoLoopRuleCreate), id: `rule-created-${rules.length}`, version: 1, createdAt: autoloopAt, updatedAt: autoloopAt }
         rules.push(item)
         return json(route, item, 201)
       }
-      return json(route, [...rules].sort((a, b) => a.position - b.position))
+      return json(route, [...rules].sort((a, b) => a.position - b.position || a.id.localeCompare(b.id)))
     }
     const ruleMatch = path.match(/^\/rules\/([^/]+)$/)
     if (ruleMatch) {
@@ -1301,7 +1308,7 @@ test('AutoLoop 模拟：规则与详情错误可恢复，失败保存保留表�
   await rules.getByRole('textbox', { name: '规则名称', exact: true }).fill('失败后保留的规则')
   await page.route('**/api/v2/super-assistant/autoloop/rules', route => route.fulfill({ status: 422, contentType: 'application/json', body: JSON.stringify({ detail: '模拟模板变量无效' }) }), { times: 1 })
   await rules.getByRole('button', { name: '确认创建规则', exact: true }).click()
-  await expect(rules.getByRole('alert')).toContainText('模拟模板变量无效')
+  await expect(rules.getByRole('alert').filter({ hasText: '保存失败' })).toContainText('模拟模板变量无效')
   await expect(rules.getByRole('textbox', { name: '规则名称', exact: true })).toHaveValue('失败后保留的规则')
   expect(api.rules).toEqual([])
   await page.keyboard.press('Escape')
@@ -1337,12 +1344,12 @@ test('AutoLoop 模拟：规则创建编辑、预览隔离、排序启停删除�
   await expect(dialog.getByRole('heading', { name: '规则乙修订', exact: true })).toBeVisible()
   await dialog.getByRole('button', { name: '新建规则', exact: true }).click()
   await dialog.getByRole('textbox', { name: '规则名称', exact: true }).fill('草稿规则')
-  await dialog.getByRole('textbox', { name: '已验证来源 Key 标识', exact: true }).fill('key-fixture')
+  await dialog.getByRole('textbox', { name: '来源 Key 标识（已验证）', exact: true }).fill('key-fixture')
   await dialog.getByRole('textbox', { name: '标题模板', exact: true }).fill('{{title}}')
   await dialog.getByRole('textbox', { name: '描述模板', exact: true }).fill('{{body}}')
-  await dialog.getByRole('button', { name: '试渲染（无副作用）', exact: true }).click()
+  await dialog.getByRole('button', { name: '试渲染模板（不创建任务）', exact: true }).click()
   const preview = dialog.getByRole('region', { name: '模板预览结果' })
-  await expect(preview).toContainText('模板预览 · v4')
+  await expect(preview).toContainText('模板预览结果（未保存草稿）')
   await expect(preview).toContainText('指派：assistant-fixture · 绑定：ISS-42')
   await expect(preview.locator('pre').last()).toContainText('<img src=x')
   await expect(preview.locator('img')).toHaveCount(0)
@@ -1356,7 +1363,7 @@ test('AutoLoop 模拟：规则创建编辑、预览隔离、排序启停删除�
   await dialog.getByRole('button', { name: '导入助手草稿', exact: true }).click()
   await dialog.getByRole('textbox', { name: '助手规则草稿 JSON' }).fill('{"name":"不完整"}')
   await dialog.getByRole('button', { name: '导入并审阅' }).click()
-  await expect(dialog.getByRole('alert')).toContainText('草稿须包含')
+  await expect(dialog.getByRole('alert').filter({ hasText: '草稿须包含' })).toBeVisible()
   const draft: AutoLoopRuleCreate = { name: '助手建议规则', enabled: true, position: 2, match: {}, titleTemplate: '{{title}}', descriptionTemplate: '{{body}}' }
   await dialog.getByRole('textbox', { name: '助手规则草稿 JSON' }).fill(JSON.stringify(draft))
   await dialog.getByRole('button', { name: '导入并审阅' }).click()
@@ -1372,6 +1379,272 @@ test('AutoLoop 模拟：规则创建编辑、预览隔离、排序启停删除�
   expect(api.calls.filter(call => call.path === '/rules' && call.method === 'POST')).toHaveLength(2)
 })
 
+test('规则路由：字段校验定位、中文 JSON 错误与草稿错误隔离', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  const api = await mockAutoLoop(page)
+  await page.goto('/#/super-assistant?ruleRouting=1')
+  const dialog = page.getByRole('dialog', { name: '规则路由', exact: true })
+  await dialog.getByRole('button', { name: '新建规则', exact: true }).click()
+  const name = dialog.getByRole('textbox', { name: '规则名称', exact: true })
+  const save = dialog.getByRole('button', { name: '确认创建规则', exact: true })
+  await save.click()
+  await expect(name).toBeFocused()
+  await expect(name).toHaveAttribute('aria-invalid', 'true')
+  await expect(name).toHaveAccessibleDescription('请输入规则名称')
+  await name.fill('校验草稿')
+  const position = dialog.getByRole('spinbutton', { name: '匹配顺序', exact: true })
+  await position.fill('1.5')
+  await save.click()
+  await expect(position).toBeFocused()
+  await expect(position).toHaveAccessibleDescription('匹配顺序须为非负整数')
+  await position.fill('0')
+  const fields = dialog.getByRole('textbox', { name: '字段等值 JSON', exact: true })
+  await fields.fill('[\n {"field": }]')
+  await save.click()
+  await expect(fields).toBeFocused()
+  await expect(fields).toHaveAccessibleDescription(/字段等值 JSON 格式不正确：第 2 行第 \d+ 列/)
+  await fields.fill('[]')
+  const sample = dialog.getByRole('textbox', { name: '样例事件 JSON', exact: true })
+  await sample.fill('null')
+  await dialog.getByRole('button', { name: '试渲染模板（不创建任务）' }).click()
+  await expect(sample).toBeFocused()
+  await expect(sample).toHaveAccessibleDescription('样例事件 JSON 须为对象')
+  expect(api.calls).toHaveLength(0)
+  await dialog.getByRole('tab', { name: '事件流水' }).click()
+  const guard = page.getByRole('dialog', { name: '放弃未保存的规则草稿？' })
+  await guard.getByRole('button', { name: '继续编辑' }).click()
+  await expect(name).toHaveValue('校验草稿')
+  await dialog.getByRole('tab', { name: '事件流水' }).click()
+  await guard.getByRole('button', { name: '放弃草稿' }).click()
+  await expect(dialog.getByRole('tabpanel', { name: '事件流水' })).toBeVisible()
+  await expect(dialog.getByRole('alert')).toHaveCount(0)
+  await dialog.getByRole('tab', { name: '规则与模板' }).click()
+  await dialog.getByRole('button', { name: '新建规则', exact: true }).click()
+  await expect(dialog.locator('[aria-invalid="true"]')).toHaveCount(0)
+  await expect(name).toHaveValue('')
+  await dialog.getByRole('button', { name: '返回规则列表' }).click()
+  await dialog.getByRole('button', { name: '导入助手草稿', exact: true }).click()
+  const imported = dialog.getByRole('textbox', { name: '助手规则草稿 JSON' })
+  await imported.fill('{\n "name": }')
+  await dialog.getByRole('button', { name: '导入并审阅' }).click()
+  await expect(imported).toBeFocused()
+  await expect(imported).toHaveAccessibleDescription(/助手规则草稿 JSON 格式不正确：第 2 行第 \d+ 列/)
+  await dialog.getByRole('tab', { name: '事件流水' }).click()
+  await guard.getByRole('button', { name: '放弃草稿' }).click()
+  await expect(dialog.getByText(/JSON 格式不正确/)).toHaveCount(0)
+})
+
+test('规则路由：清空已有指派持久化为 null，预览区分已存版本与草稿', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  const api = await mockAutoLoop(page, { rules: [ruleFixture('assigned', '已指派规则', 0)] })
+  await page.goto('/#/super-assistant?ruleRouting=1')
+  const dialog = page.getByRole('dialog', { name: '规则路由', exact: true })
+  await dialog.getByRole('button', { name: '编辑 已指派规则' }).click()
+  const assignee = dialog.getByRole('textbox', { name: '指派对象', exact: true })
+  await assignee.fill('')
+  await dialog.getByRole('button', { name: '保存规则', exact: true }).click()
+  await expect(dialog.getByRole('heading', { name: '已指派规则', exact: true })).toBeVisible()
+  expect(api.calls.find(call => call.method === 'PATCH')?.body.assignee).toBeNull()
+  expect(api.rules[0].assignee).toBeNull()
+  await dialog.getByRole('button', { name: '编辑 已指派规则' }).click()
+  await expect(assignee).toHaveValue('')
+  const render = dialog.getByRole('button', { name: '试渲染模板（不创建任务）' })
+  await render.click()
+  await expect(dialog.getByRole('heading', { name: '模板预览结果（已存规则 v4）' })).toBeFocused()
+  expect(api.calls.at(-1)?.path).toBe('/rules/assigned/preview')
+  await dialog.getByRole('textbox', { name: '标题模板', exact: true }).fill('修改后的 {{title}}')
+  await expect(dialog.getByRole('region', { name: '模板预览结果' })).toHaveCount(0)
+  await render.click()
+  const preview = dialog.getByRole('region', { name: '模板预览结果' })
+  await expect(preview).toContainText('模板预览结果（未保存草稿）')
+  await expect(preview).toContainText('不校验匹配条件与规则顺序，也不校验 Issue 权限，不创建任务')
+  expect(api.calls.at(-1)?.path).toBe('/rules/preview')
+  await dialog.getByRole('textbox', { name: '样例事件 JSON' }).fill('{"title":"新的样例"}')
+  await expect(preview).toHaveCount(0)
+  expect(api.calls.filter(call => call.path === '/rules' && call.method === 'POST')).toHaveLength(0)
+})
+
+test('规则路由：保存期间继续输入保留新草稿，再保存更新同一规则', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  let release!: () => void
+  const pending = new Promise<void>(resolve => { release = resolve })
+  const api = await mockAutoLoop(page, { ruleMutation: (_path, _body, call) => call === 1 ? { delay: pending } : {} })
+  await page.goto('/#/super-assistant?ruleRouting=1')
+  const dialog = page.getByRole('dialog', { name: '规则路由', exact: true })
+  await dialog.getByRole('button', { name: '新建规则', exact: true }).click()
+  const name = dialog.getByRole('textbox', { name: '规则名称', exact: true })
+  await name.fill('提交快照')
+  try {
+    await dialog.getByRole('button', { name: '确认创建规则' }).click()
+    await expect.poll(() => api.calls.length).toBe(1)
+    await name.fill('请求期间的修改')
+    await expect(dialog.getByRole('button', { name: '试渲染模板（不创建任务）' })).toBeDisabled()
+  } finally { release() }
+  const save = dialog.getByRole('button', { name: '保存规则', exact: true })
+  await expect(save).toBeEnabled()
+  await expect(name).toHaveValue('请求期间的修改')
+  await expect(dialog.getByText('未保存草稿', { exact: true })).toBeVisible()
+  expect(api.rules.map(rule => rule.name)).toEqual(['提交快照'])
+  await save.click()
+  await expect(dialog.getByRole('heading', { name: '请求期间的修改', exact: true })).toBeVisible()
+  expect(api.calls.map(call => [call.method, call.path])).toEqual([['POST', '/rules'], ['PATCH', '/rules/rule-created-0']])
+  expect(api.rules.map(rule => rule.name)).toEqual(['请求期间的修改'])
+})
+
+test('规则路由：迟到预览不覆盖编辑状态，失败可重试且不污染事件页', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  const api = await mockAutoLoop(page)
+  let release!: () => void
+  const pending = new Promise<void>(resolve => { release = resolve })
+  let requested = false
+  await page.route('**/api/v2/super-assistant/autoloop/rules/preview', async route => { requested = true; await pending; await route.fallback() }, { times: 1 })
+  await page.goto('/#/super-assistant?ruleRouting=1')
+  const dialog = page.getByRole('dialog', { name: '规则路由', exact: true })
+  await dialog.getByRole('button', { name: '新建规则', exact: true }).click()
+  await dialog.getByRole('textbox', { name: '规则名称', exact: true }).fill('预览草稿')
+  const render = dialog.getByRole('button', { name: '试渲染模板（不创建任务）' })
+  try {
+    await render.click()
+    await expect.poll(() => requested).toBe(true)
+    await dialog.getByRole('textbox', { name: '标题模板', exact: true }).fill('新 {{title}}')
+  } finally { release() }
+  await expect(render).toBeEnabled()
+  await expect(dialog.getByRole('region', { name: '模板预览结果' })).toHaveCount(0)
+  await page.route('**/api/v2/super-assistant/autoloop/rules/preview', route => route.fulfill({ status: 422, contentType: 'application/json', body: JSON.stringify({ detail: '模拟模板变量无效' }) }), { times: 1 })
+  await render.click()
+  await expect(dialog.getByRole('alert').filter({ hasText: '模拟模板变量无效' })).toBeVisible()
+  await expect(dialog.getByRole('textbox', { name: '标题模板', exact: true })).toHaveValue('新 {{title}}')
+  await render.click()
+  await expect(dialog.getByRole('heading', { name: '模板预览结果（未保存草稿）' })).toBeFocused()
+  await expect(dialog.getByText('模拟模板变量无效')).toHaveCount(0)
+  await dialog.getByRole('tab', { name: '事件流水' }).click()
+  await page.getByRole('dialog', { name: '放弃未保存的规则草稿？' }).getByRole('button', { name: '放弃草稿' }).click()
+  await expect(dialog.getByRole('alert')).toHaveCount(0)
+  expect(api.calls.every(call => call.path.endsWith('/preview'))).toBe(true)
+})
+
+test('规则路由：排序第二次 PATCH 失败保留警告并展示服务器真实顺序', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  const api = await mockAutoLoop(page, {
+    rules: [ruleFixture('r-a', '规则甲', 0), ruleFixture('r-b', '规则乙', 1), ruleFixture('r-c', '规则丙', 2)],
+    ruleMutation: (_path, _body, call) => call === 2 ? { status: 503, detail: '模拟第二次排序失败' } : {},
+  })
+  await page.goto('/#/super-assistant?ruleRouting=1')
+  const dialog = page.getByRole('dialog', { name: '规则路由', exact: true })
+  await dialog.getByRole('button', { name: '下移 规则甲' }).click()
+  await expect(dialog.getByRole('alert')).toContainText('部分顺序已更新，请检查后重试：模拟第二次排序失败')
+  await expect(dialog.locator('article').first()).toContainText('规则甲')
+  await expect(dialog.locator('article').nth(1)).toContainText('规则乙')
+  await expect(dialog.locator('article').nth(1)).toContainText('顺序 0')
+  expect(api.rules.map(rule => [rule.id, rule.position])).toEqual([['r-a', 0], ['r-b', 0], ['r-c', 2]])
+  expect(api.calls.map(call => call.path)).toEqual(['/rules/r-b', '/rules/r-a'])
+  await dialog.getByRole('button', { name: '下移 规则甲' }).click()
+  await expect(dialog.locator('article').first()).toContainText('规则乙')
+  await expect(dialog.getByRole('alert')).toHaveCount(0)
+  expect(api.rules.find(rule => rule.id === 'r-a')?.position).toBe(1)
+})
+
+test('规则路由：schedule 枚举、未知历史值与清除筛选重置游标', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  const api = await mockAutoLoop(page, { events: [eventFixture('first', 20), { ...eventFixture('second', 19), source: { kind: 'legacy_source', system: 'fixture-source', ref: '' }, action: 'legacy_action' }] })
+  let emptyFiltered = false
+  await page.route('**/api/v2/super-assistant/autoloop/events?**', route => emptyFiltered && new URL(route.request().url()).searchParams.get('source') === 'schedule'
+    ? json(route, { items: [], nextCursor: null, hasMore: false }) : route.fallback())
+  await page.goto('/#/super-assistant?ruleRouting=1')
+  const dialog = page.getByRole('dialog', { name: '规则路由', exact: true })
+  await dialog.getByRole('tab', { name: '事件流水' }).click()
+  await dialog.getByRole('button', { name: '下一页' }).click()
+  await expect(dialog.getByRole('button', { name: /通知事件 19/ })).toContainText('legacy_source')
+  await expect(dialog.getByRole('button', { name: /通知事件 19/ })).toContainText('legacy_action')
+  await dialog.getByRole('combobox', { name: '来源类型', exact: true }).click()
+  await page.getByRole('option', { name: '日程 (schedule)', exact: true }).click()
+  await dialog.getByRole('button', { name: '筛选流水' }).click()
+  await expect.poll(() => api.eventQueries.at(-1)?.get('source')).toBe('schedule')
+  expect(api.eventQueries.at(-1)?.has('cursor')).toBe(false)
+  emptyFiltered = true
+  await dialog.getByRole('button', { name: '刷新流水' }).click()
+  await expect(dialog.getByText('没有符合筛选条件的事件，可清除筛选查看全部。')).toBeVisible()
+  await dialog.getByRole('button', { name: '清除筛选' }).click()
+  await expect(dialog.getByRole('button', { name: /通知事件 20/ })).toBeVisible()
+  await expect(dialog.getByRole('button', { name: '上一页' })).toBeDisabled()
+  expect(api.eventQueries.at(-1)?.has('source')).toBe(false)
+  expect(api.eventQueries.at(-1)?.has('cursor')).toBe(false)
+})
+
+for (const viewport of [{ width: 1366, height: 768 }, { width: 390, height: 844 }]) {
+  test(`规则路由：${viewport.width} 屏幕下 Tab 键盘、常驻操作栏与预览命中`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport)
+    await seedAuth(page)
+    await mockApis(page)
+    await mockAutoLoop(page)
+    await page.goto('/#/super-assistant?ruleRouting=1')
+    const dialog = page.getByRole('dialog', { name: '规则路由', exact: true })
+    const rulesTab = dialog.getByRole('tab', { name: '规则与模板' })
+    const eventsTab = dialog.getByRole('tab', { name: '事件流水' })
+    await rulesTab.focus()
+    await page.keyboard.press('ArrowRight')
+    await expect(eventsTab).toBeFocused()
+    await expect(eventsTab).toHaveAttribute('aria-selected', 'true')
+    await expect(rulesTab).toHaveAttribute('tabindex', '-1')
+    await expect(dialog.getByRole('tabpanel', { name: '事件流水' })).toHaveAttribute('id', (await eventsTab.getAttribute('aria-controls'))!)
+    await page.keyboard.press('Home')
+    await expect(rulesTab).toBeFocused()
+    await page.keyboard.press('End')
+    await expect(eventsTab).toBeFocused()
+    await page.keyboard.press('ArrowLeft')
+    await expect(rulesTab).toBeFocused()
+    await dialog.getByRole('button', { name: '新建规则', exact: true }).click()
+    await dialog.getByRole('textbox', { name: '规则名称', exact: true }).fill('可达性草稿')
+    await expect(dialog.getByRole('checkbox', { name: '保存后启用' })).toBeChecked()
+    await expect(dialog.getByText('空条件会匹配当前用户的全部路由事件；前序启用规则优先命中。', { exact: true })).toBeVisible()
+    const save = dialog.getByRole('button', { name: '确认创建规则' })
+    const render = dialog.getByRole('button', { name: '试渲染模板（不创建任务）' })
+    for (const button of [save, render]) {
+      await expect.poll(() => button.evaluate(element => {
+        const box = element.getBoundingClientRect()
+        return box.top >= 0 && box.bottom <= innerHeight && box.left >= 0 && box.right <= innerWidth && element.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2))
+      })).toBe(true)
+    }
+    await render.click()
+    const heading = dialog.getByRole('heading', { name: '模板预览结果（未保存草稿）' })
+    await expect(heading).toBeFocused()
+    for (const result of [heading, dialog.getByText('预览标题', { exact: true }), dialog.getByText('预览描述', { exact: true })]) {
+      await expect.poll(() => result.evaluate(element => {
+        const box = element.getBoundingClientRect()
+        return box.top >= 0 && box.bottom <= innerHeight && element.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2))
+      })).toBe(true)
+    }
+    await expect(dialog.getByRole('status')).toHaveText('模板预览已更新')
+    await page.screenshot({ path: testInfo.outputPath(`rule-routing-${viewport.width}.png`) })
+    await rulesTab.focus()
+    await page.keyboard.press('End')
+    const guard = page.getByRole('dialog', { name: '放弃未保存的规则草稿？' })
+    const keepEditing = guard.getByRole('button', { name: '继续编辑' })
+    await expect(guard).toBeVisible()
+    // Finish the entry animation without scrolling the buttons into view before the hit check.
+    await guard.evaluate(async element => {
+      await Promise.all(element.getAnimations({ subtree: true }).map(animation => animation.finished))
+    })
+    await expect.poll(() => keepEditing.evaluate(element => {
+      const box = element.getBoundingClientRect()
+      return box.top >= 0 && box.bottom <= innerHeight && box.left >= 0 && box.right <= innerWidth && element.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2))
+    })).toBe(true)
+    await keepEditing.click()
+    await expect(rulesTab).toHaveAttribute('aria-selected', 'true')
+    await rulesTab.focus()
+    await page.keyboard.press('End')
+    await guard.getByRole('button', { name: '放弃草稿' }).click()
+    await expect(eventsTab).toBeFocused()
+    await expect(dialog.getByRole('tabpanel', { name: '事件流水' })).toBeVisible()
+  })
+}
+
 test('AutoLoop 模拟：流水筛选游标、外部原文、可信链接与事件决策深链', async ({ page }) => {
   await seedAuth(page)
   await mockApis(page)
@@ -1379,10 +1652,13 @@ test('AutoLoop 模拟：流水筛选游标、外部原文、可信链接与事�
   await page.goto('/#/super-assistant?ruleRouting=1')
   const dialog = page.getByRole('dialog', { name: '规则路由', exact: true })
   await dialog.getByRole('tab', { name: '事件流水' }).click()
-  await dialog.getByRole('textbox', { name: '来源类型', exact: true }).fill('notification')
+  await dialog.getByRole('combobox', { name: '来源类型', exact: true }).click()
+  await page.getByRole('option', { name: '外部通知 (notification)', exact: true }).click()
   await dialog.getByRole('textbox', { name: '来源系统', exact: true }).fill('fixture-source')
-  await dialog.getByRole('textbox', { name: '动作', exact: true }).fill('create_task')
-  await dialog.getByRole('textbox', { name: '动作状态', exact: true }).fill('unknown')
+  await dialog.getByRole('combobox', { name: '动作', exact: true }).click()
+  await page.getByRole('option', { name: '新建任务 (create_task)', exact: true }).click()
+  await dialog.getByRole('combobox', { name: '动作状态', exact: true }).click()
+  await page.getByRole('option', { name: '结果未知 (unknown)', exact: true }).click()
   await dialog.getByRole('combobox', { name: '流水规则' }).click()
   await page.getByRole('option', { name: '规则甲', exact: true }).click()
   await dialog.getByRole('button', { name: '筛选流水' }).click()

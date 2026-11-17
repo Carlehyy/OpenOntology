@@ -1,4 +1,5 @@
 import type { AutoLoopRuleCreate, DecisionItem, DecisionStatus } from '../../../api/autoloop.ts'
+import { parseRuleJson, validateRuleForm } from './ruleRoutingForm.ts'
 
 export const UNFINISHED_STATUSES: DecisionStatus[] = ['open', 'pending_dispatch', 'sending', 'writeback_unknown', 'writeback_failed']
 export const DECISION_GROUPS = {
@@ -66,7 +67,7 @@ function onlyKeys(value: Record<string, unknown>, keys: string[], label: string)
 
 /** 严格验证完整 schema；不接受围栏、额外字段或任何部分填表。 */
 export function parseRuleDraft(text: string): AutoLoopRuleCreate {
-  const value = record(JSON.parse(text), '草稿')
+  const value = record(parseRuleJson(text, '助手规则草稿'), '草稿')
   onlyKeys(value, ['name', 'enabled', 'position', 'match', 'titleTemplate', 'descriptionTemplate', 'priority', 'assignee', 'binding'], '草稿')
   if (typeof value.name !== 'string' || !value.name.trim()
     || typeof value.titleTemplate !== 'string' || typeof value.descriptionTemplate !== 'string'
@@ -94,7 +95,11 @@ export function parseRuleDraft(text: string): AutoLoopRuleCreate {
     onlyKeys(binding, ['mode', 'pattern', 'targetIssue'], 'binding')
     if (binding.mode !== 'extract' || (binding.pattern != null && typeof binding.pattern !== 'string') || (binding.targetIssue != null && typeof binding.targetIssue !== 'string')) throw new Error('binding 必须使用 extract，并填写字符串 pattern / targetIssue')
   }
-  return value as unknown as AutoLoopRuleCreate
+  const rule = value as unknown as AutoLoopRuleCreate
+  const { errors } = validateRuleForm(rule, JSON.stringify(rule.match.fieldEquals ?? []), String(rule.position), false)
+  const firstError = Object.values(errors)[0]
+  if (firstError) throw new Error(firstError)
+  return rule
 }
 
 /** 只识别已闭合且 info string 精确匹配的围栏；其他代码块内的标记不生效。 */
