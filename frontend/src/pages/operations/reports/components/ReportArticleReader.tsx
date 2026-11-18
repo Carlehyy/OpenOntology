@@ -11,6 +11,8 @@ import { RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
 import operationsReportsApi, {
   operationsApiErrorText,
+  type OperationsExecuteOutcome,
+  type OperationsExecutePayload,
   type OperationsQueryResult,
 } from '@/api/v2/operations-reports'
 import {
@@ -86,7 +88,7 @@ function CodeBlock({ code }: { code: string }) {
   )
 }
 
-export default function ReportArticleReader({ reportId, articleId, title, datasetName, markdown, preview }: {
+export default function ReportArticleReader({ reportId, articleId, title, datasetName, markdown, preview, execute, autoRun = true, refreshTestId = 'report-refresh', onSuccess }: {
   reportId: string
   articleId: string
   title: string
@@ -94,6 +96,11 @@ export default function ReportArticleReader({ reportId, articleId, title, datase
   markdown: string
   /** 编辑态预览：标题带预览标记，其余行为一致（查询仍真实执行）。 */
   preview?: boolean
+  /** 未保存的结构化计划复用同一阅读器，通过服务端计划预览执行。 */
+  execute?: (payload: OperationsExecutePayload) => Promise<OperationsExecuteOutcome>
+  autoRun?: boolean
+  refreshTestId?: string
+  onSuccess?: () => void
 }) {
   const parsed = useMemo(() => parseReportMarkdown(markdown), [markdown])
   const filters = useMemo<ReportFilterDefinition[]>(
@@ -139,7 +146,7 @@ export default function ReportArticleReader({ reportId, articleId, title, datase
     }
     setFilterError('')
     const named = sqlBlocks.filter(block => block.name)
-    if (!named.length) return
+    if (!named.length && !execute) return
     const uniqueNames = [...new Set(named.map(block => block.name))]
     if (uniqueNames.length > REPORT_EXECUTE_MAX_QUERIES) {
       setBatchError(`命名查询 ${uniqueNames.length} 条超过单次批量执行上限 ${REPORT_EXECUTE_MAX_QUERIES} 条，已全部阻止执行`)
@@ -153,18 +160,26 @@ export default function ReportArticleReader({ reportId, articleId, title, datase
     setRefreshing(true)
     setRuns(Object.fromEntries(named.map(block => [block.name, { status: 'running' }])))
     try {
-      const outcome = await operationsReportsApi.execute(reportId, articleId, {
+      const payload = {
         queries,
         params,
         // 预览态正文是未保存草稿：带上 markdown 让服务端按草稿重新校验
-        // filter 声明，未保存的 filter 围栏即可参与试跑。
+        // filter 声明，未保存的 filter 围栏即可试跑。
         ...(preview ? { markdown } : {}),
-      })
+      }
+      const outcome = execute
+        ? await execute(payload)
+        : await operationsReportsApi.execute(reportId, articleId, payload)
+
       if (runToken.current !== token) return
       if (!('results' in outcome) || !outcome.results) {
         throw new Error('BAD_BATCH_RESPONSE')
       }
       const results = outcome.results
+      if (named.some(block => !results[block.name])) {
+        throw new Error('BAD_BATCH_RESPONSE')
+      }
+      onSuccess?.()
       setRuns(Object.fromEntries(named.map(block => {
         const result = results[block.name]
         return [
@@ -181,17 +196,21 @@ export default function ReportArticleReader({ reportId, articleId, title, datase
       const text = error instanceof Error && error.message === 'BAD_BATCH_RESPONSE'
         ? '服务返回的批量结果缺少 results'
         : operationsApiErrorText(error, '服务执行失败')
+      setBatchError(named.length ? '' : text)
       setRuns(Object.fromEntries(named.map(block => [block.name, { status: 'error', error: text } as QueryRunState])))
     } finally {
       if (runToken.current === token) setRefreshing(false)
     }
-  }, [reportId, articleId, sqlBlocks, filters, preview, markdown])
+  }, [reportId, articleId, sqlBlocks, filters, preview, markdown, execute, onSuccess])
 
-  // 进入文章自动执行（最新版本打开即查）；文章内容更新后重查，无轮询。
-  // 依赖刻意不含 runAll/filters/values：筛选值变化只走「查询」按钮手动刷新。
+  // 筛选值变化只走手动查询；切换内容时令在途结果失效，防止旧草稿覆盖新预览。
   useEffect(() => {
-    if (sqlBlocks.length) void runAll()
-  }, [reportId, articleId, markdown])
+    setRuns({})
+    setBatchError('')
+    setRefreshing(false)
+    if (autoRun && (sqlBlocks.length || execute)) void runAll()
+    return () => { runToken.current += 1 }
+  }, [reportId, articleId, markdown, autoRun, execute])
 
   // 标题锚点按块顺序切片（全局 id 与目录一致）
   let headingCursor = 0
@@ -214,7 +233,7 @@ export default function ReportArticleReader({ reportId, articleId, title, datase
         </p>
       </header>
 
-      {(filters.length > 0 || sqlBlocks.length > 0) && (
+      {(filters.length > 0 || sqlBlocks.length > 0 || execute) && (
         <div className="mb-4 flex flex-wrap items-start gap-3">
           <ReportFilterControls filters={filters} values={values} onChange={setFilterValue} />
           <Button
@@ -222,7 +241,7 @@ export default function ReportArticleReader({ reportId, articleId, title, datase
             onClick={() => void runAll()}
             loading={refreshing}
             className="mt-0.5"
-            data-testid="report-refresh"
+            data-testid={refreshTestId}
           >
             <RefreshCw size={13} /> 查询
           </Button>

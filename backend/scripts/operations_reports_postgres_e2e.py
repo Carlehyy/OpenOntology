@@ -21,7 +21,16 @@ PG-backed session (FastAPI TestClient with the production lifespan suppressed):
   pointer between its queries (SQLAlchemy event hook, no execute mocking);
 - pool_size=2 real connection rotation with zero ``rep_ds_*`` temp-table
   residue;
-- report/article CRUD, reorder and revision-409 through the HTTP router.
+- report/article CRUD, reorder and revision-409 through the HTTP router;
+- plan v1 acceptance through the HTTP router on real
+  ``execute_report_queries`` (never mocked): structured/curated/integrated
+  plan-previews with COUNT(DISTINCT)/SUM/GROUP BY, text/number/date filters
+  with and without values, typed date_trunc time buckets and clamped block
+  limits; text-only preview; preview persistence-freedom; plan-created
+  articles with markdown XOR and advanced-markdown decoupling;
+  injection-shaped plan fields/SQL/text rejected before execution;
+  plan-design permission and unconfigured-LLM errors; the
+  reportable/version/schema datasets listing.
 
 Safety: requires ``OPENONTOLOGY_OPERATIONS_REPORTS_E2E=1`` and
 ``ENVIRONMENT=test``.  The script creates one throwaway UUID-named database
@@ -72,6 +81,7 @@ REPORT_STAGES = {
     "snapshot",
     "pool",
     "api",
+    "plan",
     "complete",
 }
 REPORT_FIELDS = {
@@ -119,6 +129,15 @@ REPORT_CASES = {
     "pool_rotation_no_residue",
     "api_crud_reorder_revision",
     "api_execute_queries",
+    "plan_preview_structured",
+    "plan_preview_curated",
+    "plan_preview_integrated",
+    "plan_preview_text_only",
+    "plan_preview_no_persistence",
+    "plan_create_xor_and_decouple",
+    "plan_injection_rejected",
+    "plan_ai_unconfigured",
+    "plan_datasets_reportable",
 }
 
 # Shrunk for this acceptance run only (set before any app import so pydantic
@@ -548,6 +567,7 @@ def _run(report_path: Path) -> None:
         setup = sessions()
         try:
             editor = _seed_user(setup, username="or_editor", role="editor")
+            viewer = _seed_user(setup, username="or_viewer", role="viewer")
 
             main_rows = [
                 {"region": "north", "amount": 120,
@@ -658,6 +678,56 @@ def _run(report_path: Path) -> None:
             curated_review = _add_review(
                 setup, curated_ds, curated_v1, status="approved")
 
+            # Plan-preview fixtures: curated lake table and integrated sealed
+            # relation each carrying a typed timestamp column so date_trunc
+            # time buckets and a date filter run against every asset kind.
+            plan_curated_rows = [
+                {"id": "1", "region": "north", "amount": "10",
+                 "ts": "2026-11-01T08:00:00+00:00"},
+                {"id": "2", "region": "west", "amount": "70",
+                 "ts": "2026-11-01T09:30:00+00:00"},
+                {"id": "3", "region": "east", "amount": "30",
+                 "ts": "2026-11-02T10:00:00+00:00"},
+                {"id": "4", "region": "south", "amount": "50",
+                 "ts": "2026-11-03T11:00:00+00:00"},
+                {"id": "5", "region": "north", "amount": "25",
+                 "ts": "2026-11-04T12:00:00+00:00"},
+            ]
+            plan_curated_ds, plan_curated_v1 = _seed_curated(
+                setup, name=f"计划成品-{uuid.uuid4().hex[:6]}",
+                rows=plan_curated_rows,
+                columns_typed=[
+                    {"name": "id", "type": "string"},
+                    {"name": "region", "type": "string"},
+                    {"name": "amount", "type": "integer"},
+                    {"name": "ts", "type": "timestamp"},
+                ])
+            _add_review(setup, plan_curated_ds, plan_curated_v1,
+                        status="approved")
+
+            # The integrated gate only accepts native datetime objects for
+            # timestamp columns (encoded to ISO text inside the store).
+            from datetime import datetime as _plan_dt
+
+            plan_integ_batches = [
+                [{"id": 1, "region": "north", "amount": 10,
+                  "ts": _plan_dt(2026, 11, 2, 8, 0, 0)},
+                 {"id": 2, "region": "north", "amount": 20,
+                  "ts": _plan_dt(2026, 11, 3, 9, 0, 0)}],
+                [{"id": 3, "region": "south", "amount": 30,
+                  "ts": _plan_dt(2026, 11, 3, 10, 0, 0)},
+                 {"id": 4, "region": "east", "amount": 40,
+                  "ts": _plan_dt(2026, 11, 4, 11, 0, 0)}],
+            ]
+            plan_integ_ds, _pi_run, _pi_ver = _seed_integrated(
+                setup, editor, name=f"计划集成-{uuid.uuid4().hex[:6]}",
+                schema=[
+                    _typed("id", "integer", "BIGINT", nullable=False),
+                    _typed("region", "string", "TEXT"),
+                    _typed("amount", "integer", "BIGINT"),
+                    _typed("ts", "timestamp", "TIMESTAMPTZ"),
+                ], pk=["id"], batches=plan_integ_batches)
+
             timeout_batches = [
                 [{"id": i, "val": f"value-{i:05d}"} for i in
                  range(start, start + 1000)]
@@ -683,6 +753,9 @@ def _run(report_path: Path) -> None:
                 curated_id=curated_ds.id,
                 timeout_id=timeout_ds.id, curated_v1_id=curated_v1.id,
                 curated_review_id=curated_review.id,
+                viewer_id=viewer.id,
+                plan_curated_id=plan_curated_ds.id,
+                plan_integ_id=plan_integ_ds.id,
             )
             report["counts"] = {
                 "structured_main_rows": len(main_rows),
@@ -693,6 +766,9 @@ def _run(report_path: Path) -> None:
                 "integrated_snapshot_v1_rows": 6,
                 "integrated_timeout_rows": 6000,
                 "curated_rows": len(curated_rows),
+                "plan_curated_rows": len(plan_curated_rows),
+                "plan_integrated_rows": sum(
+                    len(batch) for batch in plan_integ_batches),
             }
         finally:
             setup.close()
@@ -1330,6 +1406,455 @@ def _run(report_path: Path) -> None:
                 client.close()
             fastapi_app.dependency_overrides.clear()
         report["durations_ms"]["api"] = round(
+            (time.perf_counter() - started) * 1000, 1)
+
+        # ---------------------------------------------------------- plan
+        stage = "plan"
+        report["stage"] = stage
+        started = time.perf_counter()
+        from app.operations import markdown as operations_markdown
+        from app.operations import plan as operations_plan
+
+        def _grouped_totals(rows, key, field):
+            expected: dict[str, list[int]] = {}
+            for row in rows:
+                slot = expected.setdefault(row[key], [0, 0])
+                slot[0] += 1
+                slot[1] += int(row[field])
+            return expected
+
+        def _plan_preview(dataset_id, plan, params=None, limit=200):
+            return plan_client.post(f"{base}/{plan_report_id}/plan-preview",
+                                    json={"dataset_id": dataset_id,
+                                          "plan": plan,
+                                          "params": params or {},
+                                          "limit": limit},
+                                    headers=headers)
+
+        def _query_block(preview_payload, name):
+            for block in preview_payload["blocks"]:
+                if block.get("type") == "query" and block["name"] == name:
+                    return block["result"]
+            raise AssertionError(f"query block missing from preview: {name}")
+
+        def _plan_error(plan, params=None, *, code):
+            response = _plan_preview(world.main_id, plan, params=params)
+            assert response.status_code == 422, response.status_code
+            detail = response.json().get("detail")
+            if code is None:
+                assert isinstance(detail, list), detail
+            else:
+                assert isinstance(detail, dict) and \
+                    detail.get("code") == code, detail
+            return response
+
+        plan_client = None
+        try:
+            fastapi_app.dependency_overrides[app_deps.get_db] = \
+                _override_get_db
+            plan_client = TestClient(fastapi_app)
+            plan_report = plan_client.post(
+                base, json={"name": "E2E 计划验收",
+                            "description": "plan v1"},
+                headers=headers)
+            assert plan_report.status_code == 201, plan_report.status_code
+            plan_report_id = plan_report.json()["data"]["id"]
+            detail_before = plan_client.get(
+                f"{base}/{plan_report_id}", headers=headers).json()["data"]
+            articles_before = len(detail_before["articles"])
+            revision_before = detail_before["revision"]
+
+            # structured: manual blob materialized temp; count_distinct/sum
+            # totals, grouped query with alias sort, typed day bucket, text
+            # filter with and without a value.
+            structured_plan = {
+                "version": 1,
+                "filters": [{"name": "region", "type": "text",
+                             "field": "region"}],
+                "blocks": [
+                    {"type": "text", "text": "结构化计划验收"},
+                    {"type": "query", "name": "totals", "columns": [
+                        {"agg": "count", "alias": "rows"},
+                        {"agg": "count_distinct", "field": "region",
+                         "alias": "regions"},
+                        {"agg": "sum", "field": "amount", "alias": "total"}]},
+                    {"type": "query", "name": "by_region", "columns": [
+                        {"field": "region", "alias": "region"},
+                        {"agg": "count", "alias": "rows"},
+                        {"agg": "sum", "field": "amount", "alias": "total"}],
+                     "sort": [{"field": "total", "dir": "desc"}]},
+                    {"type": "query", "name": "daily", "columns": [
+                        {"agg": "sum", "field": "amount", "alias": "total"}],
+                     "time_bucket": {"field": "ts", "unit": "day",
+                                     "alias": "day"},
+                     "sort": [{"field": "day", "dir": "asc"}]},
+                    {"type": "chart", "chart": "bar", "query": "by_region",
+                     "x": "region", "y": ["total"]},
+                ],
+            }
+            for region_param in (None, "north"):
+                response = _plan_preview(world.main_id, structured_plan,
+                                         params={"region": region_param})
+                assert response.status_code == 200, response.status_code
+                payload = response.json()["data"]
+                assert payload["plan_version"] == 1
+                assert payload["dataset"]["kind"] == "structured"
+                assert payload["version"]["version_no"] == 1
+                assert payload["source"] == "materialized_temp", \
+                    payload["source"]
+                selected = main_rows if region_param is None else [
+                    row for row in main_rows
+                    if row["region"] == region_param]
+                totals = _query_block(payload, "totals")
+                assert totals["columns"] == ["rows", "regions", "total"]
+                assert totals["rowcount"] == 1
+                assert totals["rows"][0]["rows"] == len(selected)
+                assert totals["rows"][0]["regions"] == len(
+                    {row["region"] for row in selected})
+                assert float(totals["rows"][0]["total"]) == sum(
+                    row["amount"] for row in selected)
+                by_region = _query_block(payload, "by_region")
+                expected_groups = sorted(
+                    ((name, values[0], values[1]) for name, values in
+                     _grouped_totals(selected, "region", "amount").items()),
+                    key=lambda item: -item[2])
+                assert [(row["region"], row["rows"], float(row["total"]))
+                        for row in by_region["rows"]] == [
+                    (name, count, float(total))
+                    for name, count, total in expected_groups], \
+                    by_region["rows"]
+                daily = _query_block(payload, "daily")
+                expected_days: dict[str, int] = {}
+                for row in selected:
+                    day = row["ts"][:10]
+                    expected_days[day] = expected_days.get(
+                        day, 0) + row["amount"]
+                assert [(str(row["day"])[:10], float(row["total"]))
+                        for row in daily["rows"]] == [
+                    (day, float(total))
+                    for day, total in sorted(expected_days.items())], \
+                    daily["rows"]
+                assert operations_markdown.validate_markdown(
+                    payload["markdown"]).ok
+                assert payload["markdown"] == operations_plan.plan_markdown(
+                    payload["plan"]), payload["markdown"]
+            assert "```sql totals" in payload["markdown"]
+            report["cases"]["plan_preview_structured"] = True
+
+            # curated: approved lake table; number filter with and without a
+            # value, block limit clamps a 4-group query to the top-2 sums,
+            # typed month bucket.
+            curated_plan = {
+                "version": 1,
+                "filters": [{"name": "amount", "type": "number",
+                             "field": "amount"}],
+                "blocks": [
+                    {"type": "query", "name": "totals", "columns": [
+                        {"agg": "count_distinct", "field": "region",
+                         "alias": "regions"},
+                        {"agg": "sum", "field": "amount", "alias": "total"}]},
+                    {"type": "query", "name": "by_region", "columns": [
+                        {"field": "region", "alias": "region"},
+                        {"agg": "count", "alias": "rows"},
+                        {"agg": "sum", "field": "amount", "alias": "total"}],
+                     "sort": [{"field": "total", "dir": "desc"}],
+                     "limit": 2},
+                    {"type": "query", "name": "monthly", "columns": [
+                        {"agg": "sum", "field": "amount", "alias": "total"}],
+                     "time_bucket": {"field": "ts", "unit": "month",
+                                     "alias": "month"}},
+                ],
+            }
+            for amount_param in (None, 10):
+                response = _plan_preview(world.plan_curated_id, curated_plan,
+                                         params={"amount": amount_param})
+                assert response.status_code == 200, response.status_code
+                payload = response.json()["data"]
+                assert payload["source"] == "lake_table", payload["source"]
+                assert payload["version"]["version_no"] == 1
+                selected = plan_curated_rows if amount_param is None else [
+                    row for row in plan_curated_rows
+                    if int(row["amount"]) == amount_param]
+                totals = _query_block(payload, "totals")
+                assert totals["rows"][0]["regions"] == len(
+                    {row["region"] for row in selected})
+                assert float(totals["rows"][0]["total"]) == sum(
+                    int(row["amount"]) for row in selected)
+                by_region = _query_block(payload, "by_region")
+                expected_groups = sorted(
+                    ((name, values[0], values[1]) for name, values in
+                     _grouped_totals(selected, "region", "amount").items()),
+                    key=lambda item: -item[2])[:2]
+                assert [(row["region"], row["rows"], float(row["total"]))
+                        for row in by_region["rows"]] == [
+                    (name, count, float(total))
+                    for name, count, total in expected_groups], \
+                    by_region["rows"]
+                monthly = _query_block(payload, "monthly")
+                assert monthly["rowcount"] == 1
+                assert str(monthly["rows"][0]["month"])[:7] == "2026-11"
+                assert float(monthly["rows"][0]["total"]) == sum(
+                    int(row["amount"]) for row in selected)
+            report["cases"]["plan_preview_curated"] = True
+
+            # integrated: sealed relation; date filter with and without a
+            # value, count_distinct over a typed timestamp column, day bucket.
+            integrated_plan = {
+                "version": 1,
+                "filters": [{"name": "day", "type": "date", "field": "ts"}],
+                "blocks": [
+                    {"type": "query", "name": "totals", "columns": [
+                        {"agg": "count_distinct", "field": "region",
+                         "alias": "regions"},
+                        {"agg": "sum", "field": "amount", "alias": "total"}]},
+                    {"type": "query", "name": "by_region", "columns": [
+                        {"field": "region", "alias": "region"},
+                        {"agg": "count", "alias": "rows"},
+                        {"agg": "count_distinct", "field": "ts",
+                         "alias": "days"},
+                        {"agg": "sum", "field": "amount", "alias": "total"}],
+                     "sort": [{"field": "region", "dir": "asc"}]},
+                    {"type": "query", "name": "daily", "columns": [
+                        {"agg": "sum", "field": "amount", "alias": "total"}],
+                     "time_bucket": {"field": "ts", "unit": "day",
+                                     "alias": "day"},
+                     "sort": [{"field": "day", "dir": "asc"}]},
+                ],
+            }
+            plan_integ_rows = [row for batch in plan_integ_batches
+                               for row in batch]
+
+            def _day_of(row):
+                return row["ts"].date().isoformat()
+
+            for day_param in (None, "2026-11-03"):
+                response = _plan_preview(world.plan_integ_id, integrated_plan,
+                                         params={"day": day_param})
+                assert response.status_code == 200, response.status_code
+                payload = response.json()["data"]
+                assert payload["source"] == "sealed_relation", \
+                    payload["source"]
+                assert payload["version"]["version_no"] == 1
+                selected = plan_integ_rows if day_param is None else [
+                    row for row in plan_integ_rows
+                    if _day_of(row) == day_param]
+                totals = _query_block(payload, "totals")
+                assert totals["rows"][0]["regions"] == len(
+                    {row["region"] for row in selected})
+                assert float(totals["rows"][0]["total"]) == sum(
+                    row["amount"] for row in selected)
+                by_region = _query_block(payload, "by_region")
+                expected_rows = []
+                for name in sorted({row["region"] for row in selected}):
+                    group = [row for row in selected
+                             if row["region"] == name]
+                    expected_rows.append((
+                        name, len(group),
+                        len({row["ts"] for row in group}),
+                        float(sum(row["amount"] for row in group))))
+                assert [(row["region"], row["rows"], row["days"],
+                         float(row["total"]))
+                        for row in by_region["rows"]] == expected_rows, \
+                    by_region["rows"]
+                daily = _query_block(payload, "daily")
+                expected_days = {}
+                for row in selected:
+                    day = _day_of(row)
+                    expected_days[day] = expected_days.get(
+                        day, 0) + row["amount"]
+                assert [(str(row["day"])[:10], float(row["total"]))
+                        for row in daily["rows"]] == [
+                    (day, float(total))
+                    for day, total in sorted(expected_days.items())], \
+                    daily["rows"]
+            report["cases"]["plan_preview_integrated"] = True
+
+            # text-only plan: no query block, no version/source, no fences.
+            response = _plan_preview(world.main_id, {
+                "version": 1, "filters": [],
+                "blocks": [{"type": "text", "text": "纯文本计划预览"}]})
+            assert response.status_code == 200, response.status_code
+            text_payload = response.json()["data"]
+            assert text_payload["blocks"] == [
+                {"type": "text", "text": "纯文本计划预览"}]
+            assert text_payload["version"] is None
+            assert text_payload["source"] is None
+            assert text_payload["markdown"] == "纯文本计划预览\n"
+            assert "```" not in text_payload["markdown"]
+            report["cases"]["plan_preview_text_only"] = True
+
+            # injection-shaped plans must be rejected at validation (before
+            # any SQL is compiled or executed): unknown/injection fields,
+            # fence-marked text, non-numeric sum target, >20 query blocks.
+            for malicious in (
+                {"version": 1, "filters": [],
+                 "blocks": [{"type": "query", "name": "leak", "columns": [
+                     {"field": "v2_users", "alias": "leak"}]}]},
+                {"version": 1, "filters": [],
+                 "blocks": [{"type": "query", "name": "inject", "columns": [
+                     {"field": 'amount" AS x; DROP TABLE v2_users; --',
+                      "alias": "amount"}]}]},
+                {"version": 1, "filters": [],
+                 "blocks": [{"type": "text",
+                             "text": "```sql x\nDROP TABLE v2_users\n```"}]},
+                {"version": 1, "filters": [],
+                 "blocks": [{"type": "query", "name": "sum_text",
+                             "columns": [{"agg": "sum", "field": "note",
+                                          "alias": "total"}]}]},
+                {"version": 1, "filters": [],
+                 "blocks": [{"type": "query", "name": f"q{index}",
+                             "columns": [{"agg": "count", "alias": "n"}]}
+                            for index in range(21)]},
+            ):
+                _plan_error(malicious, code="invalid_report_plan")
+            # structure-level rejections (DTO literal/bounds/extra keys).
+            _plan_error({"version": 2, "filters": [],
+                         "blocks": [{"type": "text", "text": "v2"}]},
+                        code=None)
+            _plan_error({"version": 1, "filters": [],
+                         "blocks": [{"type": "query", "name": "raw",
+                                     "sql": "DROP TABLE v2_users"}]},
+                        code=None)
+            _plan_error({"version": 1, "filters": [],
+                         "blocks": [{"type": "query", "name": "capped",
+                                     "columns": [{"agg": "count",
+                                                  "alias": "n"}],
+                                     "limit": 201}]},
+                        code=None)
+            # parameter gates fire before execution.
+            _plan_error({"version": 1, "filters": [],
+                         "blocks": [{"type": "text", "text": "无筛选"}]},
+                        params={"region": "north"},
+                        code="report_plan_params_undeclared")
+            _plan_error({"version": 1,
+                         "filters": [{"name": "amount", "type": "number",
+                                      "field": "amount"}],
+                         "blocks": [{"type": "text", "text": "数字筛选"}]},
+                        params={"amount": "ten"},
+                        code="report_plan_params_invalid")
+            healthy = _plan_preview(world.main_id, {
+                "version": 1, "filters": [],
+                "blocks": [{"type": "query", "name": "alive", "columns": [
+                    {"agg": "count", "alias": "n"}]}]})
+            assert healthy.status_code == 200, healthy.status_code
+            assert _query_block(healthy.json()["data"], "alive")[
+                "rows"][0]["n"] == len(main_rows)
+            report["cases"]["plan_injection_rejected"] = True
+
+            # previews (success and failure) never persist or bump revisions.
+            detail_after_previews = plan_client.get(
+                f"{base}/{plan_report_id}", headers=headers).json()["data"]
+            assert detail_after_previews["revision"] == revision_before
+            assert len(detail_after_previews["articles"]) == articles_before
+            report["cases"]["plan_preview_no_persistence"] = True
+
+            # plan-created article persists normalized plan + generated
+            # markdown; markdown XOR; advanced markdown decouples plan_json.
+            create_plan = {
+                "version": 1,
+                "filters": [{"name": "region", "type": "text",
+                             "field": "region"}],
+                "blocks": [
+                    {"type": "text", "text": "计划创建的文章"},
+                    {"type": "query", "name": "by_region", "columns": [
+                        {"field": "region", "alias": "region"},
+                        {"agg": "count", "alias": "rows"},
+                        {"agg": "sum", "field": "amount", "alias": "total"}],
+                     "sort": [{"field": "total", "dir": "desc"}]}],
+            }
+            plan_article = plan_client.post(
+                f"{base}/{plan_report_id}/articles", json={
+                    "title": "计划文章", "dataset_id": world.main_id,
+                    "plan": create_plan}, headers=headers)
+            assert plan_article.status_code == 201, plan_article.status_code
+            plan_article_data = plan_article.json()["data"]
+            plan_article_id = plan_article_data["id"]
+            assert plan_article_data["plan_json"]["version"] == 1
+            generated_markdown = plan_article_data["markdown"]
+            assert "```sql by_region" in generated_markdown
+            assert generated_markdown == operations_plan.plan_markdown(
+                plan_article_data["plan_json"])
+            detail_after_create = plan_client.get(
+                f"{base}/{plan_report_id}", headers=headers).json()["data"]
+            assert detail_after_create["revision"] == revision_before + 1
+            assert len(detail_after_create["articles"]) == \
+                articles_before + 1
+
+            both_sources = plan_client.post(
+                f"{base}/{plan_report_id}/articles", json={
+                    "title": "二选一", "dataset_id": world.main_id,
+                    "markdown": "# 手写\n",
+                    "plan": create_plan}, headers=headers)
+            assert both_sources.status_code == 422, both_sources.status_code
+
+            hand_written = plan_client.patch(
+                f"{base}/{plan_report_id}/articles/{plan_article_id}",
+                json={"markdown": "# 高级手写正文\n",
+                      "expected_revision": 1}, headers=headers)
+            assert hand_written.status_code == 200, hand_written.status_code
+            hand_data = hand_written.json()["data"]
+            assert hand_data["plan_json"] is None
+            assert hand_data["markdown"] == "# 高级手写正文\n"
+
+            replanned = plan_client.patch(
+                f"{base}/{plan_report_id}/articles/{plan_article_id}",
+                json={"plan": create_plan,
+                      "expected_revision": hand_data["revision"]},
+                headers=headers)
+            assert replanned.status_code == 200, replanned.status_code
+            replan_data = replanned.json()["data"]
+            assert replan_data["plan_json"] is not None
+            assert replan_data["markdown"] == generated_markdown
+            report["cases"]["plan_create_xor_and_decouple"] = True
+
+            # plan-design: viewer denied; editor hits the unconfigured-LLM
+            # wall without any external model call or persistence.
+            viewer_token = create_access_token({"sub": world.viewer_id})
+            viewer_headers = {"Authorization": f"Bearer {viewer_token}"}
+            viewer_design = plan_client.post(
+                f"{base}/{plan_report_id}/plan-design",
+                json={"dataset_id": world.main_id,
+                      "brief": "按区域汇总金额"},
+                headers=viewer_headers)
+            assert viewer_design.status_code == 403, viewer_design.status_code
+            unconfigured = plan_client.post(
+                f"{base}/{plan_report_id}/plan-design",
+                json={"dataset_id": world.main_id,
+                      "brief": "按区域汇总金额"},
+                headers=headers)
+            assert unconfigured.status_code == 503, unconfigured.status_code
+            assert unconfigured.json()["detail"]["code"] == \
+                "report_ai_unavailable"
+            detail_after_ai = plan_client.get(
+                f"{base}/{plan_report_id}", headers=headers).json()["data"]
+            assert len(detail_after_ai["articles"]) == articles_before + 1
+            report["cases"]["plan_ai_unconfigured"] = True
+
+            # datasets listing carries reportable/version/schema per item.
+            datasets = plan_client.get(f"{base}/datasets", headers=headers)
+            assert datasets.status_code == 200, datasets.status_code
+            by_dataset = {item["id"]: item
+                          for item in datasets.json()["data"]["items"]}
+            main_entry = by_dataset[world.main_id]
+            assert main_entry["reportable"] is True
+            assert main_entry["status"] == "ready"
+            assert main_entry["version"]["version_no"] == 1
+            column_types = {column["name"]: column["type"]
+                            for column in main_entry["schema"]["columns"]}
+            assert column_types == {"region": "string", "amount": "number",
+                                    "ts": "timestamp", "note": "string"}
+            assert by_dataset[world.plan_curated_id]["reportable"] is True
+            assert by_dataset[world.plan_integ_id]["reportable"] is True
+            broken_entry = by_dataset[world.broken_id]
+            assert broken_entry["reportable"] is False
+            assert broken_entry["status"] == "unavailable"
+            assert broken_entry["reason"]
+            report["cases"]["plan_datasets_reportable"] = True
+        finally:
+            if plan_client is not None:
+                plan_client.close()
+            fastapi_app.dependency_overrides.clear()
+        report["durations_ms"]["plan"] = round(
             (time.perf_counter() - started) * 1000, 1)
 
         stage = "complete"

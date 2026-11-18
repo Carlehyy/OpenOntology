@@ -56,10 +56,36 @@ OPENONTOLOGY_OPERATIONS_REPORTS_E2E=1 ENVIRONMENT=test \
 ```
 
 该脚本验证三类单数据集来源、聚合值、作用域隔离、参数绑定、版本快照、资源
-预算和连接池临时表清理；PR 和自动部署 CI 均执行并上传脱敏报告。另在已启动的
-隔离 API 上运行 `operations_reports_stack.spec.ts`，验证实际登录、报告与文章
-编辑、SQL 试跑、筛选后的表格值及 Hash 深链。沿用下文的隔离栈启动方式，通过
+预算和连接池临时表清理；plan v1 计划用例在同一脚本内经真实路由与
+`execute_report_queries`（从不 mock）覆盖：三类数据资产（structured/curated/
+integrated）的计划预览（COUNT(DISTINCT)/SUM/GROUP BY、text/number/date 筛选、
+date_trunc 时间桶与块上限 clamp）、纯文本预览、预览不落库、计划创建文章的
+markdown 互斥与高级 Markdown 解耦、注入形态的字段/SQL/文本在执行前被拒、
+plan-design 权限与未配置 LLM 错误，以及可报告数据集目录；PR 和自动部署 CI
+均执行并上传脱敏报告。另在已启动的隔离 API 上运行
+`operations_reports_stack.spec.ts`，验证实际登录、报告与文章编辑、SQL 试跑、
+筛选后的表格值及 Hash 深链。沿用下文的隔离栈启动方式，通过
 `PLAYWRIGHT_API_URL` 和 `VITE_API_PROXY_TARGET` 指向隔离 API。
+
+运营报告 AI 计划的真实外部模型旅程在 external 套件
+（`operations_reports_ai_external.spec.ts`）opt-in 执行：真实登录与 GUI、
+确定性 CSV seed、后端默认 LLM 生成候选、未试跑前接受/创建禁用、候选预览真实
+执行、接受后创建与保存草稿、plan_json/markdown 回读与真实 count 求和核验、
+候选确认前不落库且 revision 不变。模型使用后端已配置的默认 LLM，不创建凭据，
+不读取或输出任何模型 key/URL/原始响应：
+
+```bash
+cd frontend
+PLAYWRIGHT_REPORT_AI_E2E=1 \
+PLAYWRIGHT_API_URL=http://localhost:8000 \
+npm run test:e2e:external -- operations_reports_ai_external
+```
+
+未设置 `PLAYWRIGHT_REPORT_AI_E2E=1` 时该 spec 明确 skip，常规门禁与 CI
+不会调用真实模型。应先在隔离栈配置可用 LLM，再显式启用；启用后若没有可用
+LLM，spec 按设计失败（后端 503 `report_ai_unavailable`），不得当作跳过或通过。
+长超时（180 秒）只用于等待 AI 候选生成，模型轮次与预算由后端默认 LLM 配置
+决定，验收记录只保留脱敏结论。
 
 ### AutoLoop 事务入站与派发恢复
 

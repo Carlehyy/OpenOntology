@@ -5,10 +5,12 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.deps import get_current_user, get_db
-from app.operations import query_service, service
+from app.operations import ai, query_service, service
 from app.operations.schemas import (
     ArticleCreate,
     ArticleExecute,
+    ArticlePlanDesign,
+    ArticlePlanPreview,
     ArticleReorder,
     ArticleUpdate,
     ReportCreate,
@@ -40,6 +42,62 @@ def create_report(
 @router.get("/datasets")
 def list_report_datasets(db: Session = Depends(get_db), _=Depends(get_current_user)):
     return _ok(query_service.list_report_datasets(db))
+
+
+@router.get("/datasets/{dataset_id}/schema")
+def get_report_dataset_schema(
+    dataset_id: str,
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    return _ok(query_service.report_dataset_schema(db, dataset_id))
+
+
+# 字面量段路由先于 /{report_id} 系列注册，避免被路径参数吞掉。
+@router.post("/{report_id}/plan-preview")
+def preview_report_plan(
+    report_id: str,
+    body: ArticlePlanPreview,
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    from app.data_channel.query.contracts import QueryError
+    try:
+        result = query_service.preview_plan(
+            db, report_id,
+            dataset_id=body.dataset_id,
+            plan=body.plan,
+            params=body.params,
+            limit=body.limit,
+        )
+    except QueryError as exc:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=exc.status, detail=exc.detail()) from exc
+    return _ok(result)
+
+
+@router.post("/{report_id}/plan-design")
+def design_report_plan(
+    report_id: str,
+    body: ArticlePlanDesign,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    from app.data_channel.query.contracts import QueryError
+    try:
+        result = ai.design_plan(
+            db,
+            report_id,
+            user,
+            dataset_id=body.dataset_id,
+            brief=body.brief,
+            model_id=body.model_id,
+            current_plan=body.current_plan,
+        )
+    except QueryError as exc:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=exc.status, detail=exc.detail()) from exc
+    return _ok(result)
 
 
 @router.get("/{report_id}")

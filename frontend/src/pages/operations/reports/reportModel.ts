@@ -91,6 +91,11 @@ export function parseConfigLines(source: string): Map<string, string> {
   return map
 }
 
+/** 图表配置合法性校验（结构化计划编辑器与 markdown 解析共用同一口径）。 */
+export function chartConfigIssues(config: ReportChartConfig): ReportBlockIssue[] {
+  return chartIssuesFor(config)
+}
+
 function chartIssuesFor(config: ReportChartConfig): ReportBlockIssue[] {
   const issues: ReportBlockIssue[] = []
   if (!config.query) issues.push({ message: '图表缺少 query（要引用的命名 SQL）' })

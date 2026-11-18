@@ -3,10 +3,12 @@
  * 运营报告真实栈验收：真实登录 → 新建报告册/两篇文章 → Markdown 内命名 SQL
  * 编辑与试跑（真实受限执行）→ 保存/刷新 → 筛选改变真实数值 → 目录深链，
  * 全程不 mock 报告 API，SQL 在隔离后端（专用 PG）上受限执行。
+ * 第二旅程覆盖结构化计划正门：创建弹窗默认资产模式（先真实试跑再创建）→
+ * 计划编辑/自动预览不落库 → 保存 plan 载荷 → 刷新回读 → 筛选收敛。
  *
  * 数据自 seed、自清理：
  * - seed：admin 经 POST /api/v2/datasets/upload 上传确定性 CSV（structured
- *   数据集 v1，物化执行语义），不依赖任何预置 fixture；
+ *   数据集 v1，物化执行语义，列类型自动推导），不依赖任何预置 fixture；
  * - cleanup：测试结束后删除本测试创建的报告册（连带文章）与数据集；
  * - 凭据遵循 support/stack-credentials；后端地址来自 PLAYWRIGHT_API_URL，
  *   只指向隔离栈，绝不触碰生产。
@@ -152,20 +154,19 @@ test('运营报告真实栈：报告册/文章 CRUD、SQL 试跑执行、保存�
     const seeded = await seedDatasetRows(request, token, `ops-report-stack-${suffix}`, CSV_ROWS)
     datasetId = seeded.datasetId
 
-    // ── 新建报告册（真实 POST，卡片出现即列表回读一致） ──
+    // ── 新建报告册（真实 POST）→ 自动进入书页并打开第一篇文章向导 ──
     await page.goto('/#/operations/reports')
     await expect(page.getByTestId('operations-report-list')).toBeVisible()
     await page.getByTestId('report-create').click()
     await page.getByLabel('报告册名称').fill(reportName)
     await page.getByTestId('report-form-submit').click()
-    await expect(page.getByText(reportName, { exact: true })).toBeVisible()
-
-    // ── 打开书页并创建第一篇文章（绑定 seed 数据集） ──
-    await page.getByText(reportName, { exact: true }).first().click()
     await expect(page.getByTestId('operations-report-book')).toBeVisible()
     reportId = idsFromUrl(page).reportId
 
-    await page.getByTestId('report-create-article').click()
+    // 向导自动打开（路由 state 一次性触发）；Markdown 旧旅程须显式选择 Markdown 入口
+    const wizard = page.getByRole('dialog')
+    await expect(wizard).toBeVisible()
+    await page.getByTestId('report-create-mode-markdown').click()
     await page.getByLabel('文章标题').fill('订单趋势')
     await page.getByRole('combobox', { name: '选择数据集' }).click()
     await page.getByRole('option', { name: seeded.datasetName, exact: true }).click()
@@ -234,6 +235,7 @@ test('运营报告真实栈：报告册/文章 CRUD、SQL 试跑执行、保存�
 
     // ── 第二篇文章：筛选查询，筛选值改变真实数值 ──
     await page.getByTestId('report-create-article').click()
+    await page.getByTestId('report-create-mode-markdown').click()
     await page.getByLabel('文章标题').fill('区域明细')
     await page.getByRole('combobox', { name: '选择数据集' }).click()
     await page.getByRole('option', { name: seeded.datasetName, exact: true }).click()
@@ -275,4 +277,104 @@ test('运营报告真实栈：报告册/文章 CRUD、SQL 试跑执行、保存�
   expect(reports.items.some(item => item.id === reportId)).toBe(false)
   const detail = await request.get(`${API}/api/v2/datasets/${datasetId}`, { headers: { Authorization: `Bearer ${token}` } })
   expect(detail.status()).toBe(404)
+})
+
+interface StackPlanBlock { type: string; name?: string; time_bucket?: { field: string; unit: string } }
+interface StackArticleDetail {
+  revision: number
+  markdown: string
+  plan_json: { version: number; blocks: StackPlanBlock[] } | null
+}
+
+test('运营报告真实栈：结构化计划创建、预览不落库、保存回读与筛选', async ({ page, request }) => {
+  test.setTimeout(300_000)
+  const suffix = Date.now()
+  const reportName = `E2E 结构化计划 ${suffix}`
+  const token = await login(page)
+  let reportId = ''
+  let datasetId = ''
+
+  try {
+    // ── seed：与旧旅程相同的确定性 structured 数据集（region/note 自动推导列） ──
+    const seeded = await seedDatasetRows(request, token, `ops-plan-stack-${suffix}`, CSV_ROWS)
+    datasetId = seeded.datasetId
+
+    // ── 新建报告册（真实 POST）→ 自动进入书页并打开第一篇文章向导 ──
+    await page.goto('/#/operations/reports')
+    await expect(page.getByTestId('operations-report-list')).toBeVisible()
+    await page.getByTestId('report-create').click()
+    await page.getByLabel('报告册名称').fill(reportName)
+    await page.getByTestId('report-form-submit').click()
+    await expect(page.getByTestId('operations-report-book')).toBeVisible()
+    reportId = idsFromUrl(page).reportId
+    const dialog = page.getByRole('dialog')
+    await expect(dialog).toBeVisible()
+    await page.getByLabel('文章标题').fill('结构化计划报告')
+    await page.getByRole('combobox', { name: '选择数据集' }).click()
+    await page.getByRole('option', { name: seeded.datasetName, exact: true }).click()
+    await expect(page.getByTestId('report-create-asset-meta')).toContainText('可查询')
+    const submit = page.getByTestId('report-create-article-submit')
+    await expect(submit).toBeDisabled()
+    await page.getByTestId('report-plan-preview-run').click()
+    // 真实预览：4 行 CSV → 总量 KPI=4、样例表可见（不是假成功）
+    await expect(dialog.getByTestId('report-result-table').first()).toBeVisible()
+    await expect(dialog.getByTestId('report-chart-block').first()).toContainText('4')
+    await expect(submit).toBeEnabled()
+    await submit.click()
+
+    // ── 计划创建后仍是阅读态，可继续编辑；服务端确以 plan 持久化 ──
+    await expect(page.getByRole('heading', { name: '结构化计划报告', exact: true })).toBeVisible()
+    await expect(page.getByTestId('report-article-editor')).toHaveCount(0)
+    await expect(page.getByTestId('report-edit-article')).toBeVisible()
+    const articleId = idsFromUrl(page).articleId
+    expect(articleId).toBeTruthy()
+    const articlePath = `/api/v2/operations/reports/${reportId}/articles/${articleId}`
+    const created = await apiJson<StackArticleDetail>(request, token, 'GET', articlePath)
+    expect(created.revision).toBe(1)
+    expect(created.plan_json?.blocks.some(block => block.type === 'query' && block.name === 'overview_total')).toBe(true)
+
+    // ── 编辑：计划文章默认可视化计划编辑器与自动真实预览 ──
+    await page.getByTestId('report-edit-article').click()
+    await expect(page.getByTestId('report-plan-editor')).toBeVisible()
+    await expect(page.locator('[data-testid="report-markdown-editor"]')).toHaveCount(0)
+    await expect(page.getByTestId('report-plan-preview')).toBeVisible()
+
+    // 修改计划：追加一条自动命名的查询；600ms 防抖自动试跑成功后才能保存
+    await page.getByTestId('report-plan-editor').getByRole('button', { name: /^查询（/ }).click()
+    await expect(page.getByText('有未保存修改')).toBeVisible()
+    await expect(page.getByTestId('report-save-draft')).toBeEnabled()
+
+    // ── 预览不落库：保存前修订与计划保持创建时状态 ──
+    const beforeSave = await apiJson<StackArticleDetail>(request, token, 'GET', articlePath)
+    expect(beforeSave.revision).toBe(1)
+    expect(beforeSave.plan_json).toEqual(created.plan_json)
+
+    // ── 保存 plan 载荷（XOR markdown）：修订 +1，新增查询块持久化 ──
+    await page.getByTestId('report-save-draft').click()
+    await expect(page.getByTestId('report-article-editor')).toHaveCount(0)
+    const saved = await apiJson<StackArticleDetail>(request, token, 'GET', articlePath)
+    expect(saved.revision).toBe(2)
+    expect(saved.plan_json?.blocks.some(block => block.type === 'query' && String(block.name).startsWith('query_'))).toBe(true)
+
+    // ── 刷新：深链保持当前文章，编辑器回读保存过的查询块 ──
+    await page.reload()
+    await expect(page.getByRole('heading', { name: '结构化计划报告', exact: true })).toBeVisible()
+    await expect(idsFromUrl(page).articleId).toBeTruthy()
+    await page.getByTestId('report-edit-article').click()
+    await expect(page.getByTestId('report-plan-editor')).toBeVisible()
+    await expect(page.locator('[data-testid^="report-plan-query-query_"]')).toHaveCount(1)
+
+    // ── 筛选：添加 region 筛选，默认不过滤（count=4），华南后真实收敛 ──
+    await page.getByTestId('report-plan-editor').getByRole('button', { name: /^筛选器（/ }).click()
+    const filterInput = page.getByTestId('report-filter-filter_1')
+    await expect(filterInput).toBeVisible()
+    const previewTables = page.getByTestId('report-plan-preview').getByTestId('report-result-table')
+    await expect(previewTables.getByRole('cell', { name: '4', exact: true }).first()).toBeVisible()
+    await filterInput.fill('华南')
+    await page.getByTestId('report-plan-preview-run').click()
+    await expect(previewTables.getByRole('cell', { name: '1', exact: true }).first()).toBeVisible()
+    await expect(previewTables.getByRole('cell', { name: '4', exact: true })).toHaveCount(0)
+  } finally {
+    await cleanupOwn(request, token, reportId, datasetId)
+  }
 })

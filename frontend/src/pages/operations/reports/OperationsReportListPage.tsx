@@ -134,10 +134,11 @@ export default function OperationsReportListPage() {
 
   const createMutation = useMutation({
     mutationFn: () => operationsReportsApi.create({ name: formName.trim(), description: formDescription.trim() || undefined }),
-    onSuccess: () => {
+    onSuccess: created => {
       void refresh()
       setCreateOpen(false)
-      toast.success('报告册已创建', { description: '打开后可新建第一篇文章。' })
+      navigate(`/operations/reports/${created.id}`, { state: { createFirstArticle: true } })
+      toast.success('报告册已创建', { description: '选择数据资产，开始搭建第一篇文章。' })
     },
     onError: error => toast.error('创建失败', { description: operationsApiErrorText(error) }),
   })
@@ -239,7 +240,7 @@ export default function OperationsReportListPage() {
         open={formModalOpen}
         onClose={() => { if (!formSubmitting) { setCreateOpen(false); setEditTarget(null) } }}
         title={createOpen ? '新建报告册' : '编辑报告册'}
-        description="报告册是书式文章集合，文章在打开后的目录里创建。"
+        description={createOpen ? '创建报告册后，选择数据资产搭建第一篇文章。' : '报告册是书式文章集合，可在目录中管理文章。'}
         footer={(
           <>
             <Button variant="outline" onClick={() => { setCreateOpen(false); setEditTarget(null) }} disabled={formSubmitting}>取消</Button>

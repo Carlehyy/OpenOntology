@@ -4,7 +4,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -73,6 +73,9 @@ class OperationsReportArticle(Base):
     )
     title: Mapped[str] = mapped_column(String(240), nullable=False)
     markdown: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # 结构化计划（app/operations/plan.py 的规范化形态）；旧 markdown 文章为
+    # NULL。计划创建/更新的文章同时生成 markdown，两者由同一次写入保持一致。
+    plan_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     dataset_id: Mapped[str] = mapped_column(
         String, ForeignKey("v2_datasets.id", ondelete="RESTRICT"), nullable=False,
     )

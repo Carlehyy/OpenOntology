@@ -35,10 +35,53 @@ export interface OperationsReportArticleSummary {
   /** 文章绑定的单数据集。 */
   dataset_id: string
   dataset_name: string
+  /** 结构化计划；旧 Markdown 文章为空。 */
+  plan_json?: ReportPlanPayload | null
   /** 册内排序（0 基，随 reorder 更新）。 */
   position: number
   revision: number
   updated_at: string | null
+}
+
+export interface ReportPlanPayload {
+  version: 1
+  filters: ReportPlanFilterPayload[]
+  blocks: ReportPlanBlockPayload[]
+}
+
+export interface ReportPlanFilterPayload {
+  name: string
+  type: 'text' | 'number' | 'date'
+  field?: string
+}
+
+export type ReportPlanBlockPayload =
+  | { type: 'text'; text: string }
+  | {
+    type: 'query'
+    name: string
+    columns: { field?: string; agg?: 'count' | 'count_distinct' | 'sum' | 'avg' | 'min' | 'max'; alias?: string }[]
+    time_bucket?: { field: string; unit: 'minute' | 'hour' | 'day' | 'week' | 'month'; alias?: string }
+    sort?: { field: string; dir: 'asc' | 'desc' }[]
+    limit?: number
+  }
+  | { type: 'chart'; chart: 'kpi' | 'bar' | 'line' | 'pie' | 'table'; query: string; x?: string; y?: string[] }
+
+export type OperationsArticleCreate = { title: string; dataset_id: string } & (
+  | { plan: ReportPlanPayload; markdown?: never }
+  | { markdown?: string; plan?: never }
+)
+
+export interface OperationsReportDataset {
+  id: string
+  name: string
+  kind: string
+  updated_at: string | null
+  reportable?: boolean
+  status?: 'ready' | 'unavailable'
+  reason?: string | null
+  version?: { version_no: number; as_of: string | null; rowcount: number | null } | null
+  schema?: { columns: OperationsDatasetColumn[] }
 }
 
 /** 报告册详情：摘要 + 文章目录。 */
@@ -49,6 +92,7 @@ export interface OperationsReportDetail extends OperationsReportSummary {
 /** 文章全文（编辑/阅读用）。 */
 export interface OperationsReportArticle extends OperationsReportArticleSummary {
   markdown: string
+  plan_json?: ReportPlanPayload | null
   revision: number
   created_at: string | null
 }
@@ -129,9 +173,13 @@ const operationsReportsApi = {
   create: (payload: { name: string; description?: string }): Promise<OperationsReportSummary> =>
     apiClientV2.post('/operations/reports', payload),
 
-  /** 可选的结构化数据集目录，供文章绑定选择器使用。 */
-  datasets: (): Promise<{ items: { id: string; name: string; kind: string; updated_at: string | null }[]; total: number }> =>
+  /** 可报告数据集目录：旧字段保留，附带真实可用状态与版本证据。 */
+  datasets: (): Promise<{ items: OperationsReportDataset[]; total: number }> =>
     apiClientV2.get('/operations/reports/datasets'),
+
+  /** 选择资产后按需读取字段（历史 CSV 的字段复用资产湖推导能力）。 */
+  datasetSchema: (datasetId: string): Promise<OperationsReportSchema> =>
+    apiClientV2.get(`/operations/reports/datasets/${datasetId}/schema`),
 
   /** 报告册详情（含文章目录） */
   detail: (reportId: string): Promise<OperationsReportDetail> =>
@@ -148,10 +196,10 @@ const operationsReportsApi = {
   remove: (reportId: string): Promise<{ status: string; id: string }> =>
     apiClientV2.delete(`/operations/reports/${reportId}`),
 
-  /** 新建文章（绑定单数据集，正文从模板起步） */
+  /** 新建文章：可携带结构化计划，服务端生成兼容 Markdown。 */
   createArticle: (
     reportId: string,
-    payload: { title: string; dataset_id: string },
+    payload: OperationsArticleCreate,
   ): Promise<OperationsReportArticle> =>
     apiClientV2.post(`/operations/reports/${reportId}/articles`, payload),
 
@@ -159,13 +207,34 @@ const operationsReportsApi = {
   article: (reportId: string, articleId: string): Promise<OperationsReportArticle> =>
     apiClientV2.get(`/operations/reports/${reportId}/articles/${articleId}`),
 
-  /** 保存文章草稿（标题/正文/数据集绑定） */
+  /** 保存文章草稿（标题/计划/正文/数据集绑定二选一） */
   updateArticle: (
     reportId: string,
     articleId: string,
-    payload: { title?: string; markdown?: string; dataset_id?: string; expected_revision?: number },
+    payload: { title?: string; markdown?: string; plan?: ReportPlanPayload; dataset_id?: string; expected_revision?: number },
   ): Promise<OperationsReportArticle> =>
     apiClientV2.patch(`/operations/reports/${reportId}/articles/${articleId}`, payload),
+
+  /** 计划真实预览：不落库。 */
+  previewPlan: (
+    reportId: string,
+    payload: { dataset_id: string; plan: ReportPlanPayload; params?: Record<string, string | number | boolean | null>; limit?: number },
+  ): Promise<{
+    plan_version: number
+    plan: ReportPlanPayload
+    markdown: string
+    dataset: { id: string; name: string; kind: string }
+    blocks: Array<Record<string, unknown>>
+    version: { version_id: string | null; version_no: number | null; as_of: string | null } | null
+    source: string | null
+  }> => apiClientV2.post(`/operations/reports/${reportId}/plan-preview`, payload),
+
+  /** AI 设计候选：不落库，需用户审阅后保存。 */
+  designPlan: (
+    reportId: string,
+    payload: { dataset_id: string; brief: string; model_id?: string; current_plan?: ReportPlanPayload },
+  ): Promise<{ plan: ReportPlanPayload; explanation: string; generation_mode: string; dataset: OperationsReportDataset & { fields: OperationsDatasetColumn[] } }> =>
+    apiClientV2.post(`/operations/reports/${reportId}/plan-design`, payload),
 
   /** 删除文章 */
   removeArticle: (reportId: string, articleId: string): Promise<{ status: string; id: string }> =>
@@ -230,8 +299,10 @@ export function operationsApiErrorText(error: unknown, fallback = '请稍后重�
     if (text) return text
   }
   if (detail && typeof detail === 'object') {
-    const message = (detail as { message?: unknown }).message
-    if (typeof message === 'string' && message) return message
+    const payload = detail as { message?: unknown; errors?: unknown }
+    const message = typeof payload.message === 'string' ? payload.message : ''
+    const issues = Array.isArray(payload.errors) ? payload.errors.filter(item => typeof item === 'string').join('；') : ''
+    if (message || issues) return [message, issues].filter(Boolean).join('：')
   }
   const message = (error as { message?: unknown }).message
   if (typeof message === 'string' && message) return message

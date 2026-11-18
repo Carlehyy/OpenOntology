@@ -9,6 +9,7 @@ from app.data_channel.datasets.models import Dataset
 from app.data_channel.query.report_sql import check_report_sql
 from app.operations import markdown
 from app.operations import models as m
+from app.operations import plan as report_plan
 from app.operations.schemas import ArticleCreate, ArticleReorder, ArticleUpdate, ReportCreate, ReportUpdate
 
 
@@ -46,6 +47,15 @@ def _require_dataset(db: Session, dataset_id: str) -> Dataset:
     return dataset
 
 
+def plan_field_types(db: Session, dataset: Dataset) -> dict[str, str]:
+    """计划字段白名单与资产湖字段读取共用同一确定性推导。"""
+    declared = report_plan.dataset_field_types(dataset)
+    if declared:
+        return declared
+    from app.data_channel.datasets.query_service import get_schema
+    return report_plan.field_types_from_columns(get_schema(dataset.id, db)["columns"])
+
+
 def _validate_markdown(value: str) -> None:
     result = markdown.validate_markdown(value)
     errors = list(result.errors)
@@ -64,6 +74,26 @@ def _validate_markdown(value: str) -> None:
             errors.append(f"查询 {block.name or '（未命名）'} 的参数未声明筛选器：{', '.join(sorted(undeclared))}")
     if errors:
         raise HTTPException(422, detail={"code": "invalid_report_markdown", "message": "；".join(errors), "errors": errors})
+
+
+def _plan_body(db: Session, dataset: Dataset, plan: report_plan.ReportPlan) -> tuple[dict, str]:
+    """结构化计划 →（规范化 plan_json，生成的 markdown）。
+
+    生成的 markdown 仍过 _validate_markdown（含每条 SQL 的 check_report_sql），
+    保证计划产物与手写 markdown 走完全相同的保存期安全门。
+    """
+    try:
+        normalized = report_plan.normalize_plan(
+            plan, field_types=plan_field_types(db, dataset))
+    except report_plan.PlanValidationError as exc:
+        raise HTTPException(422, detail={
+            "code": "invalid_report_plan",
+            "message": "；".join(exc.errors),
+            "errors": exc.errors,
+        }) from exc
+    generated = report_plan.plan_markdown(normalized)
+    _validate_markdown(generated)
+    return normalized, generated
 
 
 def _bump_report(report: m.OperationsReport) -> None:
@@ -134,13 +164,18 @@ def create_article(db: Session, report_id: str, body: ArticleCreate, user) -> m.
     if not title:
         raise HTTPException(422, detail={"code": "article_title_required", "message": "文章标题不能为空"})
     dataset = _require_dataset(db, body.dataset_id)
-    _validate_markdown(body.markdown)
+    if body.plan is not None:
+        plan_json, markdown_text = _plan_body(db, dataset, body.plan)
+    else:
+        plan_json, markdown_text = None, body.markdown
+        _validate_markdown(markdown_text)
     max_order = db.query(func.max(m.OperationsReportArticle.sort_order)).filter(
         m.OperationsReportArticle.report_id == report_id).scalar()
     article = m.OperationsReportArticle(
         report_id=report.id,
         title=title,
-        markdown=body.markdown,
+        markdown=markdown_text,
+        plan_json=plan_json,
         dataset_id=dataset.id,
         sort_order=_next_sort_order(max_order),
     )
@@ -162,11 +197,22 @@ def update_article(db: Session, report_id: str, article_id: str, body: ArticleUp
         if not title:
             raise HTTPException(422, detail={"code": "article_title_required", "message": "文章标题不能为空"})
         article.title = title
-    if body.markdown is not None:
+    new_dataset = _require_dataset(db, body.dataset_id) if body.dataset_id is not None else None
+    if body.plan is not None:
+        dataset = new_dataset if new_dataset is not None else _require_dataset(db, article.dataset_id)
+        plan_json, markdown_text = _plan_body(db, dataset, body.plan)
+        article.plan_json = plan_json
+        article.markdown = markdown_text
+    elif body.markdown is not None:
+        # 手写 markdown 修改后与计划脱钩：plan_json 清空，避免双权威漂移。
         _validate_markdown(body.markdown)
         article.markdown = body.markdown
-    if body.dataset_id is not None:
-        article.dataset_id = _require_dataset(db, body.dataset_id).id
+        article.plan_json = None
+    elif new_dataset is not None and article.plan_json:
+        # 只换数据集但文章仍是计划形态：字段白名单必须对新数据集继续成立。
+        _plan_body(db, new_dataset, report_plan.ReportPlan.model_validate(article.plan_json))
+    if new_dataset is not None:
+        article.dataset_id = new_dataset.id
     article.revision = int(article.revision or 0) + 1
     _bump_report(report)
     db.commit()
@@ -232,5 +278,6 @@ def article_summary(article: m.OperationsReportArticle, dataset_name: str = "") 
         "id": article.id, "report_id": article.report_id, "title": article.title,
         "dataset_id": article.dataset_id, "dataset_name": dataset_name,
         "position": int(article.sort_order), "revision": int(article.revision or 1),
+        "plan_json": article.plan_json,
         "updated_at": article.updated_at.isoformat() if article.updated_at else None,
     }

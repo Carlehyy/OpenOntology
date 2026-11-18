@@ -10,25 +10,26 @@
  * - 写入口（新建/编辑/删除/排序）仅 admin/editor 可见，viewer 只读；
  * - 脏稿保护：编辑中切换文章、返回列表、刷新/关闭页面前先确认放弃。
  */
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 import {
   ArrowLeft, ArrowDown, ArrowUp, BookOpen, ChevronRight, Pencil, Plus, Trash2,
 } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
 import { LoadingState } from '@/components/ui/LoadingState'
-import { Modal, ConfirmModal } from '@/components/ui/Modal'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { ConfirmModal } from '@/components/ui/Modal'
 import { useAuthStore } from '@/stores/authStore'
 import operationsReportsApi, {
   operationsApiErrorText,
+  type OperationsArticleCreate,
   type OperationsReportArticleSummary,
 } from '@/api/v2/operations-reports'
 import { moveItem, parseReportMarkdown } from './reportModel'
 import ReportArticleReader from './components/ReportArticleReader'
-import ReportArticleEditor from './components/ReportArticleEditor'
+import ReportArticleEditor, { type ReportArticleSave } from './components/ReportArticleEditor'
+import ReportCreationDialog from './components/ReportCreationDialog'
 
 function ArticleNavButton({ article, active, disabled, onSelect }: {
   article: OperationsReportArticleSummary
@@ -57,6 +58,7 @@ export default function OperationsReportBookPage() {
   const { reportId = '' } = useParams()
   const queryClient = useQueryClient()
   const navigate = useNavigate()
+  const location = useLocation()
   const [searchParams, setSearchParams] = useSearchParams()
   // 与后端 _write_required 同口径：仅 admin/editor 可写，viewer 只读
   // （写按钮直接隐藏，不靠 403 兜底）。
@@ -64,8 +66,6 @@ export default function OperationsReportBookPage() {
 
   const [editing, setEditing] = useState(false)
   const [createOpen, setCreateOpen] = useState(false)
-  const [createTitle, setCreateTitle] = useState('')
-  const [createDataset, setCreateDataset] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<OperationsReportArticleSummary | null>(null)
   const [pendingSwitch, setPendingSwitch] = useState<string | null>(null)
   const [editorDirty, setEditorDirty] = useState(false)
@@ -77,6 +77,12 @@ export default function OperationsReportBookPage() {
     enabled: !!reportId,
   })
   const articles = reportQuery.data?.articles ?? []
+  const createFirstArticle = (location.state as { createFirstArticle?: boolean } | null)?.createFirstArticle === true
+  useEffect(() => {
+    if (!createFirstArticle || !reportQuery.isSuccess) return
+    if (canWrite && reportQuery.data.articles.length === 0) setCreateOpen(true)
+    navigate(`${location.pathname}${location.search}`, { replace: true, state: null })
+  }, [createFirstArticle, reportQuery.isSuccess, reportQuery.data, canWrite, location.pathname, location.search, navigate])
   const articleParam = searchParams.get('article') ?? ''
   const currentId = articles.some(article => article.id === articleParam)
     ? articleParam
@@ -90,11 +96,6 @@ export default function OperationsReportBookPage() {
     queryKey: ['operations-report-schema', reportId, currentId],
     queryFn: () => operationsReportsApi.articleSchema(reportId, currentId),
     enabled: !!currentId && editing,
-  })
-  const datasetsQuery = useQuery({
-    queryKey: ['operations-report-datasets'],
-    queryFn: () => operationsReportsApi.datasets(),
-    enabled: createOpen,
   })
 
   const refreshReport = () => {
@@ -115,27 +116,32 @@ export default function OperationsReportBookPage() {
     goToArticle(articleId)
   }
 
+  const openCreate = () => {
+    if (editing && editorDirty) {
+      setPendingSwitch('__create__')
+      return
+    }
+    setCreateOpen(true)
+  }
+
   const createMutation = useMutation({
-    mutationFn: () => operationsReportsApi.createArticle(reportId, {
-      title: createTitle.trim(),
-      dataset_id: createDataset,
-    }),
+    mutationFn: (payload: OperationsArticleCreate) => operationsReportsApi.createArticle(reportId, payload),
     onSuccess: created => {
+      queryClient.setQueryData(['operations-report-article', reportId, created.id], created)
       refreshReport()
       setCreateOpen(false)
-      setCreateTitle('')
-      setCreateDataset('')
       setEditing(false)
+      setEditorDirty(false)
       goToArticle(created.id)
-      toast.success('文章已创建', { description: '已绑定数据集，可在编辑态写入正文与命名 SQL。' })
+      toast.success('文章已创建', { description: '可继续编辑并预览报告。' })
     },
     onError: error => toast.error('创建文章失败', { description: operationsApiErrorText(error) }),
   })
 
   const saveMutation = useMutation({
-    mutationFn: (payload: { title: string; markdown: string; expected_revision: number }) =>
-      operationsReportsApi.updateArticle(reportId, currentId, payload),
-    onSuccess: () => {
+    mutationFn: (payload: ReportArticleSave) => operationsReportsApi.updateArticle(reportId, currentId, payload),
+    onSuccess: saved => {
+      queryClient.setQueryData(['operations-report-article', reportId, saved.id], saved)
       refreshReport()
       setEditing(false)
       setEditorDirty(false)
@@ -229,7 +235,7 @@ export default function OperationsReportBookPage() {
         </div>
         <div className="ml-auto flex items-center gap-2">
           {canWrite && (
-            <Button size="sm" variant="outline" onClick={() => setCreateOpen(true)} data-testid="report-create-article">
+            <Button size="sm" variant="outline" onClick={openCreate} data-testid="report-create-article">
               <Plus size={13} /> 新建文章
             </Button>
           )}
@@ -323,6 +329,7 @@ export default function OperationsReportBookPage() {
         <div className="flex min-h-[60vh] min-w-0 flex-1 flex-col">
           {editing && currentArticle ? (
             <ReportArticleEditor
+              key={currentArticle.id}
               reportId={reportId}
               article={currentArticle}
               schema={schemaQuery.data}
@@ -352,7 +359,7 @@ export default function OperationsReportBookPage() {
                 <BookOpen size={26} className="text-[var(--color-text-tertiary)]" />
                 <p className="text-sm font-medium text-muted-foreground">这本报告册还没有文章</p>
                 {canWrite && (
-                  <Button size="sm" onClick={() => setCreateOpen(true)}>
+                  <Button size="sm" onClick={openCreate}>
                     <Plus size={13} /> 新建第一篇文章
                   </Button>
                 )}
@@ -371,54 +378,15 @@ export default function OperationsReportBookPage() {
         </div>
       </div>
 
-      <Modal
-        open={createOpen}
-        onClose={() => { if (!createMutation.isPending) setCreateOpen(false) }}
-        title="新建文章"
-        description="文章绑定单个数据集，正文里的命名 SQL 将在该数据集上受限执行。"
-        footer={(
-          <>
-            <Button variant="outline" onClick={() => setCreateOpen(false)} disabled={createMutation.isPending}>取消</Button>
-            <Button
-              onClick={() => createMutation.mutate()}
-              loading={createMutation.isPending}
-              disabled={!createTitle.trim() || !createDataset}
-              data-testid="report-create-article-submit"
-            >
-              创建
-            </Button>
-          </>
-        )}
-      >
-        <div className="space-y-4">
-          <label className="block">
-            <span className="mb-1 block text-xs font-medium text-muted-foreground">标题</span>
-            <input
-              value={createTitle}
-              onChange={event => setCreateTitle(event.target.value)}
-              placeholder="例如：第 47 周运营周报"
-              aria-label="文章标题"
-              className="h-9 w-full rounded-lg border border-border bg-card px-3 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            />
-          </label>
-          <div>
-            <span className="mb-1 block text-xs font-medium text-muted-foreground">绑定数据集</span>
-            <Select value={createDataset} onValueChange={setCreateDataset}>
-              <SelectTrigger className="h-9 w-full rounded-lg bg-card text-sm" aria-label="选择数据集">
-                <SelectValue placeholder={datasetsQuery.isLoading ? '加载数据集...' : '选择数据集'} />
-              </SelectTrigger>
-              <SelectContent>
-                {(datasetsQuery.data?.items ?? []).map(dataset => (
-                  <SelectItem key={dataset.id} value={dataset.id}>{dataset.name}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            {datasetsQuery.isError && (
-              <p className="mt-1 text-xs text-[var(--color-danger)]" role="alert">数据集目录加载失败：{operationsApiErrorText(datasetsQuery.error)}</p>
-            )}
-          </div>
-        </div>
-      </Modal>
+      {createOpen && (
+        <ReportCreationDialog
+          reportId={reportId}
+          saving={createMutation.isPending}
+          error={createMutation.error}
+          onCreate={payload => createMutation.mutate(payload)}
+          onClose={() => { if (!createMutation.isPending) { setCreateOpen(false); createMutation.reset() } }}
+        />
+      )}
 
       <ConfirmModal
         open={!!deleteTarget}
@@ -440,6 +408,7 @@ export default function OperationsReportBookPage() {
           setEditorDirty(false)
           setEditing(false)
           if (target === '__exit__') navigate('/operations/reports')
+          else if (target === '__create__') setCreateOpen(true)
           else if (target && target !== '__cancel__') goToArticle(target)
         }}
         title="放弃未保存的修改？"

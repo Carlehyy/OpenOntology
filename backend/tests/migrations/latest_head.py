@@ -5,4 +5,4 @@ of duplicating a literal. Update it only when a new migration becomes the
 single head; the tests still assert the exact revision and chain, so a broken
 or unmerged migration graph cannot pass by accident.
 """
-LATEST_HEAD = "0151_autoloop_merge"
+LATEST_HEAD = "0152_operations_report_plan"

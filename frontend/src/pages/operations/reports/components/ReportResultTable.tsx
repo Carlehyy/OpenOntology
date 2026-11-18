@@ -2,7 +2,7 @@
  * 查询结果表（antd Table）：按服务端受限执行返回的 columns/rows 渲染。
  * 只消费服务端结果，不猜测聚合语义；truncated 时显式提示被截断。
  */
-import { Table } from 'antd'
+import { ConfigProvider, Table } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { formatQueryCell } from '../reportModel'
 import type { OperationsQueryResult } from '@/api/v2/operations-reports'
@@ -35,14 +35,25 @@ export default function ReportResultTable({ result, rowKey }: {
   const keyColumn = rowKey && result.columns.includes(rowKey) ? rowKey : result.columns[0]
   return (
     <div data-testid="report-result-table">
-      <Table
-        size="small"
-        columns={resultColumns(result.columns)}
-        dataSource={result.rows}
-        rowKey={(record, index) => String(keyColumn ? record[keyColumn] : index ?? '')}
-        pagination={false}
-        scroll={{ x: 'max-content', y: 320 }}
-      />
+      <ConfigProvider theme={{ components: { Table: {
+        colorBgContainer: 'var(--card)',
+        colorText: 'var(--foreground)',
+        colorTextHeading: 'var(--foreground)',
+        borderColor: 'var(--border)',
+        headerBg: 'var(--muted)',
+        headerColor: 'var(--foreground)',
+        headerSplitColor: 'var(--border)',
+        rowHoverBg: 'var(--color-bg-hover)',
+      } } }}>
+        <Table
+          size="small"
+          columns={resultColumns(result.columns)}
+          dataSource={result.rows}
+          rowKey={(record, index) => String(keyColumn ? record[keyColumn] : index ?? '')}
+          pagination={false}
+          scroll={{ x: 'max-content', y: 320 }}
+        />
+      </ConfigProvider>
       <p className="mt-1.5 flex items-center gap-2 text-[11px] text-muted-foreground">
         <span className="tabular-nums">{result.rowcount} 行 · {result.duration_ms} ms</span>
         {result.truncated && (
