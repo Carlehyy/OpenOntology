@@ -3,7 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import { Sender } from '@ant-design/x'
 import { ConfigProvider, theme as antdTheme } from 'antd'
 import {
-  ArrowDown, Check, Cpu, Layers3, List, ListChecks, Loader2, Menu, Mic, Monitor, MoreHorizontal, Network, Paperclip, Pencil, Plug,
+  ArrowDown, Check, Cpu, Layers3, List, ListChecks, Loader2, Megaphone, Menu, Mic, Monitor, MoreHorizontal, Network, Paperclip, Pencil, Plug,
   ScrollText, Send, Settings2, Square, SquareKanban, X,
 } from 'lucide-react'
 
@@ -258,7 +258,7 @@ export default function SuperAssistantPage() {
   const [configPendingTab, setConfigPendingTab] = useState<AssistantConfigTab | null>(null)
   // 会话右键「重命名会话」行级改名目标（区别于聊天区顶部的选中会话标题编辑）
   const [renamingConversation, setRenamingConversation] = useState<SuperConversation | null>(null)
-  // 会话右键「反馈问题」：复用全站工单提交弹窗（自动携带当前页面地址）
+  // 会话右键「反馈问题」与聊天区右键「提交工单」：复用全站工单提交弹窗（自动携带当前页面地址）
   const [ticketOpen, setTicketOpen] = useState(false)
   // 面板宽度（px）：单一卡片结构下聊天列经 --config-w 让位，宽度状态提升到页面级；
   // 拖拽中禁用 padding 过渡，聊天列跟手移动，松手后才恢复开合动画
@@ -1896,7 +1896,8 @@ export default function SuperAssistantPage() {
             )}
             {!kernelRunId && selectedId && <KernelRunList conversationId={selectedId} />}
             {/* 聊天区域右键菜单：头部五大功能入口（决策事项/会话纪要/项目管理/领域知识/能力拓展）
-                迁入此处。仅空白处触发——消息气泡与输入框根节点自行 stopPropagation 放行浏览器
+                迁入此处，会话纪要下方追加「提交工单」（复用全站工单弹窗）。
+                仅空白处触发——消息气泡与输入框根节点自行 stopPropagation 放行浏览器
                 原生菜单（气泡内文本选择/代码块复制的右键不被吞掉）；modal={false} 对齐会话列表
                 右键菜单惯例，避免菜单与弹窗同批开合时 react-remove-scroll 的 body 锁竞态。 */}
             <ContextMenu modal={false}>
@@ -1942,10 +1943,11 @@ export default function SuperAssistantPage() {
                 </div>
               </ContextMenuTrigger>
             )}
-            {/* 五项固定顺序：决策事项、项目管理、领域知识、能力拓展、会话纪要；
+            {/* 六项固定顺序：决策事项、项目管理、领域知识、能力拓展、会话纪要、提交工单；
                 决策事项保留 canUseAutoLoop 门控与 ?decisions=1 深链；项目管理/领域知识走
                 openKaneo()/openWeknora() 一键免登录新标签（入口配置未就绪时退化为就地重试，
-                拉取期间菜单项禁用防重复请求） */}
+                拉取期间菜单项禁用防重复请求）；提交工单复用会话右键「反馈问题」的
+                ticketOpen 状态与全站工单弹窗 */}
             <ContextMenuContent data-ctx-menu="super-assistant-chat" className="w-52">
               {canUseAutoLoop && (
                 <ContextMenuItem data-ctx-item="decisions" onSelect={() => openDecisionItems()}>
@@ -1971,6 +1973,9 @@ export default function SuperAssistantPage() {
               </ContextMenuItem>
               <ContextMenuItem data-ctx-item="summary" onSelect={() => setSummaryOpen(true)}>
                 <ScrollText size={14} className="shrink-0" /> 会话纪要
+              </ContextMenuItem>
+              <ContextMenuItem data-ctx-item="ticket" onSelect={() => setTicketOpen(true)}>
+                <Megaphone size={14} className="shrink-0" /> 提交工单
               </ContextMenuItem>
             </ContextMenuContent>
             </ContextMenu>

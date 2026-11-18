@@ -3343,18 +3343,18 @@ test('重命名会话：点击其它处自动取消，Enter 仍可保存', async
   expect(JSON.parse(mocks.patchBodies[0])).toMatchObject({ title: '新名称' })
 })
 
-test('聊天区域右键菜单：空白处弹出五项入口，气泡与输入框放行原生菜单', async ({ page }) => {
+test('聊天区域右键菜单：空白处弹出六项入口，气泡与输入框放行原生菜单', async ({ page }) => {
   await seedAuth(page)
   await mockApis(page)
-  // 有消息会话：消息滚动区空白处右键弹菜单，五项齐备且顺序固定
+  // 有消息会话：消息滚动区空白处右键弹菜单，六项齐备且顺序固定（提交工单紧随会话纪要）
   await page.goto('/#/super-assistant?conversation=c-earlier')
   await expect(page.getByText('上周的答复')).toBeVisible()
   const menu = await openChatActionsMenu(page)
   const itemKeys = await menu.locator('[data-ctx-item]').evaluateAll(
     els => els.map(el => (el as HTMLElement).dataset.ctxItem),
   )
-  expect(itemKeys).toEqual(['decisions', 'kaneo', 'weknora', 'integrations', 'summary'])
-  for (const label of ['决策事项', '项目管理', '领域知识', '能力拓展', '会话纪要']) {
+  expect(itemKeys).toEqual(['decisions', 'kaneo', 'weknora', 'integrations', 'summary', 'ticket'])
+  for (const label of ['决策事项', '项目管理', '领域知识', '能力拓展', '会话纪要', '提交工单']) {
     await expect(menu.getByText(label, { exact: true })).toBeVisible()
   }
   await page.keyboard.press('Escape')
@@ -3366,12 +3366,12 @@ test('聊天区域右键菜单：空白处弹出五项入口，气泡与输入�
   await page.locator('#super-assistant-msg-m-e2').click({ button: 'right' })
   await expect(page.locator('[data-ctx-menu="super-assistant-chat"]')).toHaveCount(0)
 
-  // 空会话态（新会话，未落地视图）空白处同样弹出五项
+  // 空会话态（新会话，未落地视图）空白处同样弹出六项
   await page.getByRole('button', { name: '新建会话' }).click()
   await expect(page).not.toHaveURL(/conversation=/)
   await expect(page.getByTestId('super-assistant-composer')).toBeVisible()
   const emptyMenu = await openChatActionsMenu(page)
-  await expect(emptyMenu.locator('[data-ctx-item]')).toHaveCount(5)
+  await expect(emptyMenu.locator('[data-ctx-item]')).toHaveCount(6)
   await page.keyboard.press('Escape')
 
   // 输入框（空会话态下位于聊天区菜单宿主内）右键保留浏览器原生菜单
@@ -3462,7 +3462,7 @@ test('知识库（WeKnora）：免登录票据领取失败时如实报错，空�
   await expect(menuAgain.locator('[data-ctx-item="weknora"]')).toBeVisible()
 })
 
-test('聊天区域右键菜单：五项点击行为与原头部入口一致', async ({ page }) => {
+test('聊天区域右键菜单：各入口点击行为正确（含提交工单弹全站工单弹窗）', async ({ page }) => {
   await seedAuth(page)
   const mocks = await mockApis(page)
   // Kaneo/WeKnora 原生页面在测试网络外：本地兜底响应只验证新标签跳转与 opener 隔离
@@ -3513,6 +3513,15 @@ test('聊天区域右键菜单：五项点击行为与原头部入口一致', as
   await page.keyboard.press('Escape')
   await expect(summaryDialog).toHaveCount(0)
 
+  // 提交工单：打开全站工单提交弹窗（与侧栏会话右键「反馈问题」同一弹窗，提交链路由 tickets.spec 覆盖）
+  menu = await openChatActionsMenu(page)
+  await menu.locator('[data-ctx-item="ticket"]').click()
+  const ticketDialog = page.getByRole('dialog').filter({ hasText: '反馈内容' })
+  await expect(ticketDialog).toBeVisible()
+  await expect(page.locator('[data-ctx-menu="super-assistant-chat"]')).toHaveCount(0)
+  await ticketDialog.getByRole('button', { name: /关闭|取消/ }).first().click()
+  await expect(ticketDialog).toHaveCount(0)
+
   // 项目管理（Kaneo）：领一次性票据后新标签进入 Kaneo origin 的免登录入口
   // （登录由网关中继完成），window.opener 已被隔离
   menu = await openChatActionsMenu(page)
@@ -3552,9 +3561,9 @@ test('窄屏：溢出菜单移除五大入口仅留实时浏览器/助手配置�
   await expect(menu.getByRole('button').nth(1)).toHaveText(/助手配置/)
   await page.keyboard.press('Escape')
 
-  // 聊天区域右键菜单在窄屏同样弹出且五项齐备
+  // 聊天区域右键菜单在窄屏同样弹出且六项齐备
   const chatMenu = await openChatActionsMenu(page)
-  await expect(chatMenu.locator('[data-ctx-item]')).toHaveCount(5)
+  await expect(chatMenu.locator('[data-ctx-item]')).toHaveCount(6)
 })
 
 test('项目管理（Kaneo）：加载失败与非法协议不领票不跳转，恢复后免登录新标签可达', async ({ page }) => {
@@ -4197,9 +4206,9 @@ test.describe('窄屏顶栏与会话操作（390px）', () => {
     }))
     await page.goto('/#/super-assistant')
 
-    // 五大入口已迁入聊天区域右键菜单：窄屏同样弹出且五项齐备
+    // 五大入口已迁入聊天区域右键菜单：窄屏同样弹出且六项齐备（含提交工单）
     const menu = await openChatActionsMenu(page)
-    await expect(menu.locator('[data-ctx-item]')).toHaveCount(5)
+    await expect(menu.locator('[data-ctx-item]')).toHaveCount(6)
     // 领域知识项：领一次性票据新标签进入 WeKnora origin 的免登录入口
     const popupPromise = page.waitForEvent('popup')
     await menu.locator('[data-ctx-item="weknora"]').click()
