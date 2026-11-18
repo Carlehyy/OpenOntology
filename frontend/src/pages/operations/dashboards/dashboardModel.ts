@@ -28,8 +28,10 @@ export const DEFAULT_DASHBOARD_ICON: DashboardIconKey = 'activity'
  * 卡片与占位（加载/错误/空态）统一的最小高度类：
  * grid 默认 stretch 会把同行条目拉到行内最高者，占位与卡片共用同一
  * 最小高度，空↔有卡片切换时网格行高才不会跳变。
+ * 176px：头部(40) + 描述两行(40+12) + footer(40) + 内边距后留 ~14px 呼吸位，
+ * 收窄描述与操作行之间的空洞（UX 评审 F-15），仍保留防跳变的余量。
  */
-export const DASHBOARD_TILE_MIN_H = 'min-h-[190px]'
+export const DASHBOARD_TILE_MIN_H = 'min-h-[176px]'
 
 /**
  * 编排入口承载的安全提示（自页面顶部 header 第二段迁移，信息不消失）：
@@ -53,6 +55,33 @@ export interface DashboardFormErrors {
   name?: string
   description?: string
   icon?: string
+}
+
+/**
+ * 客户端校验失败后焦点归还的目标字段（按表单视觉顺序）。
+ * 校验错误只渲染在字段下方（不再重复底部横幅），提交失败时
+ * 把焦点移到第一个出错字段，键盘用户不用自己找（UX 评审 F-02）。
+ */
+export function firstDashboardFormErrorTarget(
+  errors: DashboardFormErrors,
+): 'name' | 'description' | 'icon' | null {
+  if (errors.name) return 'name'
+  if (errors.description) return 'description'
+  if (errors.icon) return 'icon'
+  return null
+}
+
+/** Grafana 支持的看板主题参数值；与平台 themeStore 的浅/深两档一致。 */
+export type GrafanaTheme = 'light' | 'dark'
+
+/**
+ * 为后端给出的 Grafana 受控相对路径追加 `theme` 展示参数（UX 评审 F-09）：
+ * Grafana 默认 dark，不跟随平台浅色主题时预览/编排页会与平台明暗割裂。
+ * 仅在出口追加这一个展示参数，不改动路径其余部分。
+ */
+export function grafanaPathWithTheme(path: string, theme: GrafanaTheme): string {
+  const joiner = path.includes('?') ? '&' : '?'
+  return `${path}${joiner}theme=${theme}`
 }
 
 export function isDashboardIconKey(value: string): value is DashboardIconKey {

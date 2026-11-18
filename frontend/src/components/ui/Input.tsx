@@ -29,7 +29,7 @@ const Input = React.forwardRef<HTMLInputElement, InputProps>(
             "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
             "disabled:cursor-not-allowed disabled:opacity-50 disabled:bg-[var(--color-bg-hover)]",
             error
-              ? "border-[var(--color-danger)] focus-visible:border-[var(--color-danger)]"
+              ? "border-[var(--color-danger)] focus-visible:border-[var(--color-danger)] focus-visible:ring-[var(--color-danger)]"
               : "border-[var(--color-border)]",
             className
           )}

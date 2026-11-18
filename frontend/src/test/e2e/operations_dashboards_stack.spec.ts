@@ -182,7 +182,11 @@ test('监控看板真实栈：建卡→编排原生编辑页→kiosk 预览→�
     const previewDialog = page.getByRole('dialog')
     const iframe = page.getByTestId('dashboard-preview-iframe')
     await expect(iframe).toBeVisible({ timeout: 30_000 })
-    await expect(iframe).toHaveAttribute('src', card!.preview_path)
+    // src = 后端受控路径 + 平台主题参数（F-09：Grafana 跟随平台明暗）
+    await expect(iframe).toHaveAttribute(
+      'src',
+      new RegExp(`^${card!.preview_path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[&?]theme=(?:light|dark)$`),
+    )
     // iframe 无 sandbox（同源可信内容）
     expect(await iframe.getAttribute('sandbox')).toBeNull()
     await page.waitForFunction(() => {
@@ -214,7 +218,7 @@ test('监控看板真实栈：建卡→编排原生编辑页→kiosk 预览→�
 
     // 6) 平台改名只改卡片：Grafana 内标题保持初始卡片名（同源 API 核对）
     const renamed = `${name}（平台改名）`
-    await cardLocator.getByRole('button', { name: `信息 ${name}` }).click()
+    await cardLocator.getByRole('button', { name: `编辑 ${name}` }).click()
     const editDialog = page.getByRole('dialog')
     await editDialog.getByLabel('看板名称').fill(renamed)
     await editDialog.getByTestId('dashboard-form-submit').click()

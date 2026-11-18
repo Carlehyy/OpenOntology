@@ -8,21 +8,26 @@
  * 关键交互：
  * - 进入页面签发一次看板会话，停留期间每 30 分钟续签（hook 卸载即清理）；
  * - 编排：用户点击事件中**同步**预开空白标签页，续签成功后跳到后端给出的
- *   `edit_path`；续签失败关闭空白页并明确报错；弹窗被拦截时清楚提示可重试；
+ *   `edit_path`（出口追加 `theme` 参数跟随平台明暗，见 grafanaPathWithTheme）；
+ *   续签失败关闭空白页并明确报错；弹窗被拦截时清楚提示可重试；
  * - 预览：弹窗内先续签再挂载同源 kiosk iframe；关闭即卸载（连带 WS/计时器）；
  * - 排序：仅在无筛选且 canWrite 时可拖拽，落位后提交全量 id，失败回滚；
  * - 三态：missing 显示「已失效」并禁用编排/预览；unknown 不渲染为已失效；
- *   Grafana 整体不可用时显示告警条，但仍可查看/修改本地卡片信息。
+ *   Grafana 整体不可用时显示告警条，但仍可查看/修改本地卡片信息；
+ * - 筛选空态独占网格（占位卡隐藏）并提供「清除筛选」，清除后焦点归还
+ *   搜索框（UX 评审 F-05/F-19）；网格列宽 minmax 自适应，不再压缩到
+ *   240px 临界宽度（UX 评审 F-18）。
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { Plus, Search, X } from 'lucide-react'
+import { LayoutDashboard, Plus, Search, SearchX, X } from 'lucide-react'
 import { Alert } from '@/components/ui/Alert'
 import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { LoadingState } from '@/components/ui/LoadingState'
 import { useAuthStore } from '@/stores/authStore'
+import { useThemeStore } from '@/stores/themeStore'
 import operationsDashboardsApi, {
   operationsApiErrorText,
   type OperationsDashboardCard,
@@ -39,6 +44,7 @@ import {
   DASHBOARD_TILE_MIN_H,
   dashboardActionBlockReason,
   filterDashboards,
+  grafanaPathWithTheme,
   reorderDashboardIds,
   type DropPlace,
 } from './dashboards/dashboardModel'
@@ -47,13 +53,13 @@ const DASHBOARDS_QUERY_KEY = ['operations-dashboards'] as const
 
 function CreateDashboardCard({ onCreate }: { onCreate: () => void }) {
   return (
-    <article className={`group flex ${DASHBOARD_TILE_MIN_H} flex-col items-center justify-center rounded-2xl border border-dashed border-brand-line bg-brand-soft p-6 text-center transition-all hover:border-brand hover:shadow-[var(--shadow-md)]`}>
+    <article className={`group flex ${DASHBOARD_TILE_MIN_H} flex-col items-center justify-center rounded-2xl border border-dashed border-brand-line bg-brand-soft p-6 text-center transition-all hover:border-brand hover:shadow-[var(--shadow-md)] dark:bg-[color-mix(in_srgb,var(--color-accent-soft)_45%,transparent)]`}>
       <div className="flex h-12 w-12 items-center justify-center rounded-full bg-brand text-[var(--color-text-inverse)] shadow-sm transition-transform group-hover:scale-105">
         <Plus size={22} />
       </div>
       <h2 className="mt-3 text-base font-semibold text-foreground">新建看板</h2>
       <p className="mt-1 max-w-[210px] text-xs leading-5 text-muted-foreground">
-        先在平台建卡片，再通过「编排」配置数据源与面板
+        先创建看板卡片，再进入「编排」配置数据源与面板
       </p>
       <button
         type="button"
@@ -70,6 +76,7 @@ export default function MonitoringDashboardPage() {
   const queryClient = useQueryClient()
   const role = useAuthStore(state => state.user?.role)
   const canWrite = canWriteDashboards(role)
+  const theme = useThemeStore(state => state.theme)
   const { ensureSession } = useGrafanaSession()
 
   const [keyword, setKeyword] = useState('')
@@ -79,6 +86,10 @@ export default function MonitoringDashboardPage() {
   const [previewId, setPreviewId] = useState<string | null>(null)
   const [draggingId, setDraggingId] = useState<string | null>(null)
   const [dropTarget, setDropTarget] = useState<{ id: string; before: boolean } | null>(null)
+
+  const searchInputRef = useRef<HTMLInputElement>(null)
+  /** 清除筛选后焦点归还搜索框：清除按钮随条件渲染卸载，焦点否则会落到 body（F-19）。 */
+  const focusSearchInput = () => requestAnimationFrame(() => searchInputRef.current?.focus())
 
   const { data, isLoading, isError, refetch } = useQuery({
     queryKey: DASHBOARDS_QUERY_KEY,
@@ -102,12 +113,49 @@ export default function MonitoringDashboardPage() {
 
   const refreshList = () => queryClient.invalidateQueries({ queryKey: DASHBOARDS_QUERY_KEY })
 
+  /**
+   * 编排：必须在点击事件中同步预开空白标签页（避免 await 后被弹窗拦截），
+   * 续签成功后才把空白页导航到后端给出的 edit_path（追加 theme 跟随平台
+   * 明暗）；失败关闭空白页。
+   */
+  const handleOrchestrate = async (dashboard: OperationsDashboardCard) => {
+    const blocked = dashboardActionBlockReason(dashboard, grafanaAvailable)
+    if (blocked) {
+      toast.warning('暂时无法编排', { description: blocked })
+      return
+    }
+    const tab = window.open('', '_blank')
+    if (!tab) {
+      toast.error('浏览器拦截了新标签页', {
+        description: '请允许本站打开弹窗后重新点击「编排」。',
+      })
+      return
+    }
+    try {
+      await ensureSession()
+      tab.location.href = grafanaPathWithTheme(dashboard.edit_path, theme)
+    } catch (error) {
+      try {
+        tab.close()
+      } catch {
+        // 空白页可能已被浏览器回收，关闭失败不影响错误反馈。
+      }
+      toast.error('打开编排失败', {
+        description: operationsApiErrorText(error, '看板会话签发失败，请稍后重试。'),
+      })
+    }
+  }
+
   const createMutation = useMutation({
     mutationFn: (payload: OperationsDashboardCreatePayload) => operationsDashboardsApi.create(payload),
-    onSuccess: () => {
+    onSuccess: created => {
       void refreshList()
       setCreateOpen(false)
-      toast.success('看板已创建', { description: '点击「编排」在 Grafana 中配置面板与数据源。' })
+      // 引导直达编排入口（F-22）：toast action 本身就是用户手势，可直接开新页。
+      toast.success('看板已创建', {
+        description: '在 Grafana 中配置面板与数据源。',
+        action: { label: '去编排', onClick: () => void handleOrchestrate(created) },
+      })
     },
   })
 
@@ -126,7 +174,7 @@ export default function MonitoringDashboardPage() {
     onSuccess: () => {
       void refreshList()
       setDeleteTarget(null)
-      toast.success('看板已删除', { description: '远端看板已一并移除' })
+      toast.success('看板已删除', { description: 'Grafana 中的看板已一并删除' })
     },
     onError: error => {
       // 失败保留卡片与确认弹窗，用户可重试或取消。
@@ -197,45 +245,9 @@ export default function MonitoringDashboardPage() {
     reorderMutation.mutate(nextIds)
   }
 
-  /**
-   * 编排：必须在点击事件中同步预开空白标签页（避免 await 后被弹窗拦截），
-   * 续签成功后才把空白页导航到后端给出的 edit_path；失败关闭空白页。
-   */
-  const handleOrchestrate = async (dashboard: OperationsDashboardCard) => {
-    const blocked = dashboardActionBlockReason(dashboard, grafanaAvailable)
-    if (blocked) {
-      toast.warning('暂时无法编排', { description: blocked })
-      return
-    }
-    const tab = window.open('', '_blank')
-    if (!tab) {
-      toast.error('浏览器拦截了新标签页', {
-        description: '请允许本站打开弹窗后重新点击「编排」。',
-      })
-      return
-    }
-    try {
-      await ensureSession()
-      tab.location.href = dashboard.edit_path
-    } catch (error) {
-      try {
-        tab.close()
-      } catch {
-        // 空白页可能已被浏览器回收，关闭失败不影响错误反馈。
-      }
-      toast.error('打开编排失败', {
-        description: operationsApiErrorText(error, '看板会话签发失败，请稍后重试。'),
-      })
-    }
-  }
-
   const openPreview = (dashboard: OperationsDashboardCard) => {
     setPreviewId(dashboard.id)
   }
-
-  const stateSpan = canWrite
-    ? 'sm:col-span-1 lg:col-span-2 xl:col-span-3'
-    : 'sm:col-span-2 lg:col-span-3 xl:col-span-4'
 
   return (
     <div className="min-h-full" data-testid="operations-dashboard-workbench">
@@ -246,6 +258,7 @@ export default function MonitoringDashboardPage() {
         <div className="relative w-full sm:w-72">
           <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--color-text-tertiary)]" />
           <input
+            ref={searchInputRef}
             value={keyword}
             onChange={event => setKeyword(event.target.value)}
             placeholder="搜索看板名称或描述"
@@ -255,7 +268,7 @@ export default function MonitoringDashboardPage() {
           {keyword && (
             <button
               type="button"
-              onClick={() => setKeyword('')}
+              onClick={() => { setKeyword(''); focusSearchInput() }}
               className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--color-text-tertiary)] hover:text-muted-foreground"
               aria-label="清除筛选"
             >
@@ -263,16 +276,16 @@ export default function MonitoringDashboardPage() {
             </button>
           )}
         </div>
-        {filterActive && canWrite && (
-          <span className="hidden text-[11px] text-[var(--color-text-tertiary)] sm:inline">
+        {filterActive && canWrite && filtered.length > 0 && (
+          <span className="hidden text-xs text-[var(--color-text-tertiary)] sm:inline">
             筛选状态下不可拖拽排序
           </span>
         )}
-        <span className="ml-auto hidden text-xs tabular-nums text-[var(--color-text-tertiary)] sm:inline" aria-live="polite">
+        <span className="ml-auto hidden text-xs tabular-nums text-[var(--color-text-secondary)] sm:inline" aria-live="polite">
           {filterActive ? `共 ${filtered.length} / ${items.length} 个看板` : `共 ${items.length} 个看板`}
         </span>
         {canWrite && (
-          <Button size="sm" onClick={() => setCreateOpen(true)} data-testid="dashboard-create">
+          <Button onClick={() => setCreateOpen(true)} data-testid="dashboard-create">
             <Plus size={14} /> 新建看板
           </Button>
         )}
@@ -303,16 +316,20 @@ export default function MonitoringDashboardPage() {
         </Alert>
       )}
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4" data-testid="dashboard-grid">
-        {canWrite && <CreateDashboardCard onCreate={() => setCreateOpen(true)} />}
+      <div
+        className="grid grid-cols-[repeat(auto-fill,minmax(min(280px,100%),1fr))] gap-4"
+        data-testid="dashboard-grid"
+      >
+        {/* 筛选态隐藏占位卡：空态独占网格，避免"无结果"与"新建引导"两条行动路径抢注意力（F-05）。 */}
+        {canWrite && !filterActive && <CreateDashboardCard onCreate={() => setCreateOpen(true)} />}
 
         {isLoading ? (
-          <div className={`flex ${DASHBOARD_TILE_MIN_H} items-center justify-center rounded-2xl border border-border bg-card ${stateSpan}`}>
+          <div className={`col-span-full flex ${DASHBOARD_TILE_MIN_H} items-center justify-center rounded-2xl border border-border bg-card`}>
             <LoadingState message="加载看板列表..." />
           </div>
         ) : isError && !data ? (
           <div
-            className={`flex ${DASHBOARD_TILE_MIN_H} flex-col items-center justify-center gap-3 rounded-2xl border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-[var(--color-danger-bg)] px-6 text-center ${stateSpan}`}
+            className={`col-span-full flex ${DASHBOARD_TILE_MIN_H} flex-col items-center justify-center gap-3 rounded-2xl border border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-[var(--color-danger-bg)] px-6 text-center`}
             role="alert"
           >
             <p className="text-sm text-[var(--color-danger)]">看板列表加载失败，请检查网络连接后重试。</p>
@@ -321,9 +338,12 @@ export default function MonitoringDashboardPage() {
         ) : filtered.length === 0 ? (
           <div
             data-testid="dashboard-list-empty"
-            className={`flex ${DASHBOARD_TILE_MIN_H} flex-col items-center justify-center rounded-2xl border border-dashed border-border bg-card px-6 text-center ${stateSpan}`}
+            className={`col-span-full flex ${DASHBOARD_TILE_MIN_H} flex-col items-center justify-center rounded-2xl border border-dashed border-border bg-card px-6 text-center`}
           >
-            <p className="text-sm font-medium text-muted-foreground">
+            <span className="flex h-10 w-10 items-center justify-center rounded-full bg-muted text-muted-foreground">
+              {filterActive ? <SearchX size={18} /> : <LayoutDashboard size={18} />}
+            </span>
+            <p className="mt-3 text-sm font-medium text-muted-foreground">
               {filterActive ? '没有符合条件的看板' : '还没有监控看板'}
             </p>
             <p className="mt-1 text-xs text-[var(--color-text-tertiary)]">
@@ -331,11 +351,15 @@ export default function MonitoringDashboardPage() {
                 ? '请调整筛选条件'
                 : '创建第一个看板卡片，再通过「编排」配置运行态势面板'}
             </p>
-            {!filterActive && canWrite && (
+            {filterActive ? (
+              <Button size="sm" variant="outline" className="mt-3" onClick={() => { setKeyword(''); focusSearchInput() }}>
+                清除筛选
+              </Button>
+            ) : canWrite ? (
               <Button size="sm" className="mt-3" onClick={() => setCreateOpen(true)}>
                 <Plus size={13} /> 新建看板
               </Button>
-            )}
+            ) : null}
           </div>
         ) : (
           filtered.map(dashboard => (
