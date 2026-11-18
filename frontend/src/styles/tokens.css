@@ -149,7 +149,9 @@
 
   /* ── 阴影 ── */
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.06);
+  /* md 从 0.06 提到 0.09：卡片 hover 反馈依赖该档阴影，旧值近乎不可感知
+     （UX 评审 F-06）；lg 档维持不变。 */
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.09);
   --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.08);
 
   /* ── 间距 (4px栅格) ── */
@@ -218,8 +220,10 @@
   --accent-foreground: #e6e9ef;
   --destructive: #e5534b;
   --destructive-foreground: #ffffff;
-  --border: #2a3342;
-  --input: #2a3342;
+  /* 边框提亮一档（UX 评审 F-14）：旧值 #2a3342 对卡底 #161c26 对比过弱，
+     深色层级"靠边框/表面色阶"的前提是边框要可见；hover 档 #3a4556 仍高出一档。 */
+  --border: #333d4e;
+  --input: #333d4e;
   --ring: #3ecf8e;
 
   /* ── 主色（项目扩展）：深色档用亮祖母绿 + 深字保证对比 ── */
@@ -238,7 +242,10 @@
      #065f46=emerald-800：对弹窗底 2.2:1、对 hover 轨 1.8:1，brand-ink 文字其上 5.0:1 全档达标 */
   --color-accent-soft: #065f46;
   --color-accent-mist: #064e3b;
-  --color-accent-line: #065f46;
+  /* line 与 soft 分档（UX 评审 F-04）：旧值同为 #065f46 时虚线/悬停边框被底色
+     吞掉（占位卡实心化、hover 无反馈）。#2f8f6b 对 soft 3:1、对 --border 可辨，
+     不影响 soft 上的文字对比；soft 本身维持 2026-10-16 校准不变。 */
+  --color-accent-line: #2f8f6b;
   --color-accent-ink: #6ee7b7;
   --color-context-usage-bg: rgba(2, 44, 34, 0.8);
 
