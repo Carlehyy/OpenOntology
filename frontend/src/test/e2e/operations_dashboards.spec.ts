@@ -346,13 +346,13 @@ test('看板工作台：菜单/深链/刷新可达，筛选计数与空态正确
   )
   expect(firstSectionLabel).toBe('看板筛选')
 
-  // 安全提示迁移：原 header 第二段的共享管理员身份披露落到编排入口的
-  // 策展 Tooltip（F-03：原生 title 悬停延迟约 1s、触屏不可见、不可样式化）
+  // 安全提示落点（产品反馈二轮）：编排入口不再做悬停提示（hover 气泡在
+  // 卡片网格中被相邻卡片遮挡且打断操作流）；可用态无 title，披露文案
+  // 常显在编辑弹窗底部（下方表单用例覆盖）。
   const orchestrateEntry = page
     .locator('[data-dashboard-id="dash-core"]')
     .getByTestId('dashboard-orchestrate-entry')
-  await orchestrateEntry.hover()
-  await expect(page.getByText(/Grafana 使用共享管理员身份/)).toBeVisible()
+  await expect(orchestrateEntry).not.toHaveAttribute('title')
 
   // 页面不回显任何敏感凭证
   const bodyText = await page.locator('body').innerText()
@@ -455,6 +455,8 @@ test('看板工作台：新建校验/提交载荷/失败保留输入，编辑只
   await page.getByTestId('dashboard-create').click()
   const dialog = page.getByRole('dialog')
   await expect(dialog.getByText('创建后会在 Grafana 中生成一个空白看板', { exact: false })).toBeVisible()
+  // 共享管理员身份披露常显在表单底部（编排入口不再做悬停提示）
+  await expect(dialog.getByText(/Grafana 使用共享管理员身份/)).toBeVisible()
 
   // 空名称：错误只出现在字段下方且焦点归还该字段，不再重复渲染底部横幅（F-02）
   await dialog.getByTestId('dashboard-form-submit').click()
@@ -734,13 +736,22 @@ test('看板工作台：预览先续签再挂同源 kiosk iframe，全屏依据 
   await expect.poll(() => records.sessionCalls).toBeGreaterThan(callsBefore)
   await expect(page.frameLocator('[data-testid="dashboard-preview-iframe"]').getByTestId('grafana-mock')).toBeVisible()
 
+  // 预览弹窗头部「编排」：与卡片编排同一链路，跳到 edit_path（含 theme）
+  const previewOrchestratePopup = page.context().waitForEvent('page')
+  await dialog.getByTestId('dashboard-preview-orchestrate').click()
+  const orchestratePopup = await previewOrchestratePopup
+  await expect.poll(() => orchestratePopup.url()).toContain('/grafana/d/oo-dashpreview?orgId=1')
+  expect(orchestratePopup.url()).toContain('theme=light')
+  // 编排只开新页，预览弹窗保持打开
+  await expect(page.getByTestId('dashboard-preview-iframe')).toBeVisible()
+
   // 弹窗焦点与控件层级：焦点在弹窗内，全屏按钮为最顶层命中
   const focusInDialog = await dialog.evaluate(node => node.contains(document.activeElement))
   expect(focusInDialog).toBe(true)
   await expectTopmost(dialog.getByTestId('dashboard-preview-fullscreen'))
 
   // 全屏成功以 document.fullscreenElement 为最终依据
-  await dialog.getByRole('button', { name: '全屏' }).click()
+  await dialog.getByRole('button', { name: '全屏', exact: true }).click()
   await expect.poll(() => page.evaluate(() => {
     const element = document.fullscreenElement as HTMLElement | null
     return element?.dataset.testid ?? null
@@ -760,10 +771,10 @@ test('看板工作台：预览先续签再挂同源 kiosk iframe，全屏依据 
   await page.keyboard.press('Escape')
   await expect.poll(() => page.evaluate(() => document.fullscreenElement === null)).toBe(true)
   await expect(dialog).toBeVisible()
-  await expect(dialog.getByRole('button', { name: '全屏' })).toBeVisible()
+  await expect(dialog.getByRole('button', { name: '全屏', exact: true })).toBeVisible()
 
   // 按钮退出同样落到最终态 null
-  await dialog.getByRole('button', { name: '全屏' }).click()
+  await dialog.getByRole('button', { name: '全屏', exact: true }).click()
   await expect.poll(() => page.evaluate(() => document.fullscreenElement !== null)).toBe(true)
   await dialog.getByRole('button', { name: '退出全屏' }).click()
   await expect.poll(() => page.evaluate(() => document.fullscreenElement === null)).toBe(true)
@@ -894,7 +905,7 @@ test('看板工作台：浏览器不支持 Fullscreen API 时 CSS 铺满回退�
   const dialog = page.getByRole('dialog')
   await expect(page.getByTestId('dashboard-preview-iframe')).toBeVisible()
 
-  await dialog.getByRole('button', { name: '全屏' }).click()
+  await dialog.getByRole('button', { name: '全屏', exact: true }).click()
   // 回退模式不产生原生全屏，但容器铺满视口（CSS 最终结果可验证；滚动条等
   // 边缘不小于 innerWidth 的 96% 即视为铺满）
   expect(await page.evaluate(() => document.fullscreenElement)).toBeNull()
@@ -927,10 +938,10 @@ test('看板工作台：Fullscreen API 拒绝时不假称已全屏', async ({ pa
   const dialog = page.getByRole('dialog')
   await expect(page.getByTestId('dashboard-preview-iframe')).toBeVisible()
 
-  await dialog.getByRole('button', { name: '全屏' }).click()
+  await dialog.getByRole('button', { name: '全屏', exact: true }).click()
   await expect(page.getByText('无法进入全屏')).toBeVisible()
   expect(await page.evaluate(() => document.fullscreenElement)).toBeNull()
-  await expect(dialog.getByRole('button', { name: '全屏' })).toBeVisible()
+  await expect(dialog.getByRole('button', { name: '全屏', exact: true })).toBeVisible()
   await expect(dialog.getByRole('button', { name: '退出全屏' })).toHaveCount(0)
 })
 
@@ -967,6 +978,8 @@ test('看板工作台：viewer 隐藏平台写入口，仍可预览', async ({ p
 
   await page.getByRole('button', { name: '预览 查看者看板' }).click()
   await expect(page.getByTestId('dashboard-preview-iframe')).toBeVisible()
+  // 只读角色在预览弹窗内同样没有编排入口
+  await expect(page.getByTestId('dashboard-preview-orchestrate')).toHaveCount(0)
 })
 
 test('看板工作台：custom 未授权 dashboard 菜单时深链落到无权限页', async ({ page }) => {

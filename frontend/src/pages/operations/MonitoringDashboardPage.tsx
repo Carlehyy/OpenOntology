@@ -425,6 +425,7 @@ export default function MonitoringDashboardPage() {
           key={previewTarget.id}
           dashboard={previewTarget}
           ensureSession={ensureSession}
+          onOrchestrate={canWrite ? () => void handleOrchestrate(previewTarget) : undefined}
           onClose={() => setPreviewId(null)}
         />
       )}

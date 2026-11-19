@@ -850,6 +850,9 @@ services:
       # host 部分的准确性，路径部分是关键契约。
       GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s/grafana/"
       GF_USERS_ALLOW_SIGN_UP: "false"
+      # Grafana 界面默认简体中文（Grafana ≥9.3 内置 zh-Hans，官方标注
+      # Preview：核心导航/常用操作已汉化，部分深层设置仍为英文）。
+      GF_USERS_DEFAULT_LANGUAGE: zh-Hans
       GF_AUTH_ANONYMOUS_ENABLED: "false"
       # 免登录核心：nginx auth_request 校验看板会话 cookie 后注入
       # X-WEBAUTH-USER（共享管理员）；客户端自带同名头会被网关覆盖。

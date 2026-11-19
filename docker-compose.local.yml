@@ -469,6 +469,9 @@ services:
       GF_SERVER_SERVE_FROM_SUB_PATH: "true"
       GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s/grafana/"
       GF_USERS_ALLOW_SIGN_UP: "false"
+      # Grafana 界面默认简体中文（Grafana ≥9.3 内置 zh-Hans，官方标注
+      # Preview：核心导航/常用操作已汉化，部分深层设置仍为英文）。
+      GF_USERS_DEFAULT_LANGUAGE: zh-Hans
       GF_AUTH_ANONYMOUS_ENABLED: "false"
       GF_AUTH_PROXY_ENABLED: "true"
       GF_AUTH_PROXY_HEADER_NAME: X-WEBAUTH-USER

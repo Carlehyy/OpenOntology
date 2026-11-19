@@ -31,6 +31,7 @@ import {
 import {
   DASHBOARD_DESCRIPTION_MAX_LENGTH,
   DASHBOARD_NAME_MAX_LENGTH,
+  DASHBOARD_ORCHESTRATE_SECURITY_HINT,
   DEFAULT_DASHBOARD_ICON,
   dashboardCreatePayload,
   dashboardUpdatePayload,
@@ -262,6 +263,12 @@ export function DashboardFormDialog({
               </div>
             </div>
           )}
+
+          {/* 共享管理员身份披露：编排入口不再做悬停提示（产品反馈：hover 气泡
+              在卡片网格中被遮挡且打断操作流），改为在表单底部常显一行。 */}
+          <p className="text-xs leading-5 text-[var(--color-text-tertiary)]">
+            {DASHBOARD_ORCHESTRATE_SECURITY_HINT}
+          </p>
 
           <DialogFooter>
             <Button type="button" variant="outline" onClick={handleClose} disabled={saving}>取消</Button>

@@ -18,7 +18,7 @@
  *   不保留隐藏常驻预览。
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { AlertCircle, Maximize2, Minimize2, X } from 'lucide-react'
+import { AlertCircle, Maximize2, Minimize2, SlidersHorizontal, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/Button'
 import { LoadingState } from '@/components/ui/LoadingState'
@@ -43,11 +43,14 @@ const PREVIEW_LOAD_TIMEOUT_MS = 15_000
 const FULLSCREEN_VERIFY_MS = 300
 
 /**
- * 头部两个动作按钮（全屏/关闭）同 size、同结构、同圆角/内边距：
- * 全屏用 success 语义浅底；关闭是非破坏性动作，用中性浅底（UX 评审 F-16：
- * danger 色留给删除/错误，避免"红色关闭"传递危险暗示）。类名必须写完整
- * 字面量，Tailwind 无法收集拼接类。
+ * 头部三个动作按钮（编排/全屏/关闭）同 size、同结构、同圆角/内边距：
+ * 编排是去 Grafana 配置的主行动，用品牌浅底；全屏用 success 语义浅底；
+ * 关闭是非破坏性动作，用中性浅底（UX 评审 F-16：danger 色留给删除/错误，
+ * 避免"红色关闭"传递危险暗示）。类名必须写完整字面量，Tailwind 无法
+ * 收集拼接类。
  */
+const ORCHESTRATE_BUTTON_CLASS =
+  'border border-brand-line bg-brand-soft text-brand-ink hover:bg-brand-soft hover:text-brand-ink'
 const FULLSCREEN_BUTTON_CLASS =
   'border border-[color-mix(in_srgb,var(--color-success)_35%,transparent)] bg-[var(--color-success-bg)] text-[var(--color-success)] hover:bg-[var(--color-success-bg)] hover:text-[var(--color-success)]'
 const CLOSE_BUTTON_CLASS =
@@ -58,12 +61,16 @@ interface DashboardPreviewDialogProps {
   onClose: () => void
   /** 每次打开/重试都重新签发，失败必须阻止 iframe 挂载。 */
   ensureSession: () => Promise<void>
+  /** 头部「编排」入口：与卡片编排同一处理（预开标签页 + 续签 + edit_path）。
+   *  仅可写角色传入；缺省时不渲染该按钮（viewer 只读）。 */
+  onOrchestrate?: () => void
 }
 
 export function DashboardPreviewDialog({
   dashboard,
   onClose,
   ensureSession,
+  onOrchestrate,
 }: DashboardPreviewDialogProps) {
   const theme = useThemeStore(state => state.theme)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -205,6 +212,19 @@ export function DashboardPreviewDialog({
             <DialogTitle className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground" title={dashboard.name}>
               {dashboard.name} · 看板预览
             </DialogTitle>
+            {onOrchestrate && (
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className={ORCHESTRATE_BUTTON_CLASS}
+                onClick={onOrchestrate}
+                aria-label={`编排 ${dashboard.name}`}
+                data-testid="dashboard-preview-orchestrate"
+              >
+                <SlidersHorizontal size={14} /> 编排
+              </Button>
+            )}
             <Button
               type="button"
               size="sm"
