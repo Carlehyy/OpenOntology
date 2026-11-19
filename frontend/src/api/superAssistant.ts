@@ -205,6 +205,37 @@ export interface SuperMcpServer {
   last_tested_at: string | null
   created_at: string
   updated_at: string
+  /** 平台代管的 WeKnora MCP 端点回链；非托管行为 null，旧数据/fixture 可能缺省 */
+  weknora_endpoint_id?: string | null
+  /** WeKnora 托管范围快照（知识库/工具等上游端点声明），非托管行为 null */
+  weknora_scope?: Record<string, unknown> | null
+}
+
+/** WeKnora MCP 端点目录项：上游 WeKnora 的 MCP 端点与其在平台的接入状态 */
+export interface WeKnoraEndpoint {
+  id: string
+  name: string
+  enabled: boolean
+  knowledge_base_ids: string[]
+  knowledge_bases: Array<{ id: string; name: string }>
+  tools: string[]
+  /** 平台对原生端点的只读工具及知识库范围校验结果 */
+  readonly: boolean
+  /** 接入后对应的平台 MCP Server id；未接入为 null */
+  server_id: string | null
+  connection_status: 'not_connected' | 'ready' | 'disabled' | 'needs_verification'
+    | 'unavailable' | 'authorization_required'
+  message: string | null
+  /** 上游端点已不存在（目录同步残留），行内需展示原因并阻断接入 */
+  missing?: boolean
+}
+
+/** GET/POST /super-assistant/weknora/mcp-endpoints|mcp-initialize 的目录载荷 */
+export interface WeKnoraDirectory {
+  endpoints: WeKnoraEndpoint[]
+  /** 后端已完成首次成功初始化或创建意图（缺模型等失败不置闩，可重试） */
+  initialized: boolean
+  message: string | null
 }
 
 export type StreamEventName =
@@ -854,6 +885,21 @@ export const superAssistantApi = {
   installPlatformApiHubMcp: () => apiClientV2.post<SuperMcpServer>(
     '/super-assistant/mcp-servers/platform-api-hub',
   ),
+
+  // WeKnora MCP 端点目录：上游端点清单 + 平台接入状态（仅管理员操作面）
+  weknoraMcpEndpoints: () =>
+    apiClientV2.get<WeKnoraDirectory>('/super-assistant/weknora/mcp-endpoints'),
+  /** 初始化（幂等；recreate=true 重建上游端点）。缺模型等失败不置闩，可手动重试 */
+  initializeWeKnoraMcp: (body: { recreate?: boolean } = {}) =>
+    apiClientV2.post<WeKnoraDirectory>('/super-assistant/weknora/mcp-initialize', body),
+  /** 接入端点：已有 token 直填，或 rotate_token 让上游轮换（旧 token 立即失效） */
+  connectWeKnoraMcpEndpoint: (endpointId: string, body: { token?: string; rotate_token?: boolean } = {}) =>
+    apiClientV2.post<SuperMcpServer>(
+      `/super-assistant/weknora/mcp-endpoints/${encodeURIComponent(endpointId)}/connect`, body),
+  /** 校验已接入端点：HTTP 200 不代表成功，以返回的 last_test_status 如实判定 */
+  verifyWeKnoraMcpEndpoint: (endpointId: string) =>
+    apiClientV2.post<SuperMcpServer>(
+      `/super-assistant/weknora/mcp-endpoints/${encodeURIComponent(endpointId)}/verify`),
 
   assistantTools: () => apiClientV2.get<AssistantTool[]>('/super-assistant/tools'),
   updateAssistantTool: (name: string, enabled: boolean) =>

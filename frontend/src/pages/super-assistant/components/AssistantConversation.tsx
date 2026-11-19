@@ -25,7 +25,7 @@ import type { ModelConfig } from '@/types/ontology'
 import { writeTextToClipboard } from '@/utils/clipboard'
 import { formatSessionTime } from '@/utils/datetime'
 import {
-  BUILTIN_TOOL_FRIENDLY_NAMES, groupConsecutiveSteps, normalizeAssistantMarkdown, processSummary,
+  friendlyToolName, groupConsecutiveSteps, normalizeAssistantMarkdown, processSummary,
   splitProcessAndAnswer, toolGroupStatus, toolStatusLabel, toolStepStatusView,
   type ToolStepStatusTone,
 } from './chatTranscript'
@@ -115,8 +115,8 @@ function TurnProcess({ steps, status, hasContent, processText, thinkingRound }: 
                   <summary className="flex cursor-pointer list-none items-center gap-2 py-0.5 text-xs text-[var(--color-text-secondary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                     <StepStatusIcon status={aggregate} />
                     <span className="font-mono font-medium text-[var(--color-text-primary)]">{group.toolName}</span>
-                    {BUILTIN_TOOL_FRIENDLY_NAMES[group.toolName] && (
-                      <span className="min-w-0 truncate text-xs text-[var(--color-text-tertiary)]">{BUILTIN_TOOL_FRIENDLY_NAMES[group.toolName]}</span>
+                    {friendlyToolName(group.toolName) && (
+                      <span className="min-w-0 truncate text-xs text-[var(--color-text-tertiary)]">{friendlyToolName(group.toolName)}</span>
                     )}
                     {group.steps.length > 1 && (
                       <span className="shrink-0 rounded bg-[var(--color-bg-hover)] px-1 font-mono text-[10px] tabular-nums text-[var(--color-text-tertiary)]">×{group.steps.length}</span>

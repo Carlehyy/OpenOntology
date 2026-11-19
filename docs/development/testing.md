@@ -785,4 +785,17 @@ NetworkX/SQL、对象写入失败不切本地目录。关键词搜索应验证 P
 - 文件网关/MinIO：`backend/scripts/steward_file_asset_live_e2e.py`；
 - Sentinel：`scripts/data/run_sentinel_real_data_e2e.py`；
 - Sentinel CEP（事件日志/时间算子/序列缺失/窗口聚合）：`scripts/data/run_sentinel_cep_e2e.py`（须在隔离 staging 运行，直写实例在 production 环境被拒绝）；
+- WeKnora 原生服务与托管 MCP canary：
+  `backend/scripts/weknora_service_e2e.py`（仅在一次性隔离栈内运行，
+  `OPENONTOLOGY_WEKNORA_E2E=1` 显式开启；当前为合成验收：bootstrap 后
+  模型/知识库/MCP 端点零创建、注册关闭、原生 UI 可达、只读端点经平台
+  登记后凭据加密保存、token 轮换后旧 token 立即失效、凭据变更即撤销
+  受约束登记；不包含模型推理与真实文档检索）。托管初始化（缺模型不空壳、
+  已有端点只列目录）、接入/轮换、目录与调用前漂移 fail-closed、断开不删
+  上游等真实验收须在隔离环境按
+  [WeKnora 配置流程](../operations/configuration.md#weknora-共享知识库v090)
+  执行并保存证据，不得以合成 canary 或离线单测替代；托管行服务层边界
+  （插件社区不可见不可触达、通用更新仅启停/执行确认、测试走 WeKnora
+  验证链、删除只本地撤销）见
+  [test_weknora_mcp_boundaries.py](../../backend/tests/super_assistant/test_weknora_mcp_boundaries.py)；
 - MinIO：`backend/tests/object_storage/test_minio_live.py`。

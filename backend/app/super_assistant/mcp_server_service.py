@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 
 from sqlalchemy.exc import IntegrityError
@@ -66,7 +67,10 @@ def get_mcp_server(
         SuperAssistantMcpServer.owner_id == owner_id,
     )
     if not include_builtins:
-        query = query.filter(SuperAssistantMcpServer.builtin_key.is_(None))
+        query = query.filter(
+            SuperAssistantMcpServer.builtin_key.is_(None),
+            SuperAssistantMcpServer.weknora_endpoint_id.is_(None),
+        )
     item = query.first()
     if item is None:
         raise McpServerNotFoundError("MCP Server 不存在")
@@ -83,7 +87,10 @@ def list_mcp_servers(
         SuperAssistantMcpServer.owner_id == owner_id,
     )
     if not include_builtins:
-        query = query.filter(SuperAssistantMcpServer.builtin_key.is_(None))
+        query = query.filter(
+            SuperAssistantMcpServer.builtin_key.is_(None),
+            SuperAssistantMcpServer.weknora_endpoint_id.is_(None),
+        )
     return query.order_by(SuperAssistantMcpServer.updated_at.desc()).all()
 
 
@@ -173,6 +180,19 @@ def update_mcp_server(
                 "自研 MCP 的连接与工具由开发页管理：这里仅允许修改启用、"
                 "执行确认与管理员受约束登记"
             )
+        if item.weknora_endpoint_id:
+            db.refresh(item, with_for_update=True)
+            # 托管凭据、清单与受约束登记仅由 WeKnora 验证链派生。
+            if body.model_fields_set - {"enabled", "require_confirmation"}:
+                raise McpClientError(
+                    "托管 WeKnora MCP 的连接与受约束登记由端点验证派生："
+                    "这里仅允许修改启用与执行确认"
+                )
+            if body.enabled and (not item.constrained or item.last_test_status != "success"):
+                raise McpClientError(
+                    f"启用托管 WeKnora MCP 需先通过连接验证（当前状态："
+                    f"{item.last_test_status or '未验证'}）：请到「助手配置 → MCP」重新验证后再启用"
+                )
 
         connection_changed = any(
             value is not None
@@ -253,8 +273,11 @@ def remove_mcp_server(
         server_id,
         include_builtins=include_builtins,
     )
+    if item.weknora_endpoint_id:
+        db.refresh(item, with_for_update=True)
     # 删除 server 前先撤销其 CapabilityRevision 的在线授权位（保留快照行供审计），
-    # 并级联清理一一对应的自研 MCP 开发项目（版本随之删除）。
+    # 并级联清理一一对应的自研 MCP 开发项目（版本随之删除）。托管 WeKnora 行
+    # 同样只做本地撤销与删除：不发上游 DELETE，保留 integration 初始化历史。
     revoke_capability_revisions(
         db, _manifest_keys(item), revision=int(item.manifest_revision or 1),
     )
@@ -276,12 +299,16 @@ async def test_mcp_server(
     *,
     include_builtins: bool,
 ) -> McpTestOut:
-    item = get_mcp_server(
-        db,
-        owner_id,
-        server_id,
-        include_builtins=include_builtins,
-    )
+    item = get_mcp_server(db, owner_id, server_id, include_builtins=include_builtins)
+    if item.weknora_endpoint_id:
+        # 托管 WeKnora：发现验证/清单冻结/受约束登记与失败安全（constrained
+        # 复位 + error 落库）由 weknora.connections 全权负责，不回递本服务。
+        from app.super_assistant.weknora import connections as weknora_connections
+
+        verified = await asyncio.to_thread(weknora_connections.verify_server, db, owner_id, server_id)
+        ok = verified.last_test_status == "success"
+        return McpTestOut(ok=ok, message=verified.last_test_message or "",
+                          tools=verified.tool_manifest if ok else [])
     item.last_tested_at = datetime.now(timezone.utc)
     try:
         if item.dev_project_id is not None:
@@ -381,10 +408,8 @@ def _install_builtin_mcp(
     item.manifest_revision = revision
     item.manifest_hash = digest
     item.tool_manifest = tools
-    if display_name:
-        item.display_name = display_name
-    if description:
-        item.description = description
+    item.display_name = display_name or item.display_name
+    item.description = description or item.description
     item.last_test_status = "success"
     item.last_test_message = (
         f"平台内置连接成功，发现 {len(item.tool_manifest)} 个工具"

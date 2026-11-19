@@ -1,21 +1,23 @@
-"""WeKnora 前端跳转入口与一键免登录中继。
+"""WeKnora native-Web entry, SSO relay and administrator MCP directory.
 
-WeKnora 的原生 Web 负责模型、知识库与 MCP endpoint 配置；平台只暴露经过
-origin 校验的公开 Web 地址，不读取本地 state、知识库或 MCP 清单。一键
-免登录（共享管理员会话，与 Kaneo 中继同构）：entry 签发一次性票据，
-consume 经 weknora-gateway 反代抵达后服务端登录 WeKnora，把登录响应经
-其原生 ``#oidc_result=`` 管道交给 WeKnora 前端自持久化；管理员凭据只
-存在于部署环境变量（backend 容器），仅用于换取会话，不进日志与接口响应。
+Native Web owns model and endpoint editing. Endpoint discovery and bounded
+initialization use private administrator APIs; credentials stay server side.
 """
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from app.auth.models import User
-from app.deps import get_current_user
+from app.deps import get_current_user, get_db, require_admin
+from sqlalchemy.orm import Session
 from app.shared.config import settings
 from app.super_assistant.web_entry import origin
-from app.super_assistant.weknora import sso
+from app.super_assistant.weknora import connections, directory, sso
+from app.super_assistant.weknora.client import WeKnoraError
+from app.super_assistant.weknora.schemas import (
+    WeKnoraConnectIn, WeKnoraDirectoryOut, WeKnoraInitializeIn,
+)
+from app.super_assistant.schemas import McpServerOut
 
 
 router = APIRouter(tags=["super-assistant"])
@@ -57,6 +59,65 @@ def create_weknora_entry(
         raise HTTPException(status_code=503, detail="领域知识单点登录未配置")
     ticket = sso.issue_ticket(str(current_user.id))
     return WeKnoraEntryOut(redirect_url=f"{web_url}/sso/entry?ticket={ticket}")
+
+
+def _http_error(exc: WeKnoraError) -> HTTPException:
+    return HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)})
+
+
+@router.get("/weknora/mcp-endpoints", response_model=WeKnoraDirectoryOut)
+def list_weknora_mcp_endpoints(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    try:
+        return directory.list_directory(db, current_user.id)
+    except WeKnoraError as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/weknora/mcp-initialize", response_model=WeKnoraDirectoryOut)
+def initialize_weknora_mcp(
+    body: WeKnoraInitializeIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    try:
+        return directory.initialize(db, current_user.id, recreate=body.recreate)
+    except WeKnoraError as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/weknora/mcp-endpoints/{endpoint_id}/connect", response_model=McpServerOut)
+def connect_weknora_mcp_endpoint(
+    endpoint_id: str,
+    body: WeKnoraConnectIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    try:
+        return connections.connect_endpoint(
+            db, current_user.id, endpoint_id,
+            token=body.token.get_secret_value() if body.token is not None else None,
+            rotate_token=body.rotate_token,
+        )
+    except WeKnoraError as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/weknora/mcp-endpoints/{endpoint_id}/verify", response_model=McpServerOut)
+def verify_weknora_mcp_endpoint(
+    endpoint_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    server = connections.get_connection(db, current_user.id, endpoint_id)
+    if server is None:
+        raise HTTPException(status_code=404, detail="WeKnora 连接已不存在，请先接入端点")
+    try:
+        return connections.verify_server(db, current_user.id, server.id)
+    except WeKnoraError as exc:
+        raise _http_error(exc) from exc
 
 
 @sso_router.get("/weknora/sso/consume")

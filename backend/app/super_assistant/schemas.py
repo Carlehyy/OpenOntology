@@ -213,6 +213,8 @@ class McpServerOut(ORMModel):
     display_name: str
     description: str
     builtin_key: str | None
+    weknora_endpoint_id: str | None = None
+    weknora_scope: dict[str, Any] | None = None
     # 自研 MCP 指向的开发项目（前端据此进入开发页；导入行为 None）
     dev_project_id: str | None
     transport: str

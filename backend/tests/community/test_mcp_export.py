@@ -240,3 +240,63 @@ def test_create_mcp_server_display_fields_default_empty(databases):
     )
     assert body.display_name == ""
     assert body.description == ""
+
+
+def _weknora_server(db) -> SuperAssistantMcpServer:
+    server = SuperAssistantMcpServer(
+        owner_id="owner-1",
+        name="platform_weknora_abcd1234",
+        display_name="知识库",
+        description="WeKnora 原生只读知识端点",
+        builtin_key=None,
+        transport="streamable_http",
+        url="https://weknora.example.com/mcp/ep-1",
+        headers_encrypted=None,
+        header_names=[],
+        command=None,
+        args=[],
+        env_encrypted=None,
+        env_names=[],
+        tool_manifest=[
+            {"name": "search_knowledge", "description": "检索知识", "input_schema": {"type": "object"}},
+        ],
+        last_test_status="success",
+        weknora_endpoint_id="ep-1",
+    )
+    db.add(server)
+    db.commit()
+    db.refresh(server)
+    return server
+
+
+def test_export_hides_managed_weknora_rows(databases):
+    managed = _weknora_server(databases)
+    # include_builtins=False 的服务过滤已把托管行挡在社区之外
+    with pytest.raises(
+        mcp_server_service.McpServerNotFoundError,
+        match="MCP Server 不存在",
+    ):
+        mcp_export.export_server_tools(
+            databases, "owner-1", managed.id, ["search_knowledge"],
+        )
+
+
+def test_export_explicitly_rejects_managed_weknora_rows(databases, monkeypatch):
+    managed = _weknora_server(databases)
+    # 纵深防御：即便服务过滤回归（绕过 include_builtins 拿到行），
+    # 导出层仍按 weknora_endpoint_id 绑定列显式拒绝，不信名称。
+    monkeypatch.setattr(
+        mcp_server_service,
+        "get_mcp_server",
+        lambda db, owner_id, server_id, *, include_builtins: managed,
+    )
+    with pytest.raises(
+        mcp_server_service.McpServerValidationError,
+        match="托管 WeKnora MCP 不支持转接口",
+    ):
+        mcp_export.export_server_tools(
+            databases, "owner-1", managed.id, ["search_knowledge"],
+        )
+    with api_hub_db.get_conn() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM interfaces").fetchone()[0]
+    assert count == 0

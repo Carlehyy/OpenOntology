@@ -139,6 +139,13 @@ def export_server_tools(
         server_id,
         include_builtins=False,
     )
+    if getattr(server, "weknora_endpoint_id", None):
+        # 托管 WeKnora 端点与平台内置同边界（识别依据是绑定列，不是名称）：
+        # 凭据由平台保管、只读工具走超级助手确认通道，直连/桥接导出都会
+        # 绕过该边界，必须在创建接口前拒绝。
+        raise mcp_server_service.McpServerValidationError(
+            "托管 WeKnora MCP 不支持转接口：请经超级助手对话调用"
+        )
     if server.transport == "developed":
         # 自研 MCP 的桥接执行分支尚未落地：现在放行只会生成运行时必然
         # 失败的 mcp-bridge:// 接口，必须在创建前拒绝而不是留死接口

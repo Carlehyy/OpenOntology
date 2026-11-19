@@ -71,7 +71,11 @@ def test_published_branches_upgrade_to_single_head(migration_db, start_revision)
     engine, cfg = migration_db
     scripts = ScriptDirectory.from_config(cfg)
     assert scripts.get_heads() == [HEAD]
-    assert set(scripts.get_revision("0151_autoloop_merge").down_revision) == {"0150_operations_dashboards", REVISION}
+    merge_revision = scripts.get_revision("0151_autoloop_merge")
+    assert set(merge_revision.down_revision) == {"0150_operations_dashboards", REVISION}
+    assert merge_revision.revision in {
+        revision.revision for revision in scripts.iterate_revisions(HEAD, PARENT)
+    }
     command.upgrade(cfg, start_revision)
     assert version(engine) == start_revision
     with engine.begin() as connection:

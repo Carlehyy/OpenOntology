@@ -911,6 +911,67 @@ def test_kernel_mcp_tool_uses_owner_scoped_manifest_connector(db, monkeypatch):
     assert artifact.inline_content == "MCP 结果"
 
 
+def test_kernel_mcp_resolve_passes_managed_weknora_fields(db, monkeypatch):
+    run, owner, _ = _runtime_fixture(db, monkeypatch, goal="受管 WeKnora 检索")
+    from app.super_assistant.mcp_client import namespaced_tool_name
+
+    scope = {
+        "origin": "https://weknora.example.test", "endpoint_id": "wk-managed-1",
+        "knowledge_base_ids": ["kb-1"], "tools": ["search_knowledge"],
+    }
+    server = SuperAssistantMcpServer(
+        owner_id=owner.id, name="platform_weknora_aa11bb22",
+        transport="streamable_http",
+        url="https://weknora.example.test/mcp/wk-managed-1",
+        weknora_endpoint_id="wk-managed-1", weknora_scope=dict(scope),
+        constrained=True, last_test_status="success",
+        tool_manifest=[{"name": "search_knowledge", "description": "search"}],
+        enabled=True, manifest_revision=1,
+    )
+    db.add(server)
+    db.commit()
+    target = namespaced_tool_name(server.name, "search_knowledge")
+    connector = runtime._resolve_external_connector(
+        db, run, SimpleNamespace(target_ref=target, capability_revision=1))
+    assert connector is not None
+    assert connector.weknora_endpoint_id == "wk-managed-1"
+    assert dict(connector.weknora_scope) == scope
+    assert connector.owner_id == owner.id
+    assert connector.builtin_key is None
+
+
+def test_kernel_mcp_resolve_denies_unverified_managed_weknora(db, monkeypatch):
+    run, owner, _ = _runtime_fixture(db, monkeypatch, goal="未验证 WeKnora")
+    from app.super_assistant.mcp_client import namespaced_tool_name
+
+    server = SuperAssistantMcpServer(
+        owner_id=owner.id, name="platform_weknora_cc33dd44",
+        transport="streamable_http",
+        url="https://weknora.example.test/mcp/wk-managed-2",
+        weknora_endpoint_id="wk-managed-2",
+        weknora_scope={"endpoint_id": "wk-managed-2", "knowledge_base_ids": ["kb-1"]},
+        constrained=True, last_test_status="success",
+        tool_manifest=[{"name": "search_knowledge", "description": "search"}],
+        enabled=True, manifest_revision=1,
+    )
+    db.add(server)
+    db.commit()
+    target = namespaced_tool_name(server.name, "search_knowledge")
+    call = SimpleNamespace(target_ref=target, capability_revision=1)
+    assert runtime._resolve_external_connector(db, run, call) is not None
+    assert target in {item["name"] for item in runtime._kernel_connector_tool_schemas(db, owner.id)}
+    # constrained 撤销（验证失败复位）→ fail-closed，不得套用存量摘要 fallback
+    server.constrained = False
+    db.commit()
+    assert runtime._resolve_external_connector(db, run, call) is None
+    assert target not in {item["name"] for item in runtime._kernel_connector_tool_schemas(db, owner.id)}
+    # 最近一次验证非 success（未验证/过期失败）同样拒绝
+    server.constrained = True
+    server.last_test_status = "error"
+    db.commit()
+    assert runtime._resolve_external_connector(db, run, call) is None
+
+
 def test_waiting_call_cannot_retarget_after_remote_agent_revision_change(db, monkeypatch):
     from app.super_assistant.remote_agent_service import create_agent_row, update_agent
     from app.super_assistant.schemas import RemoteAgentCreate, RemoteAgentUpdate

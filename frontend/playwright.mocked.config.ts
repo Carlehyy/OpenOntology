@@ -127,6 +127,7 @@ export default defineConfig({
     '**/tickets.spec.ts',
     '**/trial_action_plan_review.spec.ts',
     '**/world_model.spec.ts',
+    '**/weknora_mcp.spec.ts',
   ],
   outputDir: '../.artifacts/playwright/mocked-results',
 })

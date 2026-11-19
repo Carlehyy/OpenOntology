@@ -32,6 +32,8 @@ import { SettingSwitch } from './SettingSwitch'
 import { constrainedRegistrationState, errorText } from './assistantPanelUtils'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { groupAssistantTools } from './toolLogic'
+import WeKnoraMcpSection from './WeKnoraMcpSection'
+import { isWeKnoraManagedServer } from './weknoraMcpLogic'
 
 export { errorText }
 
@@ -618,7 +620,7 @@ const MIN_PANEL_WIDTH = 288
 const maxPanelWidth = () => Math.max(MIN_PANEL_WIDTH, Math.min(600, window.innerWidth - 720))
 const clampPanelWidth = (width: number) => Math.min(Math.max(width, MIN_PANEL_WIDTH), maxPanelWidth())
 
-export default function ConfigurationPanel({ open, onClose, width, onWidthResize, onDraggingChange, skills, servers, tools, models, refreshSkills, refreshServers, refreshTools, conversationId, initialTab, onInitialTabConsumed }: {
+export default function ConfigurationPanel({ open, onClose, width, onWidthResize, onDraggingChange, skills, servers, tools, models, refreshSkills, refreshServers, refreshTools, conversationId, initialTab, onInitialTabConsumed, onOpenWeKnora }: {
   open: boolean
   onClose: () => void
   /** 面板宽度（px）：受控于页面级状态（聊天列据此让位），拖拽/键盘经 onWidthResize 回写 */
@@ -639,6 +641,8 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
   initialTab?: AssistantConfigTab | null
   /** 落位完成后回调：页面据此清空 initialTab，同 tab 重复右键也能再次生效 */
   onInitialTabConsumed?: () => void
+  /** 打开 WeKnora 原生页（复用 SuperAssistantPage.openWeknora 一键免登录） */
+  onOpenWeKnora: () => void
 }) {
   const [tab, setTab] = useState<AssistantConfigTab>('skills')
   const [dragging, setDragging] = useState(false)
@@ -653,7 +657,10 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
   const [removeBusy, setRemoveBusy] = useState(false)
   const uploadRef = useRef<HTMLInputElement>(null)
   const isAdmin = useAuthStore(state => state.user?.role === 'admin')
-  const configurableServers = servers.filter(server => server.builtin_key !== 'minio')
+  // WeKnora 托管行（weknora_endpoint_id 回链）从普通列表排除，改由 MCP tab 顶部的
+  // WeKnora 区块管理，避免同一端点出现两张卡片；minio 内置行沿用既有排除。
+  const configurableServers = servers.filter(server =>
+    server.builtin_key !== 'minio' && !isWeKnoraManagedServer(server))
 
   // 一次性落位：面板打开且带 initialTab 时切过去（右键「助手配置」快捷方式），
   // 消费后立刻通知页面清空——否则面板已打开时同 tab 重复右键（initialTab 值
@@ -831,7 +838,7 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
             </button>
             <button type="button" onClick={() => setTab('mcp')}
               className={`relative z-10 min-h-9 rounded-md text-xs font-medium transition-colors duration-200 ${tab === 'mcp' ? 'text-white' : 'text-slate-500 hover:text-slate-700'}`}>
-              MCP <span className={`ml-1 text-xs tabular-nums ${tab === 'mcp' ? 'text-white' : 'text-slate-400'}`}>{configurableServers.length}</span>
+              MCP <span className={`ml-1 text-xs tabular-nums ${tab === 'mcp' ? 'text-white' : 'text-slate-400'}`}>{servers.filter(server => server.builtin_key !== 'minio').length}</span>
             </button>
             <button type="button" onClick={() => setTab('tools')}
               className={`relative z-10 min-h-9 rounded-md text-xs font-medium transition-colors duration-200 ${tab === 'tools' ? 'text-white' : 'text-slate-500 hover:text-slate-700'}`}>
@@ -908,6 +915,18 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
             </>
           ) : (
             <>
+              {/* WeKnora 托管端点区块：仅管理员、仅面板打开且处于 MCP tab 时挂载
+                  （关闭即卸载，重开重新拉取目录）；托管行已从下方普通列表排除 */}
+              {open && isAdmin && (
+                <WeKnoraMcpSection
+                  servers={servers}
+                  refreshServers={refreshServers}
+                  onOpenWeKnora={onOpenWeKnora}
+                  onUpdateServerSetting={updateServerSetting}
+                  updatingServerSetting={updatingServerSetting}
+                />
+              )}
+              {isAdmin && <h3 className="text-[11px] font-semibold text-[var(--color-text-primary)]">MCP Server</h3>}
               <div className="grid gap-3">
                 {configurableServers.length === 0 && <div className="rounded-xl border border-dashed border-[var(--color-border)] p-10 text-center text-xs text-[var(--color-text-tertiary)]"><PlugZap size={22} className="mx-auto mb-2" />暂无 MCP Server</div>}
                 {configurableServers.map(server => {
@@ -929,7 +948,7 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
                       {!server.enabled && <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[9px] text-slate-500">已停用</span>}
                     </div>
                     {server.last_test_message && <p className="mt-2 line-clamp-2 text-[10px] leading-4 text-[var(--color-text-tertiary)]">{server.last_test_message}</p>}
-                    {isAdmin && !server.builtin_key && (
+                    {isAdmin && !server.builtin_key && !isWeKnoraManagedServer(server) && (
                       <div className="mt-2 flex items-center justify-between gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-2.5 py-1">
                         <SettingSwitch
                           label="受约束"
@@ -954,8 +973,9 @@ export default function ConfigurationPanel({ open, onClose, width, onWidthResize
                       </div>
                       <div className="flex shrink-0 items-center gap-1">
                         <button type="button" onClick={() => void testServer(server)} disabled={testingId === server.id} className="inline-flex min-h-9 items-center gap-1 rounded-md px-2 text-[11px] text-brand-ink transition-colors hover:bg-brand-soft disabled:opacity-50">{testingId === server.id ? <Loader2 size={12} className="animate-spin" /> : <Wrench size={12} />} 测试</button>
-                        {!server.builtin_key && <button type="button" onClick={() => setEditingMcp(server)} aria-label={`编辑 MCP ${server.name}`} className="flex h-9 w-9 items-center justify-center rounded-md text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)]"><Pencil size={12} /></button>}
-                        <button type="button" onClick={() => setRemovingServer(server)} aria-label={`删除 MCP ${server.name}`} className="flex h-9 w-9 items-center justify-center rounded-md text-[var(--color-text-tertiary)] transition-colors hover:bg-red-50 hover:text-red-600"><Trash2 size={12} /></button>
+                        {/* WeKnora 托管行不提供通用编辑/删除：连接与端点配置在 WeKnora 区块及原生页管理 */}
+                        {!server.builtin_key && !isWeKnoraManagedServer(server) && <button type="button" onClick={() => setEditingMcp(server)} aria-label={`编辑 MCP ${server.name}`} className="flex h-9 w-9 items-center justify-center rounded-md text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-hover)]"><Pencil size={12} /></button>}
+                        {!isWeKnoraManagedServer(server) && <button type="button" onClick={() => setRemovingServer(server)} aria-label={`删除 MCP ${server.name}`} className="flex h-9 w-9 items-center justify-center rounded-md text-[var(--color-text-tertiary)] transition-colors hover:bg-red-50 hover:text-red-600"><Trash2 size={12} /></button>}
                       </div>
                     </div>
                   </article>
