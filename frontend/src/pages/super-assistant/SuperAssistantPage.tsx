@@ -2025,6 +2025,7 @@ export default function SuperAssistantPage() {
         conversationId={selectedId}
         initialTab={configPendingTab}
         onInitialTabConsumed={() => setConfigPendingTab(null)}
+        onOpenWeKnora={() => { void openWeknora() }}
       />
       </section>
 

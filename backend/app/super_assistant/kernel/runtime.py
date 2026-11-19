@@ -702,6 +702,20 @@ def _resolve_external_connector(db, run: ExecutionRun, call: ExecutionCall):
                         capability = _capability_snapshot(db, target, int(call.capability_revision))
                         if capability is not None and (not capability.enabled or capability.manifest_hash != digest):
                             return None
+                        weknora_endpoint_id = getattr(server, "weknora_endpoint_id", None)
+                        managed_fields: dict[str, object] = {}
+                        if weknora_endpoint_id:
+                            # 受管 WeKnora 端点在既有 capability 检查之上仍要求
+                            # 验证链当前有效（constrained 由主服务验证置位、
+                            # last_test_status=success），防止未验证行套用存量
+                            # 连接摘要 fallback 直接解析成连接器。
+                            if not server.constrained or server.last_test_status != "success":
+                                return None
+                            managed_fields = {
+                                "weknora_endpoint_id": weknora_endpoint_id,
+                                "weknora_scope": dict(getattr(server, "weknora_scope", None) or {}),
+                                "owner_id": server.owner_id,
+                            }
                         connector = McpToolConnector(
                             server_id=server.id,
                             server_name=server.name,
@@ -714,6 +728,7 @@ def _resolve_external_connector(db, run: ExecutionRun, call: ExecutionCall):
                             env=decrypt_env(server.env_encrypted),
                             revision=int(call.capability_revision), manifest_hash=digest,
                             builtin_key=server.builtin_key,
+                            **managed_fields,
                         )
                         _persist_connector_capability(db, connector, source="mcp")
                         connector_registry.register(connector)
@@ -1256,6 +1271,8 @@ def _kernel_connector_tool_schemas(db, owner_id: str) -> list[dict]:
         from app.super_assistant.mcp_client import namespaced_tool_name
         servers = db.scalars(select(SuperAssistantMcpServer).where(SuperAssistantMcpServer.owner_id == owner_id, SuperAssistantMcpServer.enabled.is_(True))).all()
         for server in servers:
+            if server.weknora_endpoint_id and (not server.constrained or server.last_test_status != "success"):
+                continue
             for item in server.tool_manifest or []:
                 if not isinstance(item, dict) or not item.get("name"):
                     continue

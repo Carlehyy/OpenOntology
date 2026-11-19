@@ -231,6 +231,11 @@ class SuperAssistantMcpServer(Base):
     __tablename__ = "super_assistant_mcp_servers"
     __table_args__ = (
         UniqueConstraint("owner_id", "name", name="uq_sa_mcp_owner_name"),
+        # WeKnora 原生 MCP 镜像行：同 owner 同 endpoint 至多一条（endpoint_id
+        # 为 NULL 的普通 MCP 行不受约束，多 NULL 共存——SQLite/PG 语义一致）
+        UniqueConstraint(
+            "owner_id", "weknora_endpoint_id",
+            name="uq_sa_mcp_owner_weknora_endpoint"),
         Index("ix_sa_mcp_owner_updated", "owner_id", "updated_at"),
         Index("ix_sa_mcp_servers_dev_project_id", "dev_project_id"),
     )
@@ -266,6 +271,12 @@ class SuperAssistantMcpServer(Base):
     # transport='developed'、url='developed://<project_id>' 伪传输，
     # 执行走进程内 mcp_dev_executor（对标 builtin minio 的进程内先例）
     dev_project_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # WeKnora 原生 MCP 镜像：镜像行指向 weknora 域内 endpoint 标识（非本表
+    # 外键，WeKnora endpoint 生命周期归 super_assistant_weknora_integrations
+    # 状态与 WeKnora 服务侧管理）；非镜像行为 NULL
+    weknora_endpoint_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # WeKnora 作用域快照（默认知识库等，随镜像行冻结；结构归 weknora 域约定）
+    weknora_scope: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)
 
@@ -457,6 +468,30 @@ class SuperAssistantMulticaConfig(Base):
     last_test_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
     last_tested_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+
+class SuperAssistantWeKnoraIntegration(Base):
+    """每用户一条的 WeKnora 原生 MCP 集成状态（外部集成同 multica 先例）。
+
+    不存 token：WeKnora 访问凭据由 MCP 连接行加密保存，本表只持久化
+    集成协调状态。origin 是经 weknora 域服务校验后落库
+    的来源标识（URL 标记），模型层不重复校验。initialized_at 是「首次外部
+    创建意图 / 已有目录被确认」的持久闩：置位后不再重复触发初始化引导；
+    NULL 表示尚未发生任何一次确认。last_error 为 varchar(500)——按字符计
+    （PG varchar 语义），可存 500 个汉字。无 status 枚举：集成是否可用由
+    服务层按 WeKnora 实际连通性与本表 last_error 推导。
+    """
+
+    __tablename__ = "super_assistant_weknora_integrations"
+
+    owner_id: Mapped[str] = mapped_column(
+        String, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    origin: Mapped[str] = mapped_column(String(1000), nullable=False)
+    initialized_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    default_knowledge_base_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    default_endpoint_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)
 
 

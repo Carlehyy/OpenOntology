@@ -35,9 +35,11 @@ docker compose -f docker-compose.local.yml up --build
 可用性还必须通过 `/health/ready` 检查。
 
 WeKnora 原生 Web 入口是 `http://localhost:8089`（HTTPS `https://localhost:8444`）。
-它使用独立数据库、缓存和文件卷。本地 `up` 自动初始化管理员并关闭注册后开放
-原生 Web；模型、知识库和 MCP 端点由管理员在原生页面配置，再在超级助手现有
-MCP 管理中登记一次连接。模型密钥不是部署前置。细节见
+它使用独立数据库、缓存和文件卷。本地 `up` 只初始化管理员并关闭注册，不创建
+知识库、模型或 MCP 端点；管理员经聊天区右键菜单「领域知识」进入原生页面配置
+模型，超级助手「助手配置 → MCP」随后可发现端点并托管默认只读知识端点（自动
+创建共享知识库与只读端点、加密保存 token 并验证登记）。模型密钥不是部署前置。
+细节见
 [WeKnora 本地初始化](./docs/development/setup.md#weknora-本地初始化)。
 
 Kaneo 项目管理（官方 2.49.0，独立单用户账号）随同一套 Compose 启动：超级助手

@@ -3,6 +3,7 @@ import {
   confirmationOutcomeView,
   parseActionOutcome,
 } from '../../../components/ontologyConfirmationModel.ts'
+import { weknoraMcpToolSegment } from './toolLogic.ts'
 
 /**
  * 部分模型会把整段答复包进 ```markdown 围栏。
@@ -139,6 +140,18 @@ export const BUILTIN_TOOL_FRIENDLY_NAMES: Record<string, string> = {
   browser_network_requests: '查看网络请求',
   browser_page_resources: '查看页面资源',
   browser_save_resource: '保存资源',
+}
+
+/** 工具中文展示名查找：内置工具直查映射表；WeKnora 托管名（旧单端点
+ *  platform_weknora 或多端点 platform_weknora_<UUID前8>）取出工具段后复用
+ *  旧命名空间的映射（工具目录跨端点一致）；其它 MCP/未知名返回 undefined，
+ *  调用方直出原名。 */
+export function friendlyToolName(toolName: string): string | undefined {
+  const direct = BUILTIN_TOOL_FRIENDLY_NAMES[toolName]
+  if (direct) return direct
+  const segment = weknoraMcpToolSegment(toolName)
+  if (segment) return BUILTIN_TOOL_FRIENDLY_NAMES[`mcp__platform_weknora__${segment}`]
+  return undefined
 }
 
 export function toolStatusLabel(status: string) {

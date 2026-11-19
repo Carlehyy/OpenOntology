@@ -9,7 +9,8 @@
 - PostgreSQL、Redis、NATS、Neo4j、MinIO 和 n8n，以及已明确配置
   地址的 Chromium CDP；
 - WeKnora v0.9.0 共享知识库（官方 app/ui/docreader + 独立 ParadeDB/Redis）。本地源码运行可复用 `docker-compose.local.yml` 的栈；
-  首次仅初始化账号，模型与知识库随后在原生 Web 配置。
+  首次仅初始化账号；模型与知识库内容随后在原生 Web 配置，管理员再经超级助手
+  「助手配置 → MCP」托管只读知识端点。
 - Kaneo 2.49.0 项目管理（官方固定镜像、独立单用户账号与独立 PostgreSQL）。
   本地源码运行同样复用 `docker-compose.local.yml` 的 Kaneo 服务，管理员账号
   由 Compose 首次启动在私网自动创建。
@@ -128,9 +129,12 @@ docker compose -f docker-compose.local.yml stop weknora-app-init
 配置中心只生成服务地址 `WEKNORA_BASE_URL=http://127.0.0.1:18080`、
 `WEKNORA_WEB_URL=http://127.0.0.1:8089`、超时和内部 MCP 前缀
 `SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS=http://127.0.0.1:18080/mcp`。
-模型、共享知识库与 MCP 端点配置按
-[WeKnora 操作流程](../operations/configuration.md#weknora-共享知识库v090) 在原生页面完成，
-随后在超级助手现有 MCP 管理中登记一次地址与 token，测试并登记受约束。
+模型与知识库内容按
+[WeKnora 操作流程](../operations/configuration.md#weknora-共享知识库v090) 在原生页面配置
+（入口是超级助手聊天区域右键菜单「领域知识」）；管理员随后在超级助手
+「助手配置 → MCP」的 WeKnora 区块发现并托管端点——首次打开自动拉取目录并
+幂等初始化（无端点且模型就绪时平台创建默认只读端点并加密保存 token，已有
+端点只列出目录不改动），不再手工登记地址与 token。
 
 本地 Compose 管理员默认邮箱为 `admin@weknora.local`，密码采用仅用于本地的
 `localWeKnoraAdmin2026@`，可在根 `.env` 显式覆盖。生产密码由部署脚本生成并稳定

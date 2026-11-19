@@ -96,10 +96,9 @@ app = FastAPI(
 
 
 # Pydantic/FastAPI validation errors echo the offending input verbatim.  For
-# credential-bearing integrated source payloads (inline connection configs,
-# connection strings) that echo would leak secrets into responses and logs.
-# Scope: only integrated-dataset requests get redaction; every other route
-# keeps the stock FastAPI validation handler and response shape unchanged.
+# credential-bearing integrated source payloads and native MCP authorization,
+# that echo would leak secrets into responses and logs. These two request
+# families redact inputs; other routes keep the stock validation response.
 from fastapi import Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
@@ -126,6 +125,12 @@ def _redact_validation_value(value):
 
 @app.exception_handler(RequestValidationError)
 async def _redact_validation_input(request: Request, exc: RequestValidationError):
+    if (request.url.path.startswith("/api/v2/super-assistant/weknora/mcp-endpoints/")
+            and request.url.path.endswith("/connect")):
+        errors = jsonable_encoder(exc.errors())
+        for error in errors:
+            error.pop("input", None)
+        return JSONResponse(status_code=422, content={"detail": errors})
     if not request.url.path.startswith(_REDACTION_PATH_PREFIX):
         return await request_validation_exception_handler(request, exc)
     # jsonable_encoder first (same encoder as the stock handler): ctx may hold

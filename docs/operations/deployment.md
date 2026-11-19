@@ -93,8 +93,8 @@ WeKnora v0.9.0 的公开入口与平台 Nginx 独立：它只暴露原生 Web �
 `WEKNORA_ADMIN_EMAIL`/`WEKNORA_ADMIN_PASSWORD` 供「领域知识」一键免登录
 中继做服务端登录，其余运行时容器仍被掩码。全部
 `WEKNORA_*_IMAGE` 已有 `@sha256` 默认值；部署仍在 digest 校验处 fail closed，
-防止 tag 漂移。模型与知识库不属于部署输入；管理员登录原生 Web 配置后，
-通过超级助手现有 MCP 管理手工接入，详见
+防止 tag 漂移。模型与知识库不属于部署输入；管理员登录原生 Web 配置模型后，
+经超级助手「助手配置 → MCP」的 WeKnora 区块托管只读端点接入，详见
 [配置流程](./configuration.md#weknora-共享知识库v090)。
 
 Kaneo 项目管理（官方 2.49.0 固定 digest，独立单用户账号与独立 PostgreSQL）

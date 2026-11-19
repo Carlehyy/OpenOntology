@@ -470,6 +470,8 @@ def _tool_catalog(
     tools = _builtin_tools(agent_mode)
     registry: dict[str, tuple[SuperAssistantMcpServer, str]] = {}
     for server in servers:
+        if getattr(server, "weknora_endpoint_id", None) and (not server.constrained or server.last_test_status != "success"):
+            continue
         for item in server.tool_manifest or []:
             original = str(item.get("name") or "")
             if not original:
@@ -507,7 +509,7 @@ def _disabled_builtin_tools(db, owner_id: str) -> set[str]:
 # 工具目录是平台编码的固定清单，执行不经用户配置的传输/URL/凭据——
 # minio 固定平台工作区桶（桶/endpoint 覆盖参数被拒绝）；api_hub 逐工具
 # 以当前用户菜单权限 + 服务层行级作用域执行，出网复用 api_hub 私网/
-# 回环/重定向 SSRF 守卫。WeKnora 不再是内置通道，须按普通 MCP 手工登记。
+# 回环/重定向 SSRF 守卫。WeKnora 走外部 MCP，由专属验证链派生受约束登记。
 _CONSTRUCTIVELY_CONSTRAINED_BUILTINS = frozenset({"minio", "api_hub"})
 
 
@@ -555,6 +557,15 @@ def _revalidate_mcp_after_approval(db, item: dict[str, Any]) -> str | None:
     current = (fresh.transport, fresh.url, fresh.command,
                int(fresh.manifest_revision or 1))
     if current != snapshot:
+        return json.dumps({
+            "error": "mcp_manifest_changed",
+            "message": "MCP server 连接或工具清单已更新，请重新发起调用",
+            "decision": "denied",
+        }, ensure_ascii=False)
+    # 四元组之外补充 manifest_hash 比对（含受管 WeKnora 的 scope）：目录期
+    # 未记录（旧调用路径/未验证行）时不额外拦截，仍由四元组复核兜底。
+    catalog_hash = item.get("mcp_manifest_hash")
+    if catalog_hash is not None and getattr(fresh, "manifest_hash", None) != catalog_hash:
         return json.dumps({
             "error": "mcp_manifest_changed",
             "message": "MCP server 连接或工具清单已更新，请重新发起调用",
@@ -1417,6 +1428,12 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                          int(server_tuple[0].manifest_revision or 1))
                         if server_tuple else None
                     ),
+                    # 目录期 manifest_hash（含受管 WeKnora 的 scope）：与四元组
+                    # 快照互补，批准后比对可拦截 headers/env/清单/scope 漂移
+                    "mcp_manifest_hash": (
+                        getattr(server_tuple[0], "manifest_hash", None)
+                        if server_tuple else None
+                    ),
                 })
 
             # 2) 即时结果（截断/权限拒绝）与执行分组：只读并行、其余串行
@@ -1727,6 +1744,28 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
                             output = mcp_dev_service.call_published_tool(
                                 db, server, original_name, item["arguments"],
                             )
+                        elif getattr(server, "weknora_endpoint_id", None):
+                            # 受管 WeKnora 端点（builtin_key=None，constrained
+                            # 由验证链置位）：优先于普通 MCP 直连，派发边界由
+                            # weknora.execution 即时复核端点/范围/工具一致性，
+                            # 失败会撤销连接状态；普通 mcp_client.call_tool
+                            # 仍保留给未受管登记。
+                            from app.super_assistant.weknora import execution as weknora_execution
+
+                            output = asyncio.run(weknora_execution.call_tool(
+                                server_id=server.id,
+                                owner_id=server.owner_id,
+                                endpoint_id=server.weknora_endpoint_id,
+                                scope=dict(getattr(server, "weknora_scope", None) or {}),
+                                transport=server.transport,
+                                url=server.url,
+                                headers=decrypt_headers(server.headers_encrypted),
+                                tool_name=original_name,
+                                arguments=item["arguments"],
+                                command=server.command,
+                                args=server.args,
+                                env=decrypt_env(server.env_encrypted),
+                            ))
                         else:
                             output = asyncio.run(call_tool(
                                 transport=server.transport,

@@ -671,8 +671,13 @@ def test_ontology_execute_unverifiable_confirmation_never_yields_approvable_card
         assert "本体确认不可验证" in run.result
 
 
-def _prepare_mcp_approval_runtime(tmp_path, monkeypatch, responses, mutate_during_wait, db_name):
-    """带受确认 MCP server 的运行时夹具；审批等待窗口内用独立会话改 server。"""
+def _prepare_mcp_approval_runtime(tmp_path, monkeypatch, responses, mutate_during_wait, db_name,
+                                  server_extra=None):
+    """带受确认 MCP server 的运行时夹具；审批等待窗口内用独立会话改 server。
+
+    server_extra 允许托管 WeKnora 用例覆盖/补充 server 字段
+    （weknora_endpoint_id/weknora_scope/manifest_hash/constrained 等）。
+    """
     engine = create_engine(
         f"sqlite:///{tmp_path / db_name}",
         connect_args={"check_same_thread": False},
@@ -694,18 +699,20 @@ def _prepare_mcp_approval_runtime(tmp_path, monkeypatch, responses, mutate_durin
             id="conversation-mcp", owner_id="user-mcp", title="mcp",
             model_config_id="model-mcp",
         ))
-        db.add(SuperAssistantMcpServer(
-            id="server-ext", owner_id="user-mcp", name="ext",
-            builtin_key=None, constrained=True,
-            transport="streamable_http", url="https://mcp.example.test/sse",
-            header_names=[], args=[], env_names=[], enabled=True,
-            require_confirmation=True,
-            manifest_revision=2,
-            tool_manifest=[{
+        server_values = {
+            "id": "server-ext", "owner_id": "user-mcp", "name": "ext",
+            "builtin_key": None, "constrained": True,
+            "transport": "streamable_http", "url": "https://mcp.example.test/sse",
+            "header_names": [], "args": [], "env_names": [], "enabled": True,
+            "require_confirmation": True,
+            "manifest_revision": 2,
+            "tool_manifest": [{
                 "name": "lookup", "description": "lookup",
                 "input_schema": {"type": "object", "properties": {}},
             }],
-        ))
+        }
+        server_values.update(server_extra or {})
+        db.add(SuperAssistantMcpServer(**server_values))
         db.add_all([
             SuperAssistantMessage(
                 id="user-message-mcp", conversation_id="conversation-mcp",
@@ -824,6 +831,112 @@ def test_mcp_approval_recheck_denies_when_capability_revision_revoked(tmp_path, 
     assert "capability_revision_revoked" in events
     with session_factory() as db:
         assert db.query(SuperAssistantToolRun).one().status == "denied"
+
+
+_WEKNORA_SCOPE = {
+    "origin": "https://weknora.example.test", "endpoint_id": "wk-endpoint-1",
+    "knowledge_base_ids": ["kb-1"], "resolved_knowledge_base_ids": ["kb-1"],
+    "tools": ["lookup"], "default_agent_id": "", "token_hint": "mcp_hint",
+}
+
+
+def test_managed_weknora_mcp_dispatch_routes_through_execution_channel(tmp_path, monkeypatch):
+    """受管 WeKnora 派发必须走 weknora.execution 复核通道，不得直连普通 MCP。"""
+    execution_calls = []
+
+    async def fake_execution_call_tool(**kwargs):
+        execution_calls.append(kwargs)
+        return '{"ok":true}'
+
+    async def plain_mcp_must_not_run(**kwargs):
+        raise AssertionError(f"managed dispatch must not call plain MCP: {kwargs}")
+
+    monkeypatch.setattr(
+        "app.super_assistant.weknora.execution.call_tool", fake_execution_call_tool)
+    monkeypatch.setattr(runtime, "call_tool", plain_mcp_must_not_run)
+    session_factory = _prepare_mcp_approval_runtime(
+        tmp_path, monkeypatch,
+        iter([_MCP_CALL, _MCP_SUMMARY]), lambda db: None, "mcp-weknora-managed.db",
+        server_extra={
+            "weknora_endpoint_id": "wk-endpoint-1",
+            "weknora_scope": dict(_WEKNORA_SCOPE),
+            "manifest_hash": "hash-v1",
+            "last_test_status": "success",
+        })
+    events = "".join(runtime.stream_chat(
+        conversation_id="conversation-mcp", owner_id="user-mcp",
+        assistant_message_id="assistant-message-mcp", requested_model_id="model-mcp"))
+    assert "已停用或删除" not in events
+    assert "mcp_manifest_changed" not in events
+    assert execution_calls, "受管 WeKnora 必须经 weknora.execution.call_tool 派发"
+    kwargs = execution_calls[0]
+    assert kwargs["server_id"] == "server-ext"
+    assert kwargs["owner_id"] == "user-mcp"
+    assert kwargs["endpoint_id"] == "wk-endpoint-1"
+    assert kwargs["scope"] == _WEKNORA_SCOPE
+    assert kwargs["transport"] == "streamable_http"
+    assert kwargs["url"] == "https://mcp.example.test/sse"
+    assert kwargs["tool_name"] == "lookup"
+    with session_factory() as db:
+        assert db.query(SuperAssistantToolRun).one().status == "success"
+
+
+def test_managed_weknora_mcp_approval_denies_when_manifest_hash_changes(tmp_path, monkeypatch):
+    """四元组不变但 manifest_hash（含 scope）漂移时，批准后复核必须拒绝执行。"""
+    async def must_not_execute(**kwargs):
+        raise AssertionError(f"hash drift must deny before dispatch: {kwargs}")
+
+    monkeypatch.setattr(
+        "app.super_assistant.weknora.execution.call_tool", must_not_execute)
+
+    def rotate_hash(db):
+        server = db.get(SuperAssistantMcpServer, "server-ext")
+        server.manifest_hash = "hash-v2"
+
+    session_factory = _prepare_mcp_approval_runtime(
+        tmp_path, monkeypatch,
+        iter([_MCP_CALL, _MCP_SUMMARY]), rotate_hash, "mcp-weknora-hash.db",
+        server_extra={
+            "weknora_endpoint_id": "wk-endpoint-1",
+            "weknora_scope": dict(_WEKNORA_SCOPE),
+            "manifest_hash": "hash-v1",
+            "last_test_status": "success",
+        })
+    events = "".join(runtime.stream_chat(
+        conversation_id="conversation-mcp", owner_id="user-mcp",
+        assistant_message_id="assistant-message-mcp", requested_model_id="model-mcp"))
+    assert "mcp_manifest_changed" in events
+    with session_factory() as db:
+        assert db.query(SuperAssistantToolRun).one().status == "denied"
+
+
+def test_managed_weknora_mcp_without_constrained_registration_is_denied(tmp_path, monkeypatch):
+    """未验证的托管行不进入工具目录，模型臆造的调用同样拒绝。"""
+    async def must_not_execute(**kwargs):
+        raise AssertionError(f"unverified managed server must not dispatch: {kwargs}")
+
+    monkeypatch.setattr(
+        "app.super_assistant.weknora.execution.call_tool", must_not_execute)
+    session_factory = _prepare_mcp_approval_runtime(
+        tmp_path, monkeypatch,
+        iter([_MCP_CALL, _MCP_SUMMARY]), lambda db: None, "mcp-weknora-unverified.db",
+        server_extra={
+            "weknora_endpoint_id": "wk-endpoint-1",
+            "weknora_scope": dict(_WEKNORA_SCOPE),
+            "constrained": False,
+        })
+    events = "".join(runtime.stream_chat(
+        conversation_id="conversation-mcp", owner_id="user-mcp",
+        assistant_message_id="assistant-message-mcp", requested_model_id="model-mcp"))
+    assert "未知工具 mcp__ext__lookup" in events
+    with session_factory() as db:
+        run = db.query(SuperAssistantToolRun).one()
+        assert run.server_id is None
+        assert "未知工具" in run.result
+        server = db.get(SuperAssistantMcpServer, "server-ext")
+    tools, registry = runtime._tool_catalog([server], agent_mode=False)
+    assert not any(tool["name"] == "mcp__ext__lookup" for tool in tools)
+    assert "mcp__ext__lookup" not in registry
 
 
 _JOIN_ARGS = {

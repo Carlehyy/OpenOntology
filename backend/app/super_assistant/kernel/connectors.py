@@ -317,6 +317,12 @@ class McpToolConnector:
     # 平台内置通道：执行必须走各自的服务层内部端点，不能把用户可见的
     # transport/url/凭据当作可配置目标。
     builtin_key: str | None = None
+    # 受管 WeKnora 端点（builtin_key 保持 None）：transport/url/headers 仅是
+    # 验证链冻结的连接快照，invoke 必须经 weknora.execution 即时复核
+    # 端点/范围/工具一致性后再走标准 MCP；scope/owner_id 为复核授权输入。
+    weknora_endpoint_id: str | None = None
+    weknora_scope: Mapping[str, Any] | None = None
+    owner_id: str | None = None
 
     @property
     def namespaced_key(self) -> str:
@@ -354,6 +360,30 @@ class McpToolConnector:
             raise ContractError("MCP connector arguments must be an object")
         if self.builtin_key is not None:
             raise ContractError("platform builtin MCP must use its in-process channel")
+        if self.weknora_endpoint_id is not None:
+            from app.super_assistant.weknora import execution as weknora_execution
+
+            content = await weknora_execution.call_tool(
+                server_id=self.server_id,
+                owner_id=str(self.owner_id or ""),
+                endpoint_id=self.weknora_endpoint_id,
+                scope=dict(self.weknora_scope or {}),
+                transport=self.transport,
+                url=self.url,
+                headers=dict(self.headers),
+                tool_name=self.tool_name,
+                arguments=arguments,
+                command=self.command,
+                args=list(self.args),
+                env=dict(self.env),
+            )
+            return {
+                "run_id": run_id,
+                "call_id": call_id,
+                "status": "answered",
+                "content": str(content),
+                "provider_status": "completed",
+            }
         from app.super_assistant.mcp_client import call_tool
 
         content = await call_tool(

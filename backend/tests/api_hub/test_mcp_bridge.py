@@ -234,3 +234,22 @@ def test_bridge_rejects_platform_builtin_mcp_servers(bridge_db, monkeypatch, bui
     assert result["error_type"] == "configuration"
     assert "平台内置 MCP" in (result["error"] or "")
     assert calls == []
+
+
+def test_bridge_rejects_managed_weknora_mcp_rows(bridge_db, monkeypatch):
+    """托管 WeKnora 行 builtin_key 为空：识别依据必须是 weknora_endpoint_id 列。"""
+    calls: list[dict] = []
+    _patch_backend(
+        monkeypatch,
+        server=_fake_server(builtin_key=None, weknora_endpoint_id="ep-1"),
+        calls=calls,
+    )
+    iface = _create_bridge_interface(bridge_db)
+
+    result = executor.run_interface(iface)
+
+    assert result["ok"] is False
+    assert result["status_code"] == 400
+    assert result["error_type"] == "configuration"
+    assert "托管 WeKnora MCP 不支持 mcp-bridge 分发" in (result["error"] or "")
+    assert calls == []

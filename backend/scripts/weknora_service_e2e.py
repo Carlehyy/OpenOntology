@@ -30,7 +30,7 @@ async def check_platform_mcp(url: str, token: str, rotate_token) -> None:
     from app.super_assistant.schemas import McpServerCreate, McpServerUpdate
 
     settings.environment = "production"
-    settings.super_assistant_mcp_internal_base_urls = "http://weknora-app:8080/mcp"
+    settings.super_assistant_mcp_internal_base_urls = url.rsplit("/", 1)[0]
     with TemporaryDirectory(prefix="weknora-mcp-canary-") as directory:
         engine = create_engine(f"sqlite:///{directory}/platform.db")
         try:
@@ -92,6 +92,89 @@ async def check_platform_mcp(url: str, token: str, rotate_token) -> None:
                 assert server.constrained is True
         finally:
             engine.dispose()
+    await check_managed_mcp(url, replacement, rotate_token)
+
+
+async def check_managed_mcp(url: str, token: str, rotate_token) -> None:
+    from urllib.parse import urlsplit
+    from sqlalchemy.orm import sessionmaker
+    from app.auth.models import User
+    from app.shared.config import settings
+    from app.shared.database import Base
+    from app.super_assistant import mcp_server_service as service
+    from app.super_assistant.kernel.connectors import McpToolConnector
+    from app.super_assistant.kernel.models import CapabilityRevision
+    from app.super_assistant.models import SuperAssistantMcpServer, SuperAssistantWeKnoraIntegration
+    from app.super_assistant.weknora import connections, directory, execution
+
+    parsed = urlsplit(url)
+    settings.weknora_base_url = f"{parsed.scheme}://{parsed.netloc}"
+    identifier = parsed.path.rsplit("/", 1)[1]
+    with TemporaryDirectory(prefix="weknora-managed-canary-") as folder:
+        engine = create_engine(f"sqlite:///{folder}/platform.db", connect_args={"check_same_thread": False})
+        factory = sessionmaker(bind=engine, expire_on_commit=False)
+        original_factory = execution.SessionLocal
+        execution.SessionLocal = factory
+        try:
+            Base.metadata.create_all(engine, tables=[User.__table__, SuperAssistantMcpServer.__table__,
+                SuperAssistantWeKnoraIntegration.__table__, CapabilityRevision.__table__])
+            with factory() as db:
+                db.add(User(id="managed-canary", username="managed-canary", email="managed@example.invalid",
+                            password_hash="unused", role="admin"))
+                db.commit()
+
+            def initialize():
+                with factory() as db:
+                    listing = directory.initialize(db, "managed-canary")
+                    assert listing.initialized and len(listing.endpoints) == 1
+                    assert listing.endpoints[0].connection_status == "not_connected"
+
+            def connect(current_token):
+                with factory() as db:
+                    item = connections.connect_endpoint(db, "managed-canary", identifier, token=current_token)
+                    assert item.last_test_status == "success" and item.constrained
+                    assert current_token not in item.headers_encrypted
+                    return item.id
+
+            def connector(server_id):
+                with factory() as db:
+                    item = db.get(SuperAssistantMcpServer, server_id)
+                    return McpToolConnector(server_id=item.id, server_name=item.name,
+                        tool_name="list_knowledge_bases", transport=item.transport, url=item.url,
+                        headers=mcp_client.decrypt_headers(item.headers_encrypted),
+                        revision=item.manifest_revision, manifest_hash=item.manifest_hash,
+                        weknora_endpoint_id=item.weknora_endpoint_id, weknora_scope=item.weknora_scope,
+                        owner_id=item.owner_id)
+
+            await asyncio.to_thread(initialize)
+            server_id = await asyncio.to_thread(connect, token)
+            current = connector(server_id)
+            output = await current.invoke(run_id="canary", call_id="managed-read", input_ref='{"arguments":{}}', deadline=None)
+            payload = json.loads(output["content"])
+            assert payload.get("isError") is not True
+            assert payload["structuredContent"]["knowledge_bases"] == []
+            replacement = rotate_token()
+            try:
+                await current.invoke(run_id="canary", call_id="rotated-read", input_ref='{"arguments":{}}', deadline=None)
+            except mcp_client.McpClientError:
+                pass
+            else:
+                raise AssertionError("managed call accepted a rotated token")
+            with factory() as db:
+                failed = db.get(SuperAssistantMcpServer, server_id)
+                assert not failed.constrained and failed.last_test_status == "error"
+                assert all(not item.enabled for item in db.query(CapabilityRevision).all())
+            assert await asyncio.to_thread(connect, replacement) == server_id
+            with factory() as db:
+                service.remove_mcp_server(db, "managed-canary", server_id, include_builtins=True)
+                assert db.get(SuperAssistantWeKnoraIntegration, "managed-canary").initialized_at is not None
+            # Disconnect affects only the platform row; the native endpoint still works.
+            tools = await mcp_client.discover_tools(transport="streamable_http", url=url,
+                headers={"Authorization": f"Bearer {replacement}"})
+            assert [item["name"] for item in tools] == ["list_knowledge_bases"]
+        finally:
+            execution.SessionLocal = original_factory
+            engine.dispose()
 
 
 async def check() -> dict:
@@ -147,6 +230,8 @@ async def check() -> dict:
         "mcp_endpoints_created_by_bootstrap": 0, "native_mcp_list_call": True,
         "platform_mcp_registration": True, "encrypted_mcp_headers": True,
         "token_rotation_revokes_old_token": True, "credential_change_revokes_registration": True,
+        "managed_directory_and_connection": True, "managed_runtime_scope_checks": True,
+        "managed_rotation_revokes_capabilities": True, "disconnect_preserves_native_endpoint": True,
         "model_inference_tested": False, "document_retrieval_tested": False,
         "synthetic_only": True,
     }

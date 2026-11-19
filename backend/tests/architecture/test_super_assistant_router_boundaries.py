@@ -748,10 +748,19 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     assert {path: set(value) for path, value in all_paths.items()
             if path.startswith(f"{prefix}/autoloop/")} == autoloop_operations
     assert sum(map(len, autoloop_operations.values())) == 14
+    weknora_operations = {
+        f"{prefix}/weknora/mcp-endpoints": {"get"},
+        f"{prefix}/weknora/mcp-initialize": {"post"},
+        f"{prefix}/weknora/mcp-endpoints/{{endpoint_id}}/connect": {"post"},
+        f"{prefix}/weknora/mcp-endpoints/{{endpoint_id}}/verify": {"post"},
+    }
+    assert {path: set(value) for path, value in all_paths.items()
+            if path.startswith(f"{prefix}/weknora/mcp-")} == weknora_operations
     paths = {
         path: value
         for path, value in all_paths.items()
-        if path.startswith(prefix) and path not in memory_operations and path not in autoloop_operations
+        if path.startswith(prefix) and path not in memory_operations
+        and path not in autoloop_operations and path not in weknora_operations
     }
     payload = json.dumps(
         paths,

@@ -5,6 +5,7 @@ import {
   appendToolStart,
   BUILTIN_TOOL_FRIENDLY_NAMES,
   enqueueMessage,
+  friendlyToolName,
   groupConsecutiveSteps,
   mergeServerMessages,
   normalizeAssistantMarkdown,
@@ -250,6 +251,36 @@ describe('BUILTIN_TOOL_FRIENDLY_NAMES', () => {
   it('旧记忆宫殿工具名仅为历史会话回放保留', () => {
     assert.equal(BUILTIN_TOOL_FRIENDLY_NAMES.palace_recall, '回忆记忆宫殿')
     assert.equal(BUILTIN_TOOL_FRIENDLY_NAMES.palace_graph_search, '检索知识图谱（历史）')
+  })
+})
+
+describe('friendlyToolName（WeKnora 多端点托管名）', () => {
+  it('多端点名 platform_weknora_<UUID前8> 复用旧命名空间的工具段映射', () => {
+    assert.equal(friendlyToolName('mcp__platform_weknora_1a2b3c4d__search_knowledge'), '检索知识库')
+    assert.equal(friendlyToolName('mcp__platform_weknora_1a2b3c4d__wiki_index'), '读取 Wiki 索引')
+    // 不同端点 UUID 段取同一份工具映射
+    assert.equal(friendlyToolName('mcp__platform_weknora_9f8e7d6c__read_document'), '读取知识文档')
+  })
+
+  it('旧单端点名与内置工具直查映射表保持不变', () => {
+    assert.equal(friendlyToolName('mcp__platform_weknora__search_knowledge'), '检索知识库')
+    assert.equal(friendlyToolName('browser_navigate'), '打开网页')
+  })
+
+  it('多端点名中的不允许工具与未映射段返回 undefined（直出原名）', () => {
+    // ask 不在白名单映射内
+    assert.equal(friendlyToolName('mcp__platform_weknora_1a2b3c4d__ask'), undefined)
+    assert.equal(friendlyToolName('mcp__platform_weknora_1a2b3c4d__brand_new_tool'), undefined)
+    // 其它 MCP 与未知名不翻译
+    assert.equal(friendlyToolName('mcp__platform_api_hub__create_interface'), undefined)
+    assert.equal(friendlyToolName('unknown_tool'), undefined)
+  })
+
+  it('UUID 段非 8 位 hex 的形近名不按 WeKnora 托管名处理', () => {
+    // 7 位 / 9 位 / 含非 hex 字符：不是合法多端点名，也不在映射表内
+    assert.equal(friendlyToolName('mcp__platform_weknora_1a2b3c4__search_knowledge'), undefined)
+    assert.equal(friendlyToolName('mcp__platform_weknora_1a2b3c4d5__search_knowledge'), undefined)
+    assert.equal(friendlyToolName('mcp__platform_weknora_gz12cd34__search_knowledge'), undefined)
   })
 })
 

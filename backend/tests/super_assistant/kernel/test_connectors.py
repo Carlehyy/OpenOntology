@@ -239,3 +239,66 @@ async def test_other_builtin_mcp_connector_refuses_http_dispatch(monkeypatch):
             run_id="r1", call_id="c1",
             input_ref='{"arguments":{}}', deadline=None,
         )
+
+
+@pytest.mark.asyncio
+async def test_managed_weknora_connector_routes_via_execution_and_normal_uses_mcp(monkeypatch):
+    """受管 WeKnora 连接器 invoke 走 weknora.execution；普通连接器保持 mcp_client。"""
+    from app.super_assistant.kernel.connectors import McpToolConnector
+
+    managed_calls = []
+    plain_calls = []
+
+    async def fake_execution_call_tool(**kwargs):
+        managed_calls.append(kwargs)
+        return '{"rows":[]}'
+
+    async def fake_plain_call_tool(**kwargs):
+        plain_calls.append(kwargs)
+        return "普通 MCP 结果"
+
+    monkeypatch.setattr(
+        "app.super_assistant.weknora.execution.call_tool", fake_execution_call_tool)
+    monkeypatch.setattr(
+        "app.super_assistant.mcp_client.call_tool", fake_plain_call_tool)
+
+    managed = McpToolConnector(
+        server_id="server-weknora",
+        server_name="platform_weknora_aa11bb22",
+        tool_name="search_knowledge",
+        transport="streamable_http",
+        url="https://weknora.example.test/mcp/wk-managed-1",
+        weknora_endpoint_id="wk-managed-1",
+        weknora_scope={"endpoint_id": "wk-managed-1", "knowledge_base_ids": ["kb-1"]},
+        owner_id="user-1",
+    )
+    result = await managed.invoke(
+        run_id="r1", call_id="c1",
+        input_ref='{"arguments":{"q":"本体"}}', deadline=None,
+    )
+    assert result["status"] == "answered"
+    assert result["content"] == '{"rows":[]}'
+    assert managed_calls and not plain_calls
+    kwargs = managed_calls[0]
+    assert kwargs["server_id"] == "server-weknora"
+    assert kwargs["owner_id"] == "user-1"
+    assert kwargs["endpoint_id"] == "wk-managed-1"
+    assert kwargs["scope"] == {"endpoint_id": "wk-managed-1", "knowledge_base_ids": ["kb-1"]}
+    assert kwargs["transport"] == "streamable_http"
+    assert kwargs["url"] == "https://weknora.example.test/mcp/wk-managed-1"
+    assert kwargs["tool_name"] == "search_knowledge"
+    assert kwargs["arguments"] == {"q": "本体"}
+
+    normal = McpToolConnector(
+        server_id="server-ext",
+        server_name="ext",
+        tool_name="lookup",
+        transport="streamable_http",
+        url="https://mcp.example.test/sse",
+    )
+    result = await normal.invoke(
+        run_id="r2", call_id="c2", input_ref='{"arguments":{}}', deadline=None,
+    )
+    assert result["content"] == "普通 MCP 结果"
+    assert plain_calls and plain_calls[0]["url"] == "https://mcp.example.test/sse"
+    assert len(managed_calls) == 1

@@ -34,6 +34,8 @@ def manifest_hash(server: SuperAssistantMcpServer, tools: list[dict]) -> str:
         "headers": server.headers_encrypted, "env": server.env_encrypted,
         "tools": tools,
     }
+    if server.weknora_endpoint_id:
+        value["weknora_scope"] = server.weknora_scope
     return hashlib.sha256(json.dumps(
         value, sort_keys=True, ensure_ascii=False, separators=(",", ":"),
     ).encode()).hexdigest()

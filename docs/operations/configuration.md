@@ -122,7 +122,7 @@ Hub SQLite 完整备份、停写、全量解密校验和可恢复迁移机制就
 | n8n | 数据管家工作流执行 | 启动/readiness 失败，不按可选增强跳过 |
 | Chromium CDP | 浏览器接管与数据管家浏览器会话 | `STEWARD_BROWSER_CDP_URL` 只接受 HTTP(S) 服务根地址；启动配置必需，不可达不杀死 API liveness，但 readiness 失败，不用 mock 冒充就绪 |
 | 集成数据集 dbx | 集成源登记、schema 发现与刷新；生产 metadata 只走固定版本 dbx，不回退 native | 生产部署自动启动仅内网可达的官方 digest dbx，或使用显式外部端点；缺失/不可达/认证失败/版本不符使部署 preflight 与生产 readiness fail closed，非生产不要求 dbx |
-| WeKnora v0.9.0 | 原生知识库 Web 与超级助手标准 MCP 知识来源 | 服务或管理员初始化失败时阻断启动；未配置模型、知识库或 MCP 不影响基础服务启动 |
+| WeKnora v0.9.0 | 原生知识库 Web 与超级助手托管只读 MCP 知识来源 | 服务或管理员初始化失败时阻断启动；未配置模型、知识库或 MCP 不影响基础服务启动 |
 | Kaneo 2.49.0 | 单用户项目管理原生 Web（独立账号与独立 PostgreSQL） | 服务、管理员初始化或实例状态探针失败时启动/readiness fail-closed；平台不降级、不用 mock 冒充 |
 | Hindsight 1.2.0（可选） | 超级助手长期记忆（profile `hindsight`，默认关闭） | 可选特性：不可达/未启用时记忆特性降级，聊天与全局 readiness 不受影响；不回退旧记忆实现 |
 
@@ -134,35 +134,43 @@ WeKnora 使用官方 app、UI、docreader 和独立 ParadeDB、Redis、文件卷
 `http://weknora-app:8080` 提供 API/MCP，公网网关对精确 `/mcp` 与全部 `/mcp/`
 子路径返回 404。
 
-一键免登录（共享管理员会话，与 Kaneo 中继同构）：普通左键点击「领域知识」
-按钮时，平台后端为已登录且有超级助手菜单权限的用户签发一次性票据（HMAC
-签名、90 秒有效、Redis 单次消费），新标签打开 `WEKNORA_WEB_URL/sso/entry?ticket=...`；
+一键免登录（共享管理员会话，与 Kaneo 中继同构）：在超级助手聊天区域右键
+菜单选择「领域知识」时，平台后端为已登录且有超级助手菜单权限的用户签发
+一次性票据（HMAC 签名、90 秒有效、Redis 单次消费），新标签打开
+`WEKNORA_WEB_URL/sso/entry?ticket=...`；
 `weknora-gateway` 把该精确路径反代到 backend，backend 校验票据后以管理员凭据
 服务端登录 WeKnora，并把登录响应经 WeKnora 原生 `#oidc_result=` 管道在其自身
 origin 落盘（纯 Bearer token 模型，无 cookie）。全程用户无需知道 WeKnora 账号
 密码；所有有权限的平台用户共享同一个 WeKnora 管理员身份。任何失败（票据无效/
-重放、Redis 不可用、WeKnora 拒绝登录）都回落到 WeKnora 自带登录页；中键/
-修饰键/右键点击按钮仍直开原生地址作手动登录兜底。管理员凭据除
-`weknora-bootstrap` 外只进入 backend 容器（compose 掩码锚点下的唯一例外），
+重放、Redis 不可用、WeKnora 拒绝登录）都回落到 WeKnora 自带登录页；直接打开
+原生地址手动登录仍是兜底。管理员凭据除
+`weknora-bootstrap` 外只进入 backend 容器（compose 掩码锚点下的唯一例外；
+pipeline executor 等运行时容器被掩码，托管工具调用只使用端点自身 token），
 不进日志、接口响应与前端。
 
 平台只使用 `WEKNORA_BASE_URL`、`WEKNORA_WEB_URL` 和
-`WEKNORA_TIMEOUT_SECONDS` 做服务探活与页面跳转（backend 另持
-`WEKNORA_ADMIN_EMAIL`/`WEKNORA_ADMIN_PASSWORD` 供上述中继登录）。前端知识库
-入口与免登录跳转地址在 `WEKNORA_WEB_URL` 为主机回环地址（localhost/127.0.0.1
+`WEKNORA_TIMEOUT_SECONDS` 做服务探活、页面跳转与端点目录访问（backend 另持
+`WEKNORA_ADMIN_EMAIL`/`WEKNORA_ADMIN_PASSWORD` 供上述中继登录，以及
+「助手配置 → MCP」中 WeKnora 端点目录/初始化/轮换的私网管理 API 调用）。
+前端知识库入口与免登录跳转地址在 `WEKNORA_WEB_URL` 为主机回环地址（localhost/127.0.0.1
 等）时，自动改用浏览器当前访问平台的主机名（协议与端口保留），内网与公网
 部署未显式配置时同样跳到同机网关；非回环地址按配置原样跳转。标准 MCP 的
 内部访问范围由
 `SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS` 指定（Docker 固定
 `http://weknora-app:8080/mcp`；源码模式由配置中心生成为
 `http://127.0.0.1:18080/mcp`）。只允许精确同源、路径在前缀内的请求；其它 MCP
-继续执行现有公网/HTTPS 校验。不要扩大为任意内网地址。
+继续执行现有公网/HTTPS 校验。不要扩大为任意内网地址。平台托管的 WeKnora
+连接固定 Streamable HTTP，地址是 `WEKNORA_BASE_URL` origin 下的
+`/mcp/<endpoint_id>`（须落在上述内部前缀内）；端点 token 用平台
+`ENCRYPTION_KEY` 加密保存在超级助手 MCP 连接行，不进入任何部署环境变量。
 
 首次部署仅自动初始化账号：私网 `weknora-app-init` 临时允许注册，bootstrap
 注册管理员后删除该容器；正式 app 启动时将指定邮箱提升为系统管理员，
 `bootstrap --verify` 登录并持久化 `auth.registration_mode=invite_only` 后才开放
 公网网关。此流程不创建模型、知识库或 MCP 端点，不调用大模型，不维护集成状态文件。
-服务故障仍阻断启动；尚未配置知识能力属于正常首次使用状态。
+服务故障仍阻断启动；尚未配置知识能力属于正常首次使用状态。端点发现、默认
+端点托管与接入由管理员在平台「助手配置 → MCP」的 WeKnora 区块完成（见下方
+流程），不属于部署步骤。
 
 `WEKNORA_ADMIN_EMAIL` 默认为 `admin@weknora.local`；生产管理员密码由部署脚本
 首次生成并持久化于服务器 `.env`。由授权管理员在服务器受控终端查看，禁止发送到
@@ -174,25 +182,54 @@ DB、Redis、JWT、AES 与 signing 凭据独立生成并跨部署保持不变。
 
 管理员首次配置流程：
 
-1. 从超级助手会话头部点击「领域知识」一键免登录进入 WeKnora（或中键/修饰键
-   直开原生地址手动登录）。
+1. 在超级助手聊天区域右键菜单点击「领域知识」一键免登录进入 WeKnora（中继
+   失败时回落 WeKnora 自带登录页，直接打开原生地址手动登录仍是兜底）。
 2. 在“设置 → 模型”添加聊天（KnowledgeQA）和 Embedding 模型，在原生页面输入
-   模型地址、密钥、名称及向量维度；无需 GitHub 模型变量或 Secrets。
-3. 创建一个共享知识库，绑定所需模型，再上传文档并等待解析、索引完成。
-4. 在原生集成设置的 MCP Server 中创建接入点，明确选择这个知识库（空范围在
-   上游代表全部知识库）。仅选 `list_knowledge_bases`、`search_knowledge`、
-   `grep_chunks`、`list_documents`、`read_document`、`wiki_search`、
-   `wiki_read_page`、`wiki_index`；取消 `ask` 与文档新增、修改、删除工具。
-5. 在超级助手“助手配置 → MCP”新增 Streamable HTTP 连接。使用内部地址
-   `http://weknora-app:8080/mcp/<endpoint_id>`，请求头填写
-   `Authorization: Bearer <原生页面生成的 token>`。源码运行改用
-   `http://127.0.0.1:18080/mcp/<endpoint_id>`。不要使用被网关阻断的公网 MCP 地址。
-6. 测试连接成功并发现非空工具清单后，由平台管理员登记“受约束”并启用。
-   执行确认仍遵循现有 MCP 策略。连接、token 或工具清单变更后重新测试和登记；
-   token 轮换后旧 token 立即失效。
+   模型地址、密钥、名称及向量维度，并指定默认模型；无需 GitHub 模型变量或
+   Secrets。两个模型是知识能力的硬前置：真实镜像允许在无模型时创建
+   keyword-only 知识库（创建接口返回 201），但文档入库与索引仍要求
+   Embedding，平台不宣称无模型知识可用，也不读取平台自己的模型配置。
+3. 按需创建知识库、上传文档并等待解析、索引完成（全部原生能力照常可用）。
+4. 管理员首次打开超级助手「助手配置 → MCP」：WeKnora 区块自动拉取端点目录
+   （GET），未初始化时补一次幂等初始化（POST initialize）。三种结果：
+   - WeKnora 已有 MCP 端点：平台只持久化“首次已检查目录”标记并在区块中
+     列出目录，不创建、不修改任何原生端点；
+   - 目录为空且恰好存在一个默认（或唯一启用）的 Embedding 与 KnowledgeQA
+     模型：平台经私网管理 API 创建名为 `OpenOntology` 的共享知识库（已存在
+     同名知识库且其绑定的 Embedding/聊天模型仍可用时直接复用）与同名
+     MCP 端点（只勾选 8 个只读知识工具，显式绑定该知识库），端点 token
+     加密写入平台托管 MCP 连接（`SuperAssistantMcpServer` 镜像行），随即
+     自动完成工具发现验证、清单冻结与“受约束”登记；
+   - 缺模型或默认模型不唯一：初始化失败并明确提示先在原生页面配置，不产生
+     空壳知识库/端点，不置初始化闩，配置后可直接重试。
+5. 接入已有原生端点（自建或其他来源）：平台不擅自修改原生端点的知识库范围
+   与工具。端点工具必须全部落在只读白名单内，且必须保留
+   `list_knowledge_bases`（平台核验实际知识库范围的必需工具，缺失同样拒绝
+   托管并提示）；其余只读工具可按需子集。白名单为
+   `list_knowledge_bases`、`search_knowledge`、`grep_chunks`、`list_documents`、
+   `read_document`、`wiki_search`、`wiki_read_page`、`wiki_index`；`ask` 与
+   文档新增、修改、删除工具一律不允许。接入需要输入该端点现有 token
+   （创建时仅展示一次，需使用当时保存的完整值），或显式确认「轮换 Token」后接入——轮换会使
+   旧 token 立即失效。多个已启用端点可同时接入使用，互不影响。
+6. 目录刷新与每次工具调用都核验上游状态：端点在原生页被删除或停用、知识库
+   范围变化、工具清单变化或 token 失效，都会使平台立即撤销该托管连接的
+   “受约束”登记（fail closed）并提示重新验证；重新验证成功才恢复调用。
+   调用前的核验只用端点自身 token 做工具发现并实际调用
+   `list_knowledge_bases` 比对冻结范围（读取结果返回前再核验一次）；执行
+   worker 不获得 WeKnora 管理员密码。
+7. 断开连接只删除平台侧托管行并撤销其授权，不会删除 WeKnora 侧的端点、
+   知识库或文档，也不会轮换 token。初始化闩持久保留：之后目录再为空时
+   平台不会自动重建，需在区块中显式“创建默认端点”（recreate 语义）或去
+   原生页自建后再接入。
+
+固定 WeKnora v0.9.0 与其 ParadeDB v0.25.11 组合在关闭问题生成时，关键词查询
+可能返回 `Unsupported query shape`；`grep_chunks` 同受影响。这是上游查询问题，
+不代表知识库没有相关内容。原生 `search_knowledge` 的 `mode=semantic` 已验证可
+在开启向量索引的知识库返回片段与引用；平台不会为此擅自修改原生问题生成设置。
 
 服务健康不代表知识已可检索。真实验收需上传脱敏文档，验证检索命中、引用和
-超级助手调用；模型或索引未配置时应显示实际错误，不能用探活结果冒充知识就绪。
+超级助手调用；模型或索引未配置时应显示实际错误，不能用探活结果冒充知识就绪，
+也不得在未配置 Embedding/KnowledgeQA 模型时宣称知识可用。
 
 ### Kaneo 项目管理（2.49.0）
 

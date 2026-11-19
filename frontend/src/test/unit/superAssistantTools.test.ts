@@ -50,6 +50,28 @@ describe('groupAssistantTools', () => {
     ])
   })
 
+  it('多端点托管名 platform_weknora_<UUID前8> 精确归入知识库组，形近名不误收', () => {
+    const groups = groupAssistantTools([
+      tool('mcp__platform_weknora_1a2b3c4d__search_knowledge'),
+      tool('mcp__platform_weknora_9f8e7d6c__ask'),
+      // UUID 段非 8 位 hex：不是合法托管名，不入知识库组
+      tool('mcp__platform_weknora_1a2b3c4__list_knowledge_bases'),
+      tool('mcp__platform_weknora_gz12cd34__read_document'),
+      tool('mcp__platform_weknora_1a2b3c4d5__wiki_search'),
+    ])
+    const weknora = groups.find(group => group.key === 'weknora')!
+    assert.deepEqual(weknora.tools.map(item => item.name), [
+      'mcp__platform_weknora_1a2b3c4d__search_knowledge',
+      'mcp__platform_weknora_9f8e7d6c__ask',
+    ])
+    // 形近名落「其他」，不会被宽泛前缀误收编
+    assert.deepEqual(groups.find(group => group.key === 'other')!.tools.map(item => item.name), [
+      'mcp__platform_weknora_1a2b3c4__list_knowledge_bases',
+      'mcp__platform_weknora_gz12cd34__read_document',
+      'mcp__platform_weknora_1a2b3c4d5__wiki_search',
+    ])
+  })
+
   it('长期记忆 palace_* 工具仍归入记忆组，不落入「其他」', () => {
     const groups = groupAssistantTools([
       tool('memory_search'), tool('palace_zones'), tool('palace_read_zone'), tool('palace_recall'),
