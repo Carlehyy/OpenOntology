@@ -2,13 +2,15 @@
  * 新建 / 编辑看板信息弹窗（创建与编辑共用）。
  *
  * - 冻结契约 §4/§7：名称 trim 后 1..200、描述 trim 后 ≤500、图标必选且属于
- *   后端白名单；错误必须在弹窗内以 role="alert" 展示并保留已填内容，
- *   不能只靠 toast；
+ *   后端白名单；错误必须在弹窗内展示并保留已填内容，不能只靠 toast；
+ *   客户端校验错误只渲染在对应字段下方并把焦点移到第一个出错字段
+ *   （UX 评审 F-02：不再与底部横幅重复同一条文案）；底部 role="alert"
+ *   横幅只承载服务端提交错误与 409 冲突恢复路径；
  * - 编辑总是携带列表 revision（expected_revision）；409 冲突时保留输入、
  *   展示最新 revision，并提供「刷新最新数据」后再次保存的可恢复路径；
  * - 编辑文案明确「仅更新平台卡片」。
  */
-import { useState, type FormEvent } from 'react'
+import { useRef, useState, type FormEvent } from 'react'
 import { AlertCircle } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
@@ -32,6 +34,7 @@ import {
   DEFAULT_DASHBOARD_ICON,
   dashboardCreatePayload,
   dashboardUpdatePayload,
+  firstDashboardFormErrorTarget,
   validateDashboardForm,
   type DashboardFormErrors,
   type DashboardFormValues,
@@ -76,6 +79,10 @@ export function DashboardFormDialog({
   const [fieldErrors, setFieldErrors] = useState<DashboardFormErrors>({})
   const [conflictRevision, setConflictRevision] = useState<number | null>(null)
 
+  const nameInputRef = useRef<HTMLInputElement>(null)
+  const descriptionRef = useRef<HTMLTextAreaElement>(null)
+  const iconFieldRef = useRef<HTMLFieldSetElement>(null)
+
   const resetError = () => {
     setSubmitError('')
     setFieldErrors({})
@@ -87,13 +94,24 @@ export function DashboardFormDialog({
     onClose()
   }
 
+  /** 客户端校验失败后把焦点移到第一个出错字段（F-02），下一轮渲染后生效。 */
+  const focusFirstError = (errors: DashboardFormErrors) => {
+    const target = firstDashboardFormErrorTarget(errors)
+    if (!target) return
+    requestAnimationFrame(() => {
+      if (target === 'name') nameInputRef.current?.focus()
+      else if (target === 'description') descriptionRef.current?.focus()
+      else iconFieldRef.current?.querySelector('button')?.focus()
+    })
+  }
+
   const submit = async (event?: FormEvent) => {
     event?.preventDefault()
     const values: DashboardFormValues = { name, description, icon }
     const errors = validateDashboardForm(values)
     if (Object.keys(errors).length > 0) {
       setFieldErrors(errors)
-      setSubmitError(Object.values(errors)[0] ?? '请检查表单内容')
+      focusFirstError(errors)
       return
     }
     setSaving(true)
@@ -146,16 +164,22 @@ export function DashboardFormDialog({
         </DialogHeader>
 
         <form onSubmit={submit} className="space-y-4" noValidate data-testid="dashboard-form-dialog">
-          <Input
-            label="看板名称"
-            required
-            autoFocus
-            maxLength={DASHBOARD_NAME_MAX_LENGTH}
-            value={name}
-            error={fieldErrors.name}
-            onChange={event => { setName(event.target.value); setFieldErrors(current => ({ ...current, name: undefined })) }}
-            placeholder="例如：核心链路运行态势"
-          />
+          <div>
+            <Input
+              ref={nameInputRef}
+              label="看板名称"
+              required
+              autoFocus
+              maxLength={DASHBOARD_NAME_MAX_LENGTH}
+              value={name}
+              error={fieldErrors.name}
+              onChange={event => { setName(event.target.value); setFieldErrors(current => ({ ...current, name: undefined })) }}
+              placeholder="例如：核心链路运行态势"
+            />
+            <p className="mt-1 text-right text-[11px] tabular-nums text-[var(--color-text-tertiary)]">
+              {name.length}/{DASHBOARD_NAME_MAX_LENGTH}
+            </p>
+          </div>
 
           <div>
             <label htmlFor="dashboard-description" className="mb-1.5 block text-sm font-medium text-[var(--color-text-primary)]">
@@ -163,6 +187,7 @@ export function DashboardFormDialog({
             </label>
             <textarea
               id="dashboard-description"
+              ref={descriptionRef}
               value={description}
               maxLength={DASHBOARD_DESCRIPTION_MAX_LENGTH}
               rows={3}
@@ -178,7 +203,7 @@ export function DashboardFormDialog({
             )}
           </div>
 
-          <fieldset>
+          <fieldset ref={iconFieldRef}>
             <legend className="mb-2 text-sm font-medium text-[var(--color-text-primary)]">看板图标</legend>
             <div className="grid grid-cols-5 gap-2">
               {DASHBOARD_ICON_OPTIONS.map(option => {

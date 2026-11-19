@@ -346,11 +346,13 @@ test('看板工作台：菜单/深链/刷新可达，筛选计数与空态正确
   )
   expect(firstSectionLabel).toBe('看板筛选')
 
-  // 安全提示迁移：原 header 第二段的共享管理员身份披露落到编排入口 tooltip
-  const orchestrateHint = page
+  // 安全提示迁移：原 header 第二段的共享管理员身份披露落到编排入口的
+  // 策展 Tooltip（F-03：原生 title 悬停延迟约 1s、触屏不可见、不可样式化）
+  const orchestrateEntry = page
     .locator('[data-dashboard-id="dash-core"]')
     .getByTestId('dashboard-orchestrate-entry')
-  await expect(orchestrateHint).toHaveAttribute('title', /Grafana 使用共享管理员身份/)
+  await orchestrateEntry.hover()
+  await expect(page.getByText(/Grafana 使用共享管理员身份/)).toBeVisible()
 
   // 页面不回显任何敏感凭证
   const bodyText = await page.locator('body').innerText()
@@ -390,7 +392,7 @@ test('看板工作台：空列表引导创建第一个看板', async ({ page }) 
   await expect(page.getByText('创建第一个看板卡片，再通过「编排」配置运行态势面板')).toBeVisible()
   await expect(page.getByTestId('dashboard-create')).toBeVisible()
   await expect(page.getByRole('button', { name: '立即创建' })).toBeVisible()
-  await expect(page.getByText('先在平台建卡片，再通过「编排」配置数据源与面板')).toBeVisible()
+  await expect(page.getByText('先创建看板卡片，再进入「编排」配置数据源与面板')).toBeVisible()
 })
 
 test('看板工作台：空态与有卡片时新建入口卡高度一致（占位与卡片统一最小高度）', async ({ page }) => {
@@ -454,9 +456,11 @@ test('看板工作台：新建校验/提交载荷/失败保留输入，编辑只
   const dialog = page.getByRole('dialog')
   await expect(dialog.getByText('创建后会在 Grafana 中生成一个空白看板', { exact: false })).toBeVisible()
 
-  // 空名称：弹窗内 role=alert，不提交
+  // 空名称：错误只出现在字段下方且焦点归还该字段，不再重复渲染底部横幅（F-02）
   await dialog.getByTestId('dashboard-form-submit').click()
-  await expect(dialog.getByRole('alert').filter({ hasText: '请输入看板名称' })).toBeVisible()
+  await expect(dialog.getByText('请输入看板名称')).toBeVisible()
+  await expect(dialog.getByTestId('dashboard-form-error')).toHaveCount(0)
+  await expect(dialog.getByLabel('看板名称')).toBeFocused()
   expect(records.createBodies).toHaveLength(0)
 
   // Grafana 故障：失败文案留在弹窗内，输入不丢
@@ -482,7 +486,7 @@ test('看板工作台：新建校验/提交载荷/失败保留输入，编辑只
 
   // 编辑：文案明确只改平台卡片；PATCH 携带列表 revision
   const uidBefore = state.cards[0].grafana_uid
-  await page.getByRole('button', { name: '信息 核心链路运行态势' }).click()
+  await page.getByRole('button', { name: '编辑 核心链路运行态势' }).click()
   const editDialog = page.getByRole('dialog')
   await expect(editDialog.getByText('修改监控看板基本信息', { exact: false })).toBeVisible()
   await editDialog.getByLabel('看板名称').fill('核心链路运行态势（新）')
@@ -536,7 +540,7 @@ test('看板工作台：revision 409 保留输入、展示最新版本，刷新�
   await gotoWorkbench(page)
 
   state.conflictNextPatch = true
-  await page.getByRole('button', { name: '信息 冲突看板' }).click()
+  await page.getByRole('button', { name: '编辑 冲突看板' }).click()
   const dialog = page.getByRole('dialog')
   await dialog.getByLabel('看板名称').fill('冲突看板（我的修改）')
   await dialog.getByTestId('dashboard-form-submit').click()
@@ -622,7 +626,7 @@ test('看板工作台：Grafana 不可用显示告警条，unknown 不误判失�
   await expect(page.getByRole('button', { name: '预览 探测失败看板' })).toBeDisabled()
 
   // 本地信息编辑不依赖 Grafana 探测，仍可用
-  await page.getByRole('button', { name: '信息 探测失败看板' }).click()
+  await page.getByRole('button', { name: '编辑 探测失败看板' }).click()
   const dialog = page.getByRole('dialog')
   await dialog.getByLabel('看板名称').fill('探测失败看板（本地改名）')
   await dialog.getByTestId('dashboard-form-submit').click()
@@ -648,7 +652,7 @@ test('看板工作台：missing 显示已失效并禁用编排/预览，信息�
   // unknown 之外的正常卡片不受影响
   await expect(page.locator('[data-dashboard-id="dash-ok"]').getByTestId('dashboard-missing-badge')).toHaveCount(0)
   await expect(page.getByRole('button', { name: '编排 正常看板' })).toBeEnabled()
-  await expect(page.getByRole('button', { name: '信息 已删看板' })).toBeEnabled()
+  await expect(page.getByRole('button', { name: '编辑 已删看板' })).toBeEnabled()
 })
 
 test('看板工作台：编排同步预开空白页，续签成功后导航到后端 edit_path', async ({ page }) => {
@@ -723,7 +727,8 @@ test('看板工作台：预览先续签再挂同源 kiosk iframe，全屏依据 
   await expect(dialog).toBeVisible()
   const iframe = page.getByTestId('dashboard-preview-iframe')
   await expect(iframe).toBeVisible()
-  expect(await iframe.getAttribute('src')).toBe('/grafana/d/oo-dashpreview?orgId=1&kiosk')
+  // src = 后端受控路径 + 平台主题参数（F-09），sandbox 仍不设置（同源可信内容）
+  expect(await iframe.getAttribute('src')).toBe('/grafana/d/oo-dashpreview?orgId=1&kiosk&theme=light')
   expect(await iframe.getAttribute('sandbox')).toBeNull()
   // 挂载前先续签（次数只增不减；挂载时的签发不在此断言精确值）
   await expect.poll(() => records.sessionCalls).toBeGreaterThan(callsBefore)
@@ -778,7 +783,7 @@ test('看板工作台：预览先续签再挂同源 kiosk iframe，全屏依据 
   }
 })
 
-test('看板工作台：预览弹窗全屏/关闭按钮同构浅底深字配色（明暗两态）', async ({ page }) => {
+test('看板工作台：预览弹窗全屏按钮 success 语义色、关闭按钮中性配色（明暗两态）', async ({ page }) => {
   await mockSession(page, admin)
   const state = newState([makeCard({ id: 'dash-button-tone', name: '配色看板' })])
   const records = newRecords()
@@ -793,30 +798,31 @@ test('看板工作台：预览弹窗全屏/关闭按钮同构浅底深字配色�
     return page.getByRole('dialog')
   }
 
-  // 两按钮统一「浅底 + 深字 + 35% 同色系边框」，仅语义色不同（token 明暗成对维护）
+  // 两按钮同构（同边框/圆角/浅底深字）；全屏保留 success 语义色，关闭为
+  // 中性 muted 浅底（F-16：关闭非破坏性操作，不再占用 danger 语义）
   const tone = {
     light: {
       fullscreenBg: 'rgb(232, 245, 233)',
       fullscreenText: 'rgb(45, 138, 78)',
       fullscreenBorder: /rgba?\(45,\s*138,\s*78,\s*0\.35\)|color\(srgb[^)]*\/\s*0\.35\)/,
-      closeBg: 'rgb(253, 232, 232)',
-      closeText: 'rgb(194, 59, 59)',
-      closeBorder: /rgba?\(194,\s*59,\s*59,\s*0\.35\)|color\(srgb[^)]*\/\s*0\.35\)/,
+      closeBg: 'rgb(241, 243, 245)',
+      closeText: 'rgb(90, 90, 114)',
+      closeBorder: 'rgb(226, 228, 233)',
     },
     dark: {
       fullscreenBg: 'rgba(63, 185, 80, 0.14)',
       fullscreenText: 'rgb(63, 185, 80)',
       fullscreenBorder: /rgba?\(63,\s*185,\s*80,\s*0\.35\)|color\(srgb[^)]*\/\s*0\.35\)/,
-      closeBg: 'rgba(229, 83, 75, 0.14)',
-      closeText: 'rgb(229, 83, 75)',
-      closeBorder: /rgba?\(229,\s*83,\s*75,\s*0\.35\)|color\(srgb[^)]*\/\s*0\.35\)/,
+      closeBg: 'rgb(30, 38, 50)',
+      closeText: 'rgb(152, 162, 179)',
+      closeBorder: 'rgb(51, 61, 78)',
     },
   }
 
   const assertTones = async (dialog: Locator, values: typeof tone.light) => {
     const fullscreen = dialog.getByTestId('dashboard-preview-fullscreen')
     const close = dialog.getByTestId('dashboard-preview-close')
-    // 全屏=浅绿底+深绿字，关闭=浅红底+深红字
+    // 全屏=success 语义浅底深字，关闭=中性 muted 浅底深字
     await expect(fullscreen).toHaveCSS('background-color', values.fullscreenBg)
     await expect(fullscreen).toHaveCSS('color', values.fullscreenText)
     await expect(close).toHaveCSS('background-color', values.closeBg)
@@ -936,7 +942,7 @@ test('看板工作台：editor 可写，viewer/custom 只读但可预览', async
   await mockGrafanaPages(page)
   await gotoWorkbench(page)
   await expect(page.getByTestId('dashboard-create')).toBeVisible()
-  await expect(page.getByRole('button', { name: '信息 编辑者看板' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '编辑 编辑者看板' })).toBeVisible()
   await expect(page.getByRole('button', { name: '编排 编辑者看板' })).toBeVisible()
   await expect(page.getByRole('button', { name: '删除看板 编辑者看板' })).toBeVisible()
 
@@ -954,7 +960,7 @@ test('看板工作台：viewer 隐藏平台写入口，仍可预览', async ({ p
 
   await expect(page.getByTestId('dashboard-create')).toHaveCount(0)
   await expect(page.getByRole('button', { name: '立即创建' })).toHaveCount(0)
-  await expect(page.getByRole('button', { name: '信息 查看者看板' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '编辑 查看者看板' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: '编排 查看者看板' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: '删除看板 查看者看板' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: '预览 查看者看板' })).toBeEnabled()

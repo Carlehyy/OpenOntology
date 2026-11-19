@@ -3,15 +3,19 @@
  *
  * - 头部：图标头像 + 名称 + 创建/更新时间；仅 missing 显示「已失效」徽标，
  *   unknown 不显示徽标（Grafana 探测失败不能误判为已失效）。
- * - 底部：信息 / 编排 / 预览（左）、删除（右）。编排与预览在 missing 或
+ * - 底部：编辑 / 编排 / 预览（左）、删除（右）。编辑入口即「编辑看板信息」
+ *   弹窗（UX 评审 F-01：按钮名与动作对齐）。编排与预览在 missing 或
  *   Grafana 不可用时置灰，并用外层 span 的 title 解释原因（disabled 按钮
- *   自身不触发 title 悬浮）；编排入口可用时同一 title 承载共享管理员
- *   安全提示（自页面顶部 header 迁移）。
+ *   自身不触发 title 悬浮）；编排入口的共享管理员安全提示用策展 Tooltip
+ *   呈现（UX 评审 F-03：原生 title 悬停延迟约 1s、触屏不可见、不可样式化）。
+ * - 删除为危险操作：静止态即用 danger 弱化色提示，热区 36px、触屏 44px
+ *   （UX 评审 F-07/F-20）。
  * - 拖拽排序用原生 HTML5 drag（与本体卡一致），筛选激活或只读角色时禁用。
  */
 import type { DragEvent } from 'react'
 import { formatDateTime } from '@/utils/datetime'
 import { Badge } from '@/components/ui/Badge'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Eye, Pencil, SlidersHorizontal, Trash2 } from 'lucide-react'
 import type { OperationsDashboardCard } from '@/api/v2/operations-dashboards'
 import {
@@ -43,7 +47,7 @@ interface DashboardCardProps {
 }
 
 const FOOTER_BUTTON_CLASS =
-  'inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-lg bg-muted px-2 py-1.5 text-[11px] font-medium text-foreground transition-colors hover:bg-brand-soft hover:text-brand-ink disabled:pointer-events-none disabled:cursor-not-allowed disabled:text-[var(--color-text-tertiary)] disabled:opacity-60'
+  'inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-lg bg-muted px-2 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-brand-soft hover:text-brand-ink disabled:pointer-events-none disabled:cursor-not-allowed disabled:text-[var(--color-text-tertiary)] disabled:opacity-60 [@media(pointer:coarse)]:min-h-[44px]'
 
 export function DashboardCardView({
   dashboard,
@@ -115,7 +119,7 @@ export function DashboardCardView({
           <div className="min-w-0 flex-1">
             <div className="flex min-w-0 items-center gap-2">
               <h3
-                className="min-w-0 flex-1 truncate text-[15px] font-semibold leading-5 text-foreground"
+                className="min-w-0 flex-1 truncate text-sm font-semibold leading-5 text-foreground"
                 title={dashboard.name}
               >
                 {dashboard.name}
@@ -124,7 +128,7 @@ export function DashboardCardView({
                 <Badge variant="danger" data-testid="dashboard-missing-badge">已失效</Badge>
               )}
             </div>
-            <p className="mt-1 text-[11px] tabular-nums text-muted-foreground" title={`${time.label}：${formatDateTime(time.value)}`}>
+            <p className="mt-1 text-xs tabular-nums text-muted-foreground" title={`${time.label}：${formatDateTime(time.value)}`}>
               {timeText}
             </p>
           </div>
@@ -138,50 +142,58 @@ export function DashboardCardView({
         </p>
       </div>
       <footer className="mt-auto flex min-h-10 items-center gap-1.5 border-t border-border px-4 py-1.5">
-        {canWrite && (
-          <button type="button" onClick={onEdit} className={FOOTER_BUTTON_CLASS} aria-label={`信息 ${dashboard.name}`}>
-            <Pencil size={12} /> 信息
-          </button>
-        )}
-        {canWrite && (
-          <span
-            title={actionBlockReason ?? DASHBOARD_ORCHESTRATE_SECURITY_HINT}
-            data-testid="dashboard-orchestrate-entry"
-            className="inline-flex shrink-0"
-          >
+        <TooltipProvider delayDuration={300}>
+          {canWrite && (
+            <button type="button" onClick={onEdit} className={FOOTER_BUTTON_CLASS} aria-label={`编辑 ${dashboard.name}`}>
+              <Pencil size={12} /> 编辑
+            </button>
+          )}
+          {canWrite && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span
+                  data-testid="dashboard-orchestrate-entry"
+                  className="inline-flex shrink-0"
+                >
+                  <button
+                    type="button"
+                    onClick={onOrchestrate}
+                    disabled={actionsDisabled}
+                    className={FOOTER_BUTTON_CLASS}
+                    aria-label={`编排 ${dashboard.name}`}
+                  >
+                    <SlidersHorizontal size={12} /> 编排
+                  </button>
+                </span>
+              </TooltipTrigger>
+              <TooltipContent className="max-w-xs">
+                {actionBlockReason ?? DASHBOARD_ORCHESTRATE_SECURITY_HINT}
+              </TooltipContent>
+            </Tooltip>
+          )}
+          <span title={actionBlockReason ?? undefined} className="inline-flex shrink-0">
             <button
               type="button"
-              onClick={onOrchestrate}
+              onClick={onPreview}
               disabled={actionsDisabled}
               className={FOOTER_BUTTON_CLASS}
-              aria-label={`编排 ${dashboard.name}`}
+              aria-label={`预览 ${dashboard.name}`}
             >
-              <SlidersHorizontal size={12} /> 编排
+              <Eye size={12} /> 预览
             </button>
           </span>
-        )}
-        <span title={actionBlockReason ?? undefined} className="inline-flex shrink-0">
-          <button
-            type="button"
-            onClick={onPreview}
-            disabled={actionsDisabled}
-            className={FOOTER_BUTTON_CLASS}
-            aria-label={`预览 ${dashboard.name}`}
-          >
-            <Eye size={12} /> 预览
-          </button>
-        </span>
-        {canWrite && (
-          <button
-            type="button"
-            onClick={onDelete}
-            className="ml-auto shrink-0 rounded-lg p-1.5 text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-danger-bg)] hover:text-[var(--color-danger)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            title="删除看板"
-            aria-label={`删除看板 ${dashboard.name}`}
-          >
-            <Trash2 size={14} />
-          </button>
-        )}
+          {canWrite && (
+            <button
+              type="button"
+              onClick={onDelete}
+              className="ml-auto flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-[color-mix(in_srgb,var(--color-danger)_70%,transparent)] transition-colors hover:bg-[var(--color-danger-bg)] hover:text-[var(--color-danger)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
+              title="删除看板"
+              aria-label={`删除看板 ${dashboard.name}`}
+            >
+              <Trash2 size={14} />
+            </button>
+          )}
+        </TooltipProvider>
       </footer>
     </article>
   )

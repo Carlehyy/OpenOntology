@@ -10,6 +10,8 @@ import {
   dashboardTimeLabel,
   dashboardUpdatePayload,
   filterDashboards,
+  firstDashboardFormErrorTarget,
+  grafanaPathWithTheme,
   reorderDashboardIds,
   shouldShowMissingBadge,
   validateDashboardForm,
@@ -62,6 +64,34 @@ describe('监控看板表单校验（冻结契约 §4）', () => {
       icon: 'server',
       expected_revision: 7,
     })
+  })
+
+  it('客户端校验错误的焦点归还目标按 name → description → icon 顺序（F-02）', () => {
+    assert.equal(
+      firstDashboardFormErrorTarget({ name: '请输入看板名称', icon: '请选择看板图标' }),
+      'name',
+    )
+    assert.equal(firstDashboardFormErrorTarget({ description: '看板描述不能超过 500 个字符' }), 'description')
+    assert.equal(firstDashboardFormErrorTarget({ icon: '请选择看板图标' }), 'icon')
+    assert.equal(firstDashboardFormErrorTarget({}), null)
+  })
+})
+
+describe('Grafana 路径主题参数（F-09：预览/编排跟随平台明暗）', () => {
+  it('已有查询串用 & 追加，无查询串用 ?，theme 值跟随平台主题', () => {
+    assert.equal(
+      grafanaPathWithTheme('/grafana/d/x?orgId=1&kiosk', 'light'),
+      '/grafana/d/x?orgId=1&kiosk&theme=light',
+    )
+    assert.equal(grafanaPathWithTheme('/grafana/d/x?orgId=1', 'dark'), '/grafana/d/x?orgId=1&theme=dark')
+    assert.equal(grafanaPathWithTheme('/grafana/d/x', 'dark'), '/grafana/d/x?theme=dark')
+  })
+
+  it('不改动后端受控路径的其余部分', () => {
+    const path = '/grafana/d/oo-abc?orgId=1&kiosk'
+    const withTheme = grafanaPathWithTheme(path, 'light')
+    assert.ok(withTheme.startsWith(path))
+    assert.equal(withTheme.length, path.length + '&theme=light'.length)
   })
 })
 
