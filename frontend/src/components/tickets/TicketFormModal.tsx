@@ -270,7 +270,11 @@ export default function TicketFormModal({
           />
           {pageUrl && (
             <p className="mt-1.5 text-xs text-slate-400" title={pageUrl}>
-              将随工单记录当前页面：<span className="truncate font-mono">{pageUrl}</span>
+              将随工单记录当前页面：
+              {/* truncate 只对块级/inline-block 生效：纯行内 span 不会裁剪，
+                  长 hash 路由 URL 会撑破弹窗出现横向滚动条；inline-block +
+                  max-w-full 让超宽 URL 换行到标签下方并以省略号截断（完整值见 title 悬浮） */}
+              <span className="inline-block max-w-full truncate align-bottom font-mono">{pageUrl}</span>
             </p>
           )}
         </div>

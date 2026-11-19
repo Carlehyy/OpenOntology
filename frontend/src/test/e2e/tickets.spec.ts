@@ -193,7 +193,8 @@ test('弹窗内点击工单深链定位详情；Esc 关闭弹窗', async ({ page
 
 test('任意页面从弹窗提交工单：分类必选并自动携带当前页面地址', async ({ page }) => {
   const { calls } = await mockTickets(page)
-  await page.goto('/#/overview', { waitUntil: 'domcontentloaded' })
+  // hash 追加长参数：复现长页面地址下 URL 行的截断与横向溢出回归
+  await page.goto('/#/overview?pad=' + 'x'.repeat(140), { waitUntil: 'domcontentloaded' })
 
   await page.locator('button[aria-controls="global-ticket-popover"]').click()
   await page.locator('#global-ticket-popover').getByRole('button', { name: '提交工单' }).click()
@@ -201,6 +202,17 @@ test('任意页面从弹窗提交工单：分类必选并自动携带当前页�
   await expect(dialog).toBeVisible()
   // 弹窗内提示将记录当前页面
   await expect(dialog.getByText(/将随工单记录当前页面/)).toBeVisible()
+  // 长 URL 以省略号截断（inline-block 裁剪生效），弹窗滚动区不出现横向滚动条
+  const overflow = await dialog.evaluate(root => {
+    const urlSpan = root.querySelector('p[title] > span')
+    const scrollBox = root.querySelector('div[class*="max-h-[68vh]"]')
+    return {
+      urlTruncated: urlSpan ? urlSpan.scrollWidth > urlSpan.clientWidth : null,
+      noHorizontalScroll: scrollBox ? scrollBox.scrollWidth <= scrollBox.clientWidth + 1 : null,
+    }
+  })
+  expect(overflow.urlTruncated).toBe(true)
+  expect(overflow.noHorizontalScroll).toBe(true)
 
   // 未选分类时与其他必填项一次报齐
   await dialog.getByLabel('工单标题', { exact: false }).fill('悬浮助手遮挡按钮')
@@ -214,8 +226,8 @@ test('任意页面从弹窗提交工单：分类必选并自动携带当前页�
   await expect(page.locator('[data-sonner-toast]').filter({ hasText: '工单提交成功' })).toBeVisible()
   expect(calls.createdBodies).toHaveLength(1)
   expect(calls.createdBodies[0].category).toBe('experience')
-  // 提交页面 = 提交时所在页面完整地址（含 hash 路由）
-  expect(String(calls.createdBodies[0].pageUrl)).toMatch(/#\/overview$/)
+  // 提交页面 = 提交时所在页面完整地址（含 hash 路由与长参数，原样记录不截断值本身）
+  expect(String(calls.createdBodies[0].pageUrl)).toMatch(/#\/overview\?pad=x{140}$/)
 })
 
 test('反馈内容粘贴图片自动转附件并可预览；不支持的粘贴格式友好提示', async ({ page }) => {
