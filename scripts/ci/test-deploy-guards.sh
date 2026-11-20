@@ -3387,12 +3387,18 @@ fi
 printf 'ok deploy-runtime-source-exec-fail\n'
 
 timeout_log="$attestation_root/deploy-timeout.log"
+# Only time out the verifier; earlier optional-stack startup must stay healthy.
 if run_attestation_deploy "$timeout_log" "$attestation_source" 1 \
-    FAKE_TIMEOUT_TRIGGER=1; then
+    FAKE_TIMEOUT_TRIGGER_MATCH='exec -T backend python -c'; then
   printf 'deployment must fail when runtime source attestation times out\n' >&2
   exit 1
 fi
 grep -Fq 'runtime source attestation timed out after 1s' "$timeout_log"
+grep -Fq -- '--profile multica up -d multica multica-web' "$timeout_log.docker"
+if grep -Fq -- '--profile multica stop' "$timeout_log.docker"; then
+  printf 'verifier timeout must not interrupt Multica startup\n' >&2
+  exit 1
+fi
 if grep -Fq 'deployment succeeded' "$timeout_log"; then
   printf 'deployment must not log success after an attestation timeout\n' >&2
   exit 1
