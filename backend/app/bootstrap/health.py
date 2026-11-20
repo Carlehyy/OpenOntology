@@ -47,6 +47,7 @@ def readiness_response(
         "weknora": "unknown",
         "kaneo": "unknown",
         "grafana": "unknown",
+        "multica_default": "unknown",
         "sentinel_scheduler": "unknown",
         "sentinel_cdc": "unknown",
         "data_scheduler": "unknown",
@@ -171,6 +172,31 @@ def readiness_response(
     except Exception:
         checks["grafana"] = "unavailable"
 
+    # Multica 默认服务是可选的部署级默认集成：五项全空 = disabled；部分配置
+    # 显式 unavailable（partial 从不静默健康，也不发无意义探活）；配置完整时
+    # 经 multica_client 做真实可用性验证（PAT /api/me + 工作区可见性）。
+    # 生产环境只要配置了默认值（complete 或 partial）即进入 service_keys：
+    # 平台默认 profile 由这组设置派生并按用户默认自动选用（派生本身不做
+    # 实时网络验证），默认服务不可用必须让 readiness 503 暴露配置失败，
+    # 而不是把故障藏进每用户特性降级里。开发/测试保持 advisory。
+    multica_state = "unknown"
+    try:
+        from app.shared.dependency_probe import (
+            multica_default_config_state,
+            probe_multica_default,
+        )
+
+        multica_state = multica_default_config_state()
+        if multica_state == "complete":
+            probe_multica_default()
+            checks["multica_default"] = "ok"
+        else:
+            checks["multica_default"] = (
+                "disabled" if multica_state == "disabled" else "unavailable"
+            )
+    except Exception:
+        checks["multica_default"] = "unavailable"
+
     if is_production:
         # Reuse the pinned adapter's bounded status probe. It authenticates and
         # verifies the pinned version without exposing URL/password/error text.
@@ -283,6 +309,13 @@ def readiness_response(
         "kaneo",
         "grafana",
         *(("dbx",) if is_production else ()),
+        # A configured (or partially configured) deployment default is a
+        # production readiness boundary; all-empty stays legal and non-gating.
+        *(
+            ("multica_default",)
+            if is_production and multica_state != "disabled"
+            else ()
+        ),
         "sentinel_scheduler",
         "data_scheduler",
         "sentinel_cdc",

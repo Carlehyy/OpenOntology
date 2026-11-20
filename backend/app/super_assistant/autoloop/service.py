@@ -189,12 +189,18 @@ def event_out(db, row, *, detail=False):
 
 def _issue_url(db, owner_id, evidence):
     from app.super_assistant import multica_client, multica_service
-    config = multica_service.get_config(db, owner_id)
     issue = evidence.get("issue")
-    if not config or not config.base_url or not isinstance(issue, dict):
+    if not isinstance(issue, dict):
+        return None
+    reference = evidence.get("sourceRef")
+    base_url = reference.get("baseUrl") if isinstance(reference, dict) else None
+    if not base_url:
+        config = multica_service.get_config(db, owner_id)
+        base_url = config.base_url if config else None
+    if not base_url:
         return None
     try:
-        return multica_client.verified_issue_url(config.base_url, issue)
+        return multica_client.verified_issue_url(base_url, issue)
     except multica_client.MulticaClientError:
         return None
 

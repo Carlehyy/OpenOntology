@@ -125,6 +125,7 @@ Hub SQLite 完整备份、停写、全量解密校验和可恢复迁移机制就
 | WeKnora v0.9.0 | 原生知识库 Web 与超级助手托管只读 MCP 知识来源 | 服务或管理员初始化失败时阻断启动；未配置模型、知识库或 MCP 不影响基础服务启动 |
 | Kaneo 2.49.0 | 单用户项目管理原生 Web（独立账号与独立 PostgreSQL） | 服务、管理员初始化或实例状态探针失败时启动/readiness fail-closed；平台不降级、不用 mock 冒充 |
 | Hindsight 1.2.0（可选） | 超级助手长期记忆（profile `hindsight`，默认关闭） | 可选特性：不可达/未启用时记忆特性降级，聊天与全局 readiness 不受影响；不回退旧记忆实现 |
+| Multica 默认服务（默认启用） | 超级助手的部署级默认 Multica 集成（profile `multica` 默认启动；官方 v0.11.0 三服务栈 digest 钉扎） | 默认启用的 bundled 栈：启动失败只降级该特性（五值默认集未配置时）；五值默认集配置完整后生产 readiness 门禁 `multica_default`，部分配置 fail-closed；每用户自配 multica 集成不受影响 |
 
 ### WeKnora 共享知识库（v0.9.0）
 
@@ -492,6 +493,140 @@ embedding，还包括默认 reranker（`hindsight-ai/hs-rerank-1`）——`HF_HO
 `snapshot_download` embedding 一个 repo 就宣称离线可用——离线行为必须在
 staging 实测。rerank 中文效果未验证，属效果门禁。
 
+### Multica 默认服务（默认启用，可显式关闭）
+
+Multica 是超级助手的外部任务/智能体集成（每用户自配模式见「外部集成」
+设置页）。平台提供**默认启用的 bundled 官方栈**，并可额外提供一个
+**部署级默认集成**：五项 `MULTICA_DEFAULT_BASE_URL` /
+`MULTICA_DEFAULT_WEB_URL` / `MULTICA_DEFAULT_WORKSPACE_ID` /
+`MULTICA_DEFAULT_WORKSPACE_NAME` / `MULTICA_DEFAULT_PAT` 全部留空即未提供
+部署默认（bundled 栈照常运行，超级助手按每用户自配工作）；五项**必须全部
+填写**（all-or-nothing，部署脚本对部分填写 fail-closed），配置完整后生产
+`/health/ready` 的 `multica_default` 项用 PAT 真实探测（`/api/me` + workspace
+可见性）：未配置显示 `disabled`，部分配置或探测失败显示 `unavailable` 并
+**使生产 readiness 返回 503**（平台默认 profile 由这组设置派生并按用户默认
+自动选用，默认服务不可达是真实的配置失败，不藏在每用户特性降级里）；开发/
+测试环境该项仅 advisory。启动探针（`dependency_probe`）在**任何环境**都把
+`Multica default` 作为 advisory：bundled 栈在核心部署之后才启动，阻塞进程
+启动会自我死锁；生产收敛由 readiness 门禁保证。探测错误只含静态描述，
+绝不带 URL、PAT 或上游响应体。
+
+同一用户的 Multica 工作区 ID 不得跨 API 地址复用，因为 AutoLoop 用它区分
+任务历史。如果部署默认与该用户已有绑定（包括已删除配置的历史）冲突，该
+用户不会切到冲突的默认配置。可用的自定义配置和已冻结的任务来源不受影响。
+
+凭据与网络边界：
+
+- `MULTICA_DEFAULT_PAT` 是部署级密钥。Compose 掩码锚点把它对所有
+  `env_file` 服务置空，仅 `backend` 与 `pipeline_executor` 显式取回真值
+  （AutoLoop 派发消费与内核执行链路在 executor 内调用 Multica）；`task_worker`、
+  `migrate` 等保持空掩码。栈自身密钥 `MULTICA_JWT_SECRET` 与
+  `MULTICA_POSTGRES_PASSWORD` 同样被掩码锚点对全部平台 `env_file` 进程
+  置空（backend/executor 也不例外）。部署日志对三者 redact，任何页面/
+  日志/工单都不得回显。
+- Multica 内网地址允许清单是独立设置
+  `SUPER_ASSISTANT_MULTICA_INTERNAL_BASE_URLS`（逗号分隔 origin/路径
+  前缀），**刻意不与** `SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS` 共用：
+  开启 Multica 内网信任不扩大 MCP 的内网信任面，反之亦然。
+- 生产 `MULTICA_DEFAULT_WEB_URL`（设置时）必须是无凭据/路径/查询的绝对
+  http(s) origin 且浏览器可达公网 host（后端启动校验拒绝 loopback/
+  localhost）；`MULTICA_DEFAULT_BASE_URL` 允许内网 origin（bundled 部署
+  即 compose 内网地址）。部署脚本**不推导** WEB_URL：web 宿主端口默认只
+  绑 loopback（见下），按 `PUBLIC_TLS_IP` 推导出的明文 origin 既不可达
+  也不安全，必须由管理员显式给出。
+
+bundled 官方栈（`MULTICA_ENABLED` 留空/true 均启用，默认；仅显式 `false`
+关闭，关闭只停 bundled 容器、不删卷，外部 Multica 仍可配合五项默认值使用）：
+compose 提供上游 multica-ai/multica **v0.11.0**（commit
+`cb190810a659c1a61c4a86d9f6ecfc9df4b086d8`）官方自托管 Compose 的等价
+三服务栈，契约按下述证据核验：
+
+- 官方栈 = `pgvector/pgvector:pg17` + API 容器（`ghcr.io/multica-ai/
+  multica-backend`，容器内固定监听 8080，`GET /healthz`=ready、
+  `GET /health`=live，容器入口自动执行 `./migrate up` 再启动 server，
+  附件上传持久化卷挂 `/app/data/uploads`）+ web 容器
+  （`ghcr.io/multica-ai/multica-web`，容器内固定 3000，Next 服务端按
+  `REMOTE_API_URL` 代理 API/WS，浏览器只需访问 web origin）。
+- GHCR 只发布 `latest` tag，因此镜像引用是 **digest-only 钉扎**，digest
+  已与 v0.11.0 release 镜像的 OCI `org.opencontainers.image.revision`
+  （= `cb190810…`）/`version`（= `v0.11.0`）标签核验一致（多架构
+  amd64+arm64 index）：backend
+  `@sha256:099fd0d1eea8fc4cf03254c6dff86f7de206662ff71db8dc9a78e66726dd65a4`、
+  web `@sha256:ba8fd0fda94a9ec141e15d77e591db8ee4b246720a722d6f9dffd185ee48863b`、
+  postgres 复用平台既有 pgvector pg17 验证 digest。升级 = 重取新 release
+  digest 后整体替换；部署脚本 digest 门禁拒绝浮动引用。
+- 平台 API 服务名保留 `multica`（上游原名 `backend`），内网契约
+  `http://multica:8080`；postgres、API 与 web 三个容器都只在
+  `multica_internal` 私网，API 不挂 default 网——确要调用的 `backend`
+  与 `pipeline_executor`（AutoLoop 派发消费/内核执行链路）按既有钉扎网络清单另行加入
+  该专网（与 WeKnora/Kaneo/Hindsight 同构），default 网上的其余服务一律
+  不可达 Multica。`multica_internal` 是普通 bridge、刻意不设
+  `internal: true`：官方 backend 需要出站调用（配置 RESEND 时的验证
+  邮件、Multica 智能体调用管理员配置的模型服务），标成 internal 只会
+  破坏官方 web/agent 依赖而不增加真实隔离面（API 无宿主端口、web 默认
+  只绑 loopback 已界定暴露面）。生产仅
+  web 发布宿主端口（`MULTICA_WEB_PORT`，默认 18100），且**默认只绑
+  loopback**（`MULTICA_WEB_BIND_ADDR`，默认 `127.0.0.1`）：Multica web
+  自带账号登录与 PAT 铸造界面，**不得明文公网暴露**。管理员访问走 SSH
+  隧道（`ssh -L 18100:127.0.0.1:18100 <server>` 后开
+  `http://localhost:18100`），或由同宿主 TLS 反代把公开 HTTPS origin
+  （即 `MULTICA_DEFAULT_WEB_URL`）转发到 `127.0.0.1:18100`；反代在另一
+  台机器时才用 `MULTICA_WEB_BIND_ADDR` 显式改绑具体网卡 IP（必须保持在
+  TLS 反代之后）。API 容器不发布任何宿主端口；本地 compose 同样仅
+  loopback（web `MULTICA_WEB_LOOPBACK_PORT` 18100、API
+  `MULTICA_API_LOOPBACK_PORT` 18101），本地默认随 `.env` 的
+  `COMPOSE_PROFILES=multica` 启动（见 development/setup.md）。容器健康
+  检查用官方 `/healthz`；平台侧保留上文的真实 readiness 探测。
+- 栈自身密钥 `MULTICA_JWT_SECRET`（Multica 会话签名）与
+  `MULTICA_POSTGRES_PASSWORD` 与平台凭据无关：生产留空时由 deploy-prod.sh
+  生成强随机值写入服务器 `.env`；本地 compose 有开发兜底。所有 multica
+  变量在 compose 里都是默认值插值（无 `:?` 强制变量），profile 未激活时
+  `docker compose config` 与核心 up 永不被阻断；deploy-prod.sh 的 compose
+  调用固定 `COMPOSE_PROFILES=`（空），服务器 `.env` 里的同名值（如误拷
+  .env.example）不会把 multica 偷渡进核心 up。
+- 启动时机（与 Hindsight 不同，刻意在 readiness 门禁**之前**）：最终核心
+  `up -d` 成功后立即以单独的有界 `--profile multica` 调用启动
+  `multica multica-web` 并做有界 `/healthz` 健康等待，然后才进入 backend
+  readiness 循环——五项默认值配置完整时 readiness 会门禁 `multica_default`，
+  等就绪之后再启动会形成自我死锁。有界启动默认上界 300 秒
+  （`MULTICA_START_TIMEOUT`，与 Hindsight 的隔离启动先例一致——首次
+  部署须在该调用内拉满三个钉扎镜像，更短的上界会在慢链路首拉时超时）。
+  启动失败只停掉本次起了一半的容器（卷保留，下次部署重试，已拉取的
+  镜像层会被复用），不回滚已成功的核心 up；五值未配置时失败仅是
+  特性级告警，五值已配置时随后 readiness 如实判定部署失败。
+- 回滚边界：Multica 官方入口只在容器启动时执行 `./migrate up`，上游没有
+  经核验的 downgrade 路径。bundled 栈一旦启用并正常使用（账号/workspace/
+  PAT/任务数据已写入 `multica_pgdata`，附件已写入 `multica_uploads`），
+  回滚或降级以恢复**同恢复点的卷备份**为准（见
+  [备份与恢复](./backup-restore.md) 与 [回滚](./rollback.md)）；
+  仅在卷仍为空（从未注册使用）时才可直接回退镜像 digest 重启。
+
+**空卷初始化边界（平台绝不代写上游数据库）**：全新卷只会被官方入口
+自动建表（`./migrate up`），账号/PAT/workspace 三者没有任何受支持的
+自动播种——默认启用的 bundled 栈是"自动启动、手动初始化"，不是零配置
+可用。管理员手动步骤：
+
+1. 首启后打开 web 入口（生产先建 SSH 隧道或配好 TLS 反代，本地直接
+   `http://localhost:18100`），用邮箱注册首个账号——未配置 RESEND/
+   SMTP 时，验证码打印在 API 容器日志（`docker compose --profile
+   multica logs multica` 中的 `[DEV] Verification code` 行）；生产建议
+   配置邮件后再开放注册并收紧 `MULTICA_ALLOW_SIGNUP`。
+2. 在 Multica 内创建/选定 workspace，记下其 ID 与名称。
+3. 用该账号铸造 PAT：Multica 原生界面/API（`POST /api/tokens`），或
+   官方 CLI `multica login` 指向本部署（浏览器登录流自动 mint PAT）。
+4. 把五项默认值回填服务器 `.env`（或经受控 manifest 物化：vars
+   `PROD_MULTICA_DEFAULT_BASE_URL` / `PROD_MULTICA_DEFAULT_WEB_URL` /
+   `PROD_MULTICA_DEFAULT_WORKSPACE_ID` / `PROD_MULTICA_DEFAULT_WORKSPACE_NAME`
+   与 secret `PROD_MULTICA_DEFAULT_PAT`，同样 all-or-nothing）。bundled
+   部署的 `MULTICA_DEFAULT_BASE_URL` 缺省推导为 `http://multica:8080`，
+   `MULTICA_DEFAULT_WEB_URL` 必须显式给出（通常是 TLS 反代的 HTTPS
+   origin）。回填后下一次部署起生产 readiness 门禁 `multica_default`。
+
+部署脚本启用时校验：三个镜像 digest、JWT/DB 密钥非空且非开发兜底、
+五值 all-or-nothing、PAT ≥8 位且无空白、`MULTICA_WEB_PORT` 端口范围、
+`MULTICA_WEB_BIND_ADDR` 为 IP 字面量，以及两个 URL 的 origin 形态
+（完整五值时）。
+
 ### 集成数据集 dbx（生产）
 
 集成数据集的源登记与 schema 发现只使用固定版本 dbx；native PostgreSQL
@@ -764,7 +899,10 @@ backend 镜像依赖（requests/httpx/pandas/pymysql 等），脚本可直接发
 
 生产环境的 MCP、Remote Agent 和 Multica 外部端点默认要求 HTTPS，由
 `SUPER_ASSISTANT_EXTERNAL_HTTPS_REQUIRED`（默认 `true`）控制；development/test
-环境仍允许本地 HTTP fixture。切换既有生产集成前，应先迁移端点并执行外部回调、
+环境仍允许本地 HTTP fixture。内网例外分两份独立清单：MCP 用
+`SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS`，Multica 用
+`SUPER_ASSISTANT_MULTICA_INTERNAL_BASE_URLS`（见「Multica 默认服务」一节），
+两者互不扩大对方信任面。切换既有生产集成前，应先迁移端点并执行外部回调、
 凭据和证书验收。
 
 stdio 形态的 MCP 会在后端容器内以子进程运行 `command`，等同开放容器内命令

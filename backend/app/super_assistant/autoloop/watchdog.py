@@ -1,4 +1,13 @@
-"""Read complete evidence streams and reconcile durable human decision needs."""
+"""Read complete evidence streams and reconcile durable human decision needs.
+
+Every scan observes the effective (current-revision) workspace for discovery
+and additionally rechecks each unresolved historical source (at least the
+previous revision after an A→B switch) using the SAME frozen revision, so a
+profile switch cannot mix evidence identities across workspaces. Evidence
+from a foreign endpoint/workspace is isolated before anything is persisted,
+and per-source scans are bounded with least-recently-scanned-first rotation
+so open cards in old sources cannot starve.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -14,16 +23,24 @@ from app.model_configs.models import ModelConfig
 from app.shared.config import settings
 from app.shared.database import SessionLocal
 from app.super_assistant import multica_client, multica_service, provider
-from app.super_assistant.models import SuperAssistantMulticaConfig
+from app.super_assistant.models import (
+    SuperAssistantMulticaConfig,
+    SuperAssistantMulticaProfile,
+)
 
-from . import facts, planner, store
+from . import facts, planner, sourcing, store
 from .models import (
-    UNFINISHED, AutoLoopAction, AutoLoopActionStep, AutoLoopConsumedNeed,
-    AutoLoopDecision, AutoLoopIssueProgress, utcnow,
+    UNFINISHED, AutoLoopAction, AutoLoopActionStep,
+    AutoLoopConsumedNeed, AutoLoopDecision, AutoLoopIssueProgress, utcnow,
 )
 
 logger = logging.getLogger(__name__)
 _FAILURE_CAUSES = {"task_failed", "task_failure", "failure_recovery", "failed_task_recovery"}
+# Bounded scans: issues per source and historical sources per owner scan. The
+# least-recently-scanned-first ordering rotates the remainder into the next
+# scan instead of starving it.
+_ISSUES_PER_SOURCE = 50
+_HISTORICAL_SOURCES_PER_SCAN = 5
 
 
 def _instant(value):
@@ -32,6 +49,12 @@ def _instant(value):
         return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else None
     except (ValueError, TypeError):
         return None
+
+
+def _as_utc(value):
+    if value is None:
+        return None
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
 def _details(item):
@@ -163,20 +186,39 @@ def _assess(db, owner_id, workspace_id, issue, original):
     return result
 
 
+def _matches_decision_source(db, row, revision_id):
+    try:
+        _, expected = sourcing.resolve_decision_source(db, row.owner_id, row)
+    except multica_service.MulticaServiceError:
+        return False
+    return revision_id == expected
+
+
 def reconcile_issue(db, *, owner_id, workspace_id, issue, comments, timeline,
-                    messages, tasks, complete, assess=None):
-    """Reconcile evidence under one scope lock; optional assessment is read-only."""
+                    messages, tasks, complete, assess=None, source_ref=None):
+    """Reconcile evidence under one scope lock; optional assessment is read-only.
+
+    ``source_ref`` freezes the immutable Multica source (revision, endpoint and
+    workspace) the evidence was observed under into the card's evidence.
+    """
     reference = str(issue.get("identifier") or issue["id"])
     progress = store._lock_issue_scope(db, owner_id, workspace_id, reference)
     row = db.scalar(select(AutoLoopDecision).where(AutoLoopDecision.owner_id == owner_id,
         AutoLoopDecision.workspace_id == workspace_id, AutoLoopDecision.issue_key == reference,
         AutoLoopDecision.status.in_(UNFINISHED)).with_for_update().execution_options(populate_existing=True))
+    if row is not None and source_ref is not None and not _matches_decision_source(
+            db, row, source_ref.get("profileRevisionId")):
+        # Discovery can see a card from another revision of the same workspace.
+        # Only the card's own source may update its evidence or withdraw it.
+        return row
     for stream, items in (("comment", comments), ("timeline", timeline), ("message", messages)):
         progress = store.record_evidence(db, owner_id=owner_id, workspace_id=workspace_id,
             issue_key=reference, stream=stream, items=items,
             cursor={"strategy": "full_reread", "complete": complete,
                     "ids": sorted(str(item["id"]) for item in items)})
     if not complete:
+        # Skipped or truncated streams never prove absence; no withdrawal or
+        # terminal consumption may be claimed from an incomplete read.
         return row
     own_ids, unknown = _own_comments(db, owner_id, workspace_id, reference)
     selected = attention(issue, timeline)
@@ -184,6 +226,8 @@ def reconcile_issue(db, *, owner_id, workspace_id, issue, comments, timeline,
     evidence = {**watermark, "issue": issue,
         "factsSummary": f"{reference} 当前状态为 {issue.get('status', 'unknown')}，需要确认下一步。",
         "untrustedOriginal": {"issue": issue, "comments": comments, "timeline": timeline, "messages": messages}}
+    if source_ref:
+        evidence["sourceRef"] = source_ref
     reason = _followup(row, comments, timeline, own_ids, unknown, selected) if row else None
     if row and reason and row.source == "watchdog" and row.status == "open":
         try:
@@ -237,72 +281,217 @@ def reconcile_issue(db, *, owner_id, workspace_id, issue, comments, timeline,
     return row
 
 
+def _issue_recency(db, owner_id, workspace_id, issue_key, fallback):
+    """When the issue was last scanned; never-scanned issues order first."""
+    updated = db.scalar(select(AutoLoopIssueProgress.updated_at).where(
+        AutoLoopIssueProgress.owner_id == owner_id,
+        AutoLoopIssueProgress.workspace_id == workspace_id,
+        AutoLoopIssueProgress.issue_key == issue_key))
+    return _as_utc(updated) or _as_utc(fallback) or datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _unresolved_sources(db, owner_id, current_revision):
+    """Group cards by their proven revision and recheck the oldest first."""
+    rows = db.scalars(select(AutoLoopDecision).where(
+        AutoLoopDecision.owner_id == owner_id,
+        AutoLoopDecision.status.in_(UNFINISHED),
+        AutoLoopDecision.issue_key.is_not(None)))
+    groups: dict[str, dict] = {}
+    for row in rows:
+        try:
+            source, revision_id = sourcing.resolve_decision_source(db, owner_id, row)
+        except multica_service.MulticaServiceError:
+            continue  # ambiguous or revoked sources stay open for manual handling
+        if revision_id == current_revision:
+            continue  # rechecked by discovery
+        group = groups.setdefault(revision_id, {
+            "reference": sourcing.source_ref(source, revision_id), "issues": []})
+        group["issues"].append((_issue_recency(
+            db, owner_id, source.workspace_id, row.issue_key, row.created_at), row.issue_key))
+    for group in groups.values():
+        group["issues"].sort()
+    return sorted(groups.values(), key=lambda group: group["issues"][0])[:_HISTORICAL_SOURCES_PER_SCAN]
+
+
+def _recheck_issue(sessions, owner_id, base, workspace, secret, issue, reference, existing=None):
+    """Read one issue's streams under one source and reconcile the evidence.
+
+    ``existing`` is the set of unfinished issue keys in this workspace for the
+    discovery scan; a historical recheck treats every issue as existing. The
+    workspace of the returned issue is verified before anything is persisted,
+    so evidence from a foreign endpoint is isolated instead of recorded.
+    """
+    issue = facts.redact(issue, secret)
+    if str(issue.get("workspace_id") or issue.get("workspaceId") or "") != workspace:
+        return 0
+    identifier = str(issue.get("identifier") or issue["id"])
+    try:
+        timeline = multica_client.list_timeline(base, secret, workspace, identifier)
+        if issue.get("status") == "todo" and existing is not None and identifier not in existing:
+            # Ordinary todo stops here unless failure recovery is proven. Do not
+            # poll all todo comment/transcript histories.
+            if not attention(issue, timeline.items):
+                return 0
+        comments = multica_client.list_comments(base, secret, workspace, identifier)
+        active = multica_client.get_active_task(base, secret, workspace, identifier)
+        tasks = _task_ids(timeline.items + comments.items)
+        # The client contract is strictly the official {tasks: [...]} shape;
+        # no singleton response exists to fall back to.
+        tasks.update(str(item["id"]) for item in active["tasks"]
+                     if isinstance(item, dict) and item.get("id"))
+        messages, complete = [], timeline.complete and comments.complete
+        for task in sorted(tasks):
+            transcript = multica_client.list_task_messages(base, secret, workspace, task)
+            messages.extend(transcript.items)
+            complete = complete and transcript.complete
+        with sessions() as db:
+            owner = db.get(User, owner_id, populate_existing=True)
+            if not owner or not owner.is_active:
+                return 0
+            # Revalidate the exact source after I/O, including its revocation state.
+            try:
+                sourcing.resolve_reference(db, owner_id, reference)
+            except multica_service.MulticaServiceError:
+                return 0
+            reconcile_issue(db, owner_id=owner_id, workspace_id=workspace, issue=issue,
+                comments=facts.redact(comments.items, secret), timeline=facts.redact(timeline.items, secret),
+                messages=facts.redact(messages, secret), tasks=tasks, complete=complete,
+                assess=_assess, source_ref=reference)
+            db.commit()
+        return 1
+    except provider.DailyLimitExceeded:
+        raise
+    except Exception:
+        logger.warning("AutoLoop watchdog issue scan failed owner=%s issue=%s", owner_id, identifier)
+        return 0
+
+
+def _scan_discovery(sessions, owner_id, config, revision_id):
+    """Bounded discovery scan of the effective source's workspace."""
+    base, workspace = config.base_url, config.workspace_id
+    secret = multica_service.decrypt_token(config)
+    with sessions() as db:
+        rows = list(db.scalars(select(AutoLoopDecision).where(
+            AutoLoopDecision.owner_id == owner_id, AutoLoopDecision.workspace_id == workspace,
+            AutoLoopDecision.status.in_(UNFINISHED), AutoLoopDecision.issue_key.is_not(None))))
+        known = {row.issue_key for row in rows}
+        existing = {row.issue_key for row in rows if _matches_decision_source(db, row, revision_id)}
+        ordered = sorted(existing, key=lambda key: (
+            _issue_recency(db, owner_id, workspace, key, None), key))
+    read = multica_client.list_all_issues(base, secret, workspace)
+    if not read.complete:
+        return 0
+    present = {}
+    for issue in read.items:
+        identity = str(issue.get("identifier") or issue.get("id") or "")
+        if identity:
+            present.setdefault(identity, issue)
+    # Open cards first (least recently scanned first), then fresh candidates.
+    candidates = [present[key] for key in ordered if key in present]
+    candidates += [issue for identity, issue in present.items() if identity not in known]
+    reference = sourcing.source_ref(config, revision_id)
+    processed = 0
+    for issue in candidates[:_ISSUES_PER_SOURCE]:
+        identity = str(issue.get("identifier") or issue.get("id") or "")
+        if issue.get("status") not in {"blocked", "in_review", "todo"} and identity not in existing:
+            continue
+        processed += _recheck_issue(sessions, owner_id, base, workspace, secret,
+            issue, reference, existing)
+    return processed
+
+
+def _scan_source(sessions, owner_id, group):
+    """Bounded recheck of one historical source's unresolved issues."""
+    reference = group["reference"]
+    with sessions() as db:
+        try:
+            source = sourcing.resolve_reference(db, owner_id, reference)
+            secret = multica_service.decrypt_token(source)
+        except multica_service.MulticaServiceError:
+            return 0  # source unusable; the card stays open for manual handling
+        base, workspace = source.base_url, source.workspace_id
+    processed = 0
+    for _, issue_key in group["issues"][:_ISSUES_PER_SOURCE]:
+        try:
+            issue = multica_client.get_issue(base, secret, workspace, issue_key)
+        except provider.DailyLimitExceeded:
+            raise
+        except Exception:
+            logger.warning("AutoLoop watchdog issue read failed owner=%s issue=%s", owner_id, issue_key)
+            continue
+        if not isinstance(issue, dict) or not issue.get("id"):
+            continue
+        if issue_key not in {str(issue.get("id")), str(issue.get("identifier"))}:
+            continue
+        processed += _recheck_issue(sessions, owner_id, base, workspace, secret, issue, reference)
+    return processed
+
+
 def scan_owner(owner_id, *, session_factory=None):
     provider.ensure_autoloop_available()
     sessions = session_factory or SessionLocal
     with sessions() as db:
         owner = db.get(User, owner_id)
-        config = multica_service.active_config(db, owner_id)
-        if not owner or not owner.is_active or not config:
+        if not owner or not owner.is_active:
             return 0
-        base, workspace, secret = config.base_url, config.workspace_id, multica_service.decrypt_token(config)
-        existing = set(db.scalars(select(AutoLoopDecision.issue_key).where(
-            AutoLoopDecision.owner_id == owner_id, AutoLoopDecision.workspace_id == workspace,
-            AutoLoopDecision.status.in_(UNFINISHED), AutoLoopDecision.issue_key.is_not(None))))
-    read = multica_client.list_all_issues(base, secret, workspace)
-    if not read.complete:
-        return 0
+        # Scans observe the effective (current-revision) workspace for
+        # discovery; per-issue evidence and decisions stay keyed by the
+        # workspace they were created in, so a profile switch cannot mix
+        # identities across workspaces. Unresolved historical sources are
+        # rechecked separately with the SAME revision they were created under.
+        # Profile reads are pure: materialize deployment-default drift for
+        # this owner in the scan's own short pre-I/O write and commit it
+        # before any network read, so the user lock never spans provider
+        # calls and the revision identity this scan freezes is resolvable
+        # by the separate sessions that recheck each issue after the reads.
+        if multica_service.sync_deployment_default(db, owner_id):
+            db.commit()
+        current = multica_service.active_config(db, owner_id)
+        current_revision = str(current.profile_revision_id) if current is not None and current.profile_revision_id else None
+        groups = _unresolved_sources(db, owner_id, current_revision)
     processed = 0
-    for issue in read.items:
-        issue = facts.redact(issue, secret)
-        if (issue.get("workspace_id") or issue.get("workspaceId")) != workspace:
-            continue
-        reference = str(issue.get("identifier") or issue["id"])
-        if issue.get("status") not in {"blocked", "in_review", "todo"} and reference not in existing:
-            continue
+    if current is not None:
         try:
-            timeline = multica_client.list_timeline(base, secret, workspace, reference)
-            # Ordinary todo stops here unless failure recovery is proven. Do not
-            # poll all todo comment/transcript histories.
-            if issue.get("status") == "todo" and reference not in existing and not attention(issue, timeline.items):
-                continue
-            comments = multica_client.list_comments(base, secret, workspace, reference)
-            active = multica_client.get_active_task(base, secret, workspace, reference)
-            tasks = _task_ids(timeline.items + comments.items)
-            if isinstance(active.get("tasks"), list):
-                tasks.update(str(item["id"]) for item in active["tasks"] if isinstance(item, dict) and item.get("id"))
-            elif active.get("id"):
-                tasks.add(str(active["id"]))
-            messages, complete = [], timeline.complete and comments.complete
-            for task in sorted(tasks):
-                transcript = multica_client.list_task_messages(base, secret, workspace, task)
-                messages.extend(transcript.items)
-                complete = complete and transcript.complete
-            with sessions() as db:
-                # Recheck the owner and connector after remote reads.
-                current = multica_service.active_config(db, owner_id)
-                owner = db.get(User, owner_id, populate_existing=True)
-                if not owner or not owner.is_active or not current or (current.base_url, current.workspace_id) != (base, workspace):
-                    continue
-                reconcile_issue(db, owner_id=owner_id, workspace_id=workspace, issue=issue,
-                    comments=facts.redact(comments.items, secret), timeline=facts.redact(timeline.items, secret),
-                    messages=facts.redact(messages, secret), tasks=tasks, complete=complete, assess=_assess)
-                db.commit()
-            processed += 1
-        except provider.DailyLimitExceeded:
-            raise
-        except Exception:
-            logger.warning("AutoLoop watchdog issue scan failed owner=%s issue=%s", owner_id, reference)
+            processed += _scan_discovery(sessions, owner_id, current, current_revision)
+        except (multica_client.MulticaClientError, multica_service.MulticaServiceError):
+            logger.warning("AutoLoop watchdog effective source unavailable owner=%s", owner_id)
+    for group in groups:
+        processed += _scan_source(sessions, owner_id, group)
     return processed
+
+
+def _scan_owners(db):
+    """Owners to scan: enabled configs, default-profile users, unresolved
+    historical owners even when their active config is disabled, and — when
+    the deployment default is complete — every active user, so first-use
+    owners with no materialized profile rows are also reached."""
+    enabled = select(SuperAssistantMulticaConfig.owner_id).join(
+        User, User.id == SuperAssistantMulticaConfig.owner_id).where(
+            SuperAssistantMulticaConfig.enabled.is_(True), User.is_active.is_(True))
+    defaults = select(SuperAssistantMulticaProfile.owner_id).join(
+        User, User.id == SuperAssistantMulticaProfile.owner_id).where(
+            SuperAssistantMulticaProfile.kind == multica_service.PROFILE_KIND_PLATFORM_DEFAULT,
+            SuperAssistantMulticaProfile.deleted_at.is_(None), User.is_active.is_(True))
+    unresolved = select(AutoLoopDecision.owner_id).join(
+        User, User.id == AutoLoopDecision.owner_id).where(
+            AutoLoopDecision.status.in_(UNFINISHED), User.is_active.is_(True))
+    owners = (set(db.scalars(enabled)) | set(db.scalars(defaults))
+              | set(db.scalars(unresolved)))
+    if all(multica_service._platform_default_settings().values()):
+        # A complete deployment default serves every active user even before
+        # any request materialized their platform profile; enumerate them so
+        # the automatic scan reaches first-use owners instead of waiting for
+        # an earlier settings read. Same completeness predicate as the
+        # config service; settings-only, no network or write here.
+        owners |= set(db.scalars(select(User.id).where(User.is_active.is_(True))))
+    return owners
 
 
 def scan_watchdog(*, session_factory=None):
     provider.ensure_autoloop_available()
     sessions = session_factory or SessionLocal
     with sessions() as db:
-        owners = list(db.scalars(select(SuperAssistantMulticaConfig.owner_id).join(
-            User, User.id == SuperAssistantMulticaConfig.owner_id).where(
-                SuperAssistantMulticaConfig.enabled.is_(True), User.is_active.is_(True))))
+        owners = sorted(_scan_owners(db))
     processed = 0
     for owner in owners:
         try:

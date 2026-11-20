@@ -11,28 +11,36 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.auth.models import User
 from app.deps import get_current_user, get_db
 from app.model_configs.models import ModelConfig
-from app.shared.encryption import encrypt
-from app.super_assistant import multica_client, provider
-from app.super_assistant.models import SuperAssistantMulticaConfig
-from app.super_assistant.autoloop import dispatching, planner, routing, schemas, service, store, templates, watchdog, worker
+from app.super_assistant import multica_client, multica_service, provider
+from app.super_assistant.autoloop import dispatching, planner, routing, schemas, service, sourcing, store, templates, watchdog, worker
 from app.super_assistant.autoloop.models import (
     AutoLoopAction, AutoLoopActionStep, AutoLoopDecision, AutoLoopDispatch,
     AutoLoopEvent, AutoLoopEvidence, AutoLoopRule, utcnow,
 )
 from app.super_assistant.autoloop.router import router
+from app.super_assistant.models import (
+    SuperAssistantMulticaConfig,
+    SuperAssistantMulticaProfile,
+    SuperAssistantMulticaProfileRevision,
+)
+from app.super_assistant.schemas import MulticaConfigUpdate
+
+BASE_A = "http://127.0.0.1:18002"
+TOKEN_A = "isolated-fixture-token"
 
 
 @pytest.fixture
 def feature_sessions(pg_engine):
     # The fixture owns a disposable schema on the reserved real PostgreSQL.
-    SuperAssistantMulticaConfig.__table__.create(pg_engine, checkfirst=True)
-    ModelConfig.__table__.create(pg_engine, checkfirst=True)
+    for table in (SuperAssistantMulticaConfig, SuperAssistantMulticaProfile,
+                  SuperAssistantMulticaProfileRevision, ModelConfig):
+        table.__table__.create(pg_engine, checkfirst=True)
     return sessionmaker(bind=pg_engine, expire_on_commit=False)
 
 
@@ -42,11 +50,14 @@ def owner(feature_sessions):
     with feature_sessions() as db:
         db.add(User(id=identity, username=identity, email=f"{identity}@test.invalid",
                     password_hash="fixture-no-login", is_active=True))
-        db.flush()
-        db.add(SuperAssistantMulticaConfig(owner_id=identity, base_url="http://127.0.0.1:18002",
-            workspace_id="workspace-a", token_encrypted=encrypt("isolated-fixture-token"), enabled=True))
         db.commit()
+        multica_service.save_config(db, identity, MulticaConfigUpdate(
+            base_url=BASE_A, workspace_id="workspace-a", token=TOKEN_A, enabled=True))
     return identity
+
+
+def _resolve(owner_id):
+    return lambda session, row: sourcing.resolve_decision_source(session, owner_id, row)
 
 
 def _rule(**changes):
@@ -174,7 +185,7 @@ def test_decision_worker_completes_only_required_steps_once(feature_sessions, ow
         identity, version = row.id, row.content_version
         store.submit_decision(db, owner_id=owner, decision_id=identity, actor_id=owner,
             expected_content_version=version, idempotency_key="answer", option_id="continue",
-            connector_base_url="http://127.0.0.1:18002")
+            source_resolver=_resolve(owner))
         db.commit()
     assert worker.scan_actions(session_factory=feature_sessions) == len(expected)
     assert worker.scan_actions(session_factory=feature_sessions) == 0
@@ -206,7 +217,7 @@ def test_timeout_keeps_identity_unknown_and_does_not_resend(feature_sessions, ow
         identity = row.id
         store.submit_decision(db, owner_id=owner, decision_id=identity, actor_id=owner,
             expected_content_version=row.content_version, idempotency_key="answer", option_id="continue",
-            connector_base_url="http://127.0.0.1:18002")
+            source_resolver=_resolve(owner))
         db.commit()
     worker.scan_actions(session_factory=feature_sessions)
     worker.scan_actions(session_factory=feature_sessions)
@@ -319,7 +330,7 @@ def _submit(sessions, owner_id, source="watchdog", issue="TASK-1"):
         identity, version = row.id, row.content_version
         _, request, _ = store.submit_decision(db, owner_id=owner_id, decision_id=identity,
             actor_id=owner_id, expected_content_version=version, idempotency_key="answer",
-            option_id="continue", connector_base_url="http://127.0.0.1:18002")
+            option_id="continue", source_resolver=_resolve(owner_id))
         accepted = service.decision_result(db, row, request, replay=False)
         db.commit()
     return identity, version, accepted
@@ -379,25 +390,26 @@ def test_partial_failure_retries_original_step_and_never_repeats_confirmed_step(
     assert len(writes) == 2
 
 
-def test_failed_retry_is_bounded_and_connector_change_never_sends(feature_sessions, owner, monkeypatch):
+def test_failed_retry_is_bounded_and_revoked_source_never_sends(feature_sessions, owner, monkeypatch):
     writes = []
     monkeypatch.setattr(multica_client, "get_issue", _remote_issue)
     def rejected(*args, **kwargs):
         writes.append(kwargs)
         raise multica_client.MulticaRequestError("rate limited", outcome="failed", status_code=429)
     monkeypatch.setattr(multica_client, "create_comment", rejected)
-    _submit(feature_sessions, owner)
+    identity, _, _ = _submit(feature_sessions, owner)
     for _ in range(5):
         worker.scan_actions(session_factory=feature_sessions)
     assert len(writes) == 3
     with feature_sessions() as db:
         step = db.scalar(select(AutoLoopActionStep))
         assert step.state == "failed" and step.attempts == 3
-    identity, _, _ = _submit(feature_sessions, owner, issue="TASK-2")
-    with feature_sessions() as db:
-        db.scalar(select(SuperAssistantMulticaConfig)).base_url = "http://127.0.0.1:18003"
+        # Revoking the frozen source makes every later attempt fail closed
+        # before any write; the active profile is never borrowed instead.
+        db.execute(update(SuperAssistantMulticaProfileRevision).values(revoked_at=utcnow()))
         db.commit()
-    worker.scan_actions(session_factory=feature_sessions)
+    for _ in range(2):
+        worker.scan_actions(session_factory=feature_sessions)
     with feature_sessions() as db:
         assert db.get(AutoLoopDecision, identity).status == "writeback_failed"
     assert len(writes) == 3
@@ -660,7 +672,7 @@ def test_connector_success_echoes_cannot_persist_pat_or_extra_response_fields(fe
         assert secret not in json.dumps([event.data for event in db.scalars(select(AutoLoopEvent))])
 
 
-def test_schedule_thread_binding_reuses_created_issue_and_rejects_connector_change(feature_sessions, owner, monkeypatch):
+def test_schedule_thread_binding_reuses_created_issue_and_rejects_connector_drift(feature_sessions, owner, monkeypatch):
     from app.super_assistant.autoloop.models import AutoLoopBinding
 
     monkeypatch.setattr(multica_client, "create_issue", lambda *a, **kw: _remote_issue())
@@ -687,14 +699,19 @@ def test_schedule_thread_binding_reuses_created_issue_and_rejects_connector_chan
     with feature_sessions() as db:
         binding = db.scalar(select(AutoLoopBinding))
         assert binding.source_scope == "schedule:" + task_id and binding.source_thread == task_id
-        assert binding.provenance == {"kind": "created_issue", "baseUrl": "http://127.0.0.1:18002"}
+        assert binding.provenance["kind"] == "created_issue"
+        assert binding.provenance["baseUrl"] == BASE_A
+        assert binding.provenance["profileRevisionId"]
     second_event, second = admit()
     dispatching.process_dispatch(second, session_factory=feature_sessions)
     with feature_sessions() as db:
         action = db.scalar(select(AutoLoopAction).where(AutoLoopAction.event_id == second_event))
         step = db.scalar(select(AutoLoopActionStep).where(AutoLoopActionStep.action_id == action.id))
         assert step.kind == "issue.comment" and step.request_payload["issueRef"] == "TASK-1"
-        db.scalar(select(SuperAssistantMulticaConfig)).base_url = "http://127.0.0.1:18003"
+        # Enrollment keeps one endpoint per workspace, so a live connector
+        # change cannot occur; simulate persisted provenance drift instead.
+        binding = db.scalar(select(AutoLoopBinding))
+        binding.provenance = {**binding.provenance, "baseUrl": "http://127.0.0.1:18003"}
         db.commit()
     third_event, third = admit()
     dispatching.process_dispatch(third, session_factory=feature_sessions)

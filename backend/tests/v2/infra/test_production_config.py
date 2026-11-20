@@ -294,6 +294,113 @@ def test_kaneo_internal_contract_rejects_malformed_values():
     assert "KANEO_BASE_URL must be an absolute HTTP(S) origin" in bad_origin
 
 
+# ---------------------------------------------------------------------------
+# Multica deployment-default settings (optional, all-or-nothing)
+
+_MULTICA_DEFAULT_COMPLETE = {
+    "multica_default_base_url": "https://multica.example.com",
+    "multica_default_web_url": "https://multica.example.com",
+    "multica_default_workspace_id": "11111111-1111-1111-1111-111111111111",
+    "multica_default_workspace_name": "平台默认工作区",
+    "multica_default_pat": "synthetic-multica-pat-0123456789",
+}
+
+
+def _multica_default(**overrides):
+    values = dict(_MULTICA_DEFAULT_COMPLETE)
+    values.update(overrides)
+    return values
+
+
+def test_production_accepts_unconfigured_multica_default():
+    """All five values empty is the legal "no deployment default" state."""
+    assert production_config_errors(_production_settings()) == []
+
+
+def test_production_accepts_complete_multica_default_configuration():
+    assert production_config_errors(
+        _production_settings(**_multica_default())
+    ) == []
+
+
+def test_production_allows_internal_origin_for_multica_default_base_url():
+    """BASE_URL 常态是 compose 内网地址；公网约束只作用于浏览器入口。"""
+    assert production_config_errors(_production_settings(
+        **_multica_default(multica_default_base_url="http://multica:3000")
+    )) == []
+
+
+def test_multica_default_pat_is_mask_aware_and_never_globally_required():
+    """task_worker/本地 migrate 从 env_file 继承四个非密钥值，而 compose 掩码
+    锚点把 PAT 合法置空：全局生产校验不得让这些无关进程启动即崩
+    （KANEO_ADMIN_PASSWORD 同构先例）。五值完整契约由 deploy-prod.sh 部署期
+    all-or-nothing 校验与 backend readiness（partial → unavailable/503）收口。"""
+    assert production_config_errors(_production_settings(
+        **_multica_default(multica_default_pat="")
+    )) == []
+
+
+@pytest.mark.parametrize(
+    "missing_key",
+    [
+        "multica_default_base_url",
+        "multica_default_web_url",
+        "multica_default_workspace_id",
+        "multica_default_workspace_name",
+    ],
+    ids=["base-url", "web-url", "workspace-id", "workspace-name"],
+)
+def test_production_rejects_partial_multica_default(missing_key):
+    """部分默认值绝不静默健康：非密钥值必须 all-or-nothing。"""
+    errors = production_config_errors(_production_settings(
+        **_multica_default(**{missing_key: ""})
+    ))
+    assert any(
+        "MULTICA_DEFAULT_* values must be all set or all empty" in error
+        for error in errors
+    )
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://user:pass@multica.example.com",
+        "https://multica.example.com/api",
+        "https://multica.example.com/?ws=1",
+        "ftp://multica.example.com",
+    ],
+    ids=["credentials", "path", "query", "scheme"],
+)
+def test_production_rejects_malformed_multica_default_base_url(base_url):
+    errors = production_config_errors(_production_settings(
+        **_multica_default(multica_default_base_url=base_url)
+    ))
+    assert any(
+        error.startswith("MULTICA_DEFAULT_BASE_URL must") for error in errors
+    )
+
+
+@pytest.mark.parametrize(
+    "web_url",
+    [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://multica:3000",
+        "https://multica.example.com/signin",
+        "https://user:pass@multica.example.com",
+    ],
+    ids=["localhost", "loopback", "compose-service", "path", "credentials"],
+)
+def test_production_rejects_non_public_multica_default_web_url(web_url):
+    """WEB_URL 是浏览器入口：必须是公网可达 origin，不得指向本机/容器内网。"""
+    errors = production_config_errors(_production_settings(
+        **_multica_default(multica_default_web_url=web_url)
+    ))
+    assert any(
+        error.startswith("MULTICA_DEFAULT_WEB_URL must") for error in errors
+    )
+
+
 def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
     compose = yaml.safe_load((ROOT / "docker-compose.prod.yml").read_text())
     backend = compose["services"]["backend"]
@@ -338,6 +445,9 @@ def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
     assert backend["networks"] == [
         "default", "dbx_bridge", "weknora_internal", "kaneo_internal",
         "hindsight_internal", "grafana_internal",
+        # Multica 默认栈专网：backend（与 pipeline_executor）加入
+        # multica_internal 调用官方 API；multica 容器本身不挂 default 网。
+        "multica_internal",
     ]
     assert compose["networks"]["hindsight_internal"] == {"driver": "bridge"}
     assert "hindsight" not in backend["depends_on"]

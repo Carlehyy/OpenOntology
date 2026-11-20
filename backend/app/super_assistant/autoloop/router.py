@@ -9,8 +9,9 @@ from sqlalchemy.orm import Session
 
 from app.auth.models import User
 from app.deps import get_current_user, get_db
+from app.super_assistant import multica_service
 
-from . import schemas, service, store, templates
+from . import schemas, service, sourcing, store, templates
 
 router = APIRouter(prefix="/autoloop")
 
@@ -23,6 +24,12 @@ def _errors(db):
         db.rollback()
         raise HTTPException(status_code=exc.http_status,
             detail={"code": exc.code, "current": exc.current}) from exc
+    except multica_service.MulticaServiceError as exc:
+        db.rollback()
+        # The card's immutable source is unusable; the answer cannot be bound
+        # to a different source, so the submission is refused, not retargeted.
+        raise HTTPException(status_code=409,
+            detail={"code": "decision_source_unavailable"}) from exc
     except templates.RenderError as exc:
         db.rollback()
         raise HTTPException(status_code=422, detail={"code": exc.code, "message": str(exc)}) from exc
@@ -123,12 +130,20 @@ def get_decision(identity: str, db: Session = Depends(get_db), current_user: Use
 def decide(identity: str, body: schemas.Decide, response: Response, db: Session = Depends(get_db),
            current_user: User = Depends(get_current_user)):
     with _errors(db):
-        from app.super_assistant import multica_service
-        config = multica_service.active_config(db, current_user.id)
+        def resolve_source(session, row):
+            # The card's frozen source (or its workspace's unique source for
+            # legacy cards) is resolved inside submit_decision only after the
+            # idempotent replay check, so a replay stays successful even when
+            # the source has since become unavailable. Profile reads are pure:
+            # materialize deployment-default drift in the same caller-owned
+            # write first, so unlinked cards keep finding the default source.
+            multica_service.sync_deployment_default(session, current_user.id)
+            return sourcing.resolve_decision_source(session, current_user.id, row)
+
         row, request, replay = store.submit_decision(db, owner_id=current_user.id, decision_id=identity,
             actor_id=current_user.id, expected_content_version=body.expectedContentVersion,
             idempotency_key=body.idempotencyKey, option_id=body.optionId, free_text=body.freeText,
-            connector_base_url=config.base_url if config else "")
+            source_resolver=resolve_source)
         result = service.decision_result(db, row, request, replay=replay)
         db.commit()
         response.status_code = 200 if replay else 202

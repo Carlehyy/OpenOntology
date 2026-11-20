@@ -114,6 +114,12 @@ class ExecutionCall(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="offered")
     outcome: Mapped[str] = mapped_column(String(32), nullable=False, default="not_sent")
     remote_task_ref: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    # Multica profile revision this Call was bound to at creation time.  Null
+    # covers legacy rows and deployments without the profile-revision service;
+    # those Calls keep the historical active-config semantics.  A bound Call
+    # must resolve its config through the immutable revision and never falls
+    # back to the currently active profile.
+    multica_profile_revision_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     next_reconcile_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     reconcile_attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     remote_observed_state_ref: Mapped[str | None] = mapped_column(String(1000), nullable=True)

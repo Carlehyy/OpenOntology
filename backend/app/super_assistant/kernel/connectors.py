@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -16,11 +17,214 @@ import httpx
 
 from .contracts import ContractError
 
+logger = logging.getLogger(__name__)
+
 
 class TrustLevel(StrEnum):
     PLATFORM = "platform"
     VERIFIED = "verified"
     USER_UNTRUSTED = "user_untrusted"
+
+
+# Multica tool targets routed through the service-layer channel.  Calls on
+# these targets can bind an immutable Multica profile revision as their
+# execution source.
+MULTICA_TOOL_KEYS = frozenset({"multica_list_agents", "multica_list_tasks", "multica_create_task"})
+
+_MULTICA_REF_SOURCE_KEYS = ("profile_revision_id", "base_url", "workspace_id")
+
+
+def multica_ref_metadata(remote_task_ref: str | None) -> dict[str, str] | None:
+    """Profile-source metadata embedded in a Multica ``remote_task_ref``.
+
+    Returns ``None`` for legacy references (or unparseable payloads) that carry
+    no unique source; callers decide their own fail-closed policy for those.
+    Extra keys are ignored by the service-side parser, so enrichment stays
+    backward compatible.
+    """
+    if not remote_task_ref:
+        return None
+    try:
+        value = json.loads(remote_task_ref)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    metadata = {key: str(value[key]) for key in _MULTICA_REF_SOURCE_KEYS if value.get(key)}
+    return metadata or None
+
+
+def multica_config_for(
+    db, owner_id: str, revision_id: str | None = None, *,
+    base_url: str | None = None, workspace_id: str | None = None,
+):
+    """Resolve the Multica source a Call/step must use, or ``None`` (fail closed).
+
+    - ``revision_id``: the immutable bound source via ``config_for_revision``.
+      Retired revisions and soft-deleted profiles still resolve; revoked or
+      unusable revisions do not, and the active profile is never borrowed.
+    - ``base_url`` + ``workspace_id``: endpoint/workspace evidence carried by
+      an old reference resolves through ``config_for_source`` — the latest
+      usable unrevoked revision of exactly that source; credential ambiguity
+      raises instead of guessing.
+    - otherwise: the legacy ``active_config`` row (``None`` when unconfigured).
+
+    Service refusals are translated to ``None`` so every caller (kernel
+    closures, autoloop worker/watchdog/routing) fails closed instead of
+    silently switching to a different source.
+    """
+    from app.super_assistant import multica_service
+
+    try:
+        if revision_id:
+            return multica_service.config_for_revision(db, owner_id, str(revision_id))
+        if base_url and workspace_id:
+            return multica_service.config_for_source(
+                db, owner_id, base_url=base_url, workspace_id=workspace_id,
+            )
+        return multica_service.active_config(db, owner_id)
+    except multica_service.MulticaServiceError:
+        return None
+
+
+def multica_token(config) -> str:
+    """Usable PAT for a live config row or an immutable revision snapshot."""
+    from app.super_assistant import multica_service
+
+    return multica_service.decrypt_token(config)
+
+
+def stable_manifest_hash(value: dict) -> str:
+    """The one manifest-digest formula for frozen capability snapshots.
+
+    Lives in the lowest kernel layer so both the Multica digest below and
+    ``runtime._external_config_hash`` (MCP/remote-agent manifests) share a
+    single implementation without any resolver-layer import cycle.  The exact
+    serialization is contract: rows already persisted by earlier code must
+    keep matching byte for byte.
+    """
+    import hashlib
+
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+
+
+def multica_config_digest_value(config) -> str:
+    """Stable capability digest for a live config row or revision snapshot.
+
+    Hashes exactly the historical multica manifest fields — kind, endpoint,
+    workspace, stored credential — with raw column values, so capability
+    snapshots persisted by pre-upgrade code keep matching byte for byte.
+    The digest covers only these fields: it is not proof of workspace_name,
+    ``enabled`` or any other projection column.  Both config rows and
+    revision snapshots expose the same three attributes.
+    """
+    return stable_manifest_hash({
+        "kind": "multica",
+        "base_url": config.base_url,
+        "workspace_id": config.workspace_id,
+        "token": config.token_encrypted,
+    })
+
+
+def verify_multica_ref_source(remote_task_ref: str | None, config, revision_id: str | None = None) -> None:
+    """Fail closed when a provider reference belongs to a different source.
+
+    Cross-workspace identity check: once a reference records the profile it was
+    created under, a later query/cancel must resolve that exact profile.  A
+    mismatch raises instead of guessing, so an issue identity can never be
+    replayed against a workspace it does not belong to.
+    """
+    metadata = multica_ref_metadata(remote_task_ref)
+    if metadata is None:
+        return
+    if revision_id and metadata.get("profile_revision_id") and metadata["profile_revision_id"] != str(revision_id):
+        raise ContractError("multica remote reference belongs to a different profile revision")
+    workspace = metadata.get("workspace_id")
+    if workspace and workspace != str(config.workspace_id or ""):
+        raise ContractError("multica remote reference belongs to a different workspace")
+    base = metadata.get("base_url")
+    if base and base != str(config.base_url or ""):
+        raise ContractError("multica remote reference belongs to a different service endpoint")
+
+
+def _multica_ref_identity(remote_task_ref: str | None) -> dict[str, Any] | None:
+    """Parse a Multica-shaped reference body, or ``None`` for anything else."""
+    if not remote_task_ref:
+        return None
+    try:
+        value = json.loads(remote_task_ref)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) and value.get("issue_ref") else None
+
+
+def multica_learned_remote_ref(call, candidate: str | None) -> str:
+    """Classify a query observation's reference against its Call.
+
+    A Multica query can learn the original run/task id (and the provider's
+    immutable issue id) that the issue-create response could not carry; the
+    service returns the enriched ``remote_task_ref`` with the observation.
+    Returns one of three durable decisions:
+
+    - ``"adopted"`` — the candidate preserves the identity the Call already
+      records (same issue, same task run once pinned, same profile source)
+      and adds information; ``call.remote_task_ref`` was updated.
+    - ``"noop"`` — nothing to decide: identical reference, a non-Multica
+      (opaque) candidate or Call reference, or a Call without a reference.
+      Identity is enriched, never invented; the observation stays applicable.
+    - ``"rejected"`` — the candidate is Multica-shaped but contradicts the
+      pinned identity (a rerun's task id, a foreign issue, a different
+      revision/endpoint/workspace, a dropped pinned identity).  The
+      observation describes a different remote execution and must be dropped
+      without applying its state: a wrong task's status must never close or
+      fail the original Call.
+    """
+    learned = _multica_ref_identity(candidate)
+    current = _multica_ref_identity(call.remote_task_ref)
+    if learned is None or current is None:
+        # Only Multica-shaped references are learned, and only onto a Call
+        # that already holds one: identity must be enriched, never invented.
+        return "noop"
+    # Once an immutable provider identity is pinned it can never be replaced
+    # or dropped; only enrichment of missing keys is accepted.
+    for key in ("task_id", "issue_id"):
+        held = current.get(key)
+        if held is not None and learned.get(key) != held:
+            logger.warning(
+                "rejecting multica remote_task_ref update: pinned %s changed for call=%s",
+                key, getattr(call, "id", "?"),
+            )
+            return "rejected"
+    # Issue identity: the immutable issue id proves the same issue (a renamed
+    # identifier alias is accepted); without it the identifier must match.
+    if not (current.get("issue_id") and learned.get("issue_id")):
+        if str(learned["issue_ref"]) != str(current["issue_ref"]):
+            logger.warning(
+                "rejecting multica remote_task_ref update: issue identity changed for call=%s",
+                getattr(call, "id", "?"),
+            )
+            return "rejected"
+    current_source = multica_ref_metadata(call.remote_task_ref) or {}
+    learned_source = multica_ref_metadata(candidate) or {}
+    for key in _MULTICA_REF_SOURCE_KEYS:
+        if current_source.get(key) and learned_source.get(key) != current_source.get(key):
+            logger.warning(
+                "rejecting multica remote_task_ref update: source %s changed for call=%s",
+                key, getattr(call, "id", "?"),
+            )
+            return "rejected"
+    bound = getattr(call, "multica_profile_revision_id", None)
+    if bound and learned_source.get("profile_revision_id") and learned_source["profile_revision_id"] != str(bound):
+        logger.warning(
+            "rejecting multica remote_task_ref update: revision differs from call binding for call=%s",
+            getattr(call, "id", "?"),
+        )
+        return "rejected"
+    updated = str(candidate)
+    if updated == str(call.remote_task_ref):
+        return "noop"
+    call.remote_task_ref = updated
+    return "adopted"
 
 
 class SessionPolicy(StrEnum):
@@ -421,6 +625,13 @@ class MulticaToolConnector:
     cancel_executor: Callable[[str], Mapping[str, Any]] | None = field(default=None, compare=False, repr=False)
     revision: int = 1
     manifest_hash: str | None = None
+    # Immutable Multica profile snapshot the owning Call was bound to.  The
+    # closures are constructed by the runtime against exactly this source, so
+    # query/cancel/execute never silently retarget a waiting Call to the
+    # currently active profile.  None keeps the legacy active-config semantics.
+    profile_revision_id: str | None = None
+    profile_base_url: str | None = field(default=None, compare=False)
+    profile_workspace_id: str | None = field(default=None, compare=False)
 
     def descriptor(self) -> AgentDescriptor:
         return AgentDescriptor(
@@ -436,6 +647,25 @@ class MulticaToolConnector:
             supports_query_status=self.query_executor is not None,
             supports_artifact=False,
         )
+
+    def _bound_remote_ref(self, remote_ref: Any) -> str:
+        """Attach the profile source metadata to a fresh provider reference."""
+        if not self.profile_revision_id or not isinstance(remote_ref, str):
+            return str(remote_ref)
+        try:
+            value = json.loads(remote_ref)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            # An unparseable provider reference is preserved verbatim; the
+            # kernel never invents identity metadata it cannot verify.
+            return remote_ref
+        if not isinstance(value, dict):
+            return remote_ref
+        value.setdefault("profile_revision_id", str(self.profile_revision_id))
+        if self.profile_base_url:
+            value.setdefault("base_url", str(self.profile_base_url))
+        if self.profile_workspace_id:
+            value.setdefault("workspace_id", str(self.profile_workspace_id))
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
     async def invoke(self, *, run_id: str, call_id: str, input_ref: str, deadline) -> Mapping[str, Any]:
         try:
@@ -475,7 +705,7 @@ class MulticaToolConnector:
                     "call_id": call_id,
                     "status": status,
                     "content": str(parsed.get("note") or content),
-                    "remote_task_ref": str(remote_ref),
+                    "remote_task_ref": self._bound_remote_ref(remote_ref),
                     "provider_status": provider_status,
                 }
         return {

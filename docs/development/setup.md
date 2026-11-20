@@ -109,6 +109,8 @@ API、executor 和前端都启动后，再由管理员登录“模型配置”�
   运行的 backend/Vite 使用）；本地 Compose 内 vite 容器经
   `GRAFANA_PROXY_TARGET=http://grafana:3000` 走内网。浏览器统一走 Vite
   dev server 的 `/grafana/` 子路径（无独立宿主入口）。
+- Multica 默认服务（默认随 `COMPOSE_PROFILES=multica` 启动，可显式关闭）：
+  官方 v0.11.0 三服务栈，仅 loopback（web `18100` / API `18101`，见下文）。
 
 ## WeKnora 本地初始化
 
@@ -270,6 +272,48 @@ API 仅 loopback `18888`，管理 UI 仅 loopback `19999`，都不对外。服�
 面板「打开 Hindsight」经平台中继一键免密（backend 用该密钥服务端登录并透传
 会话 cookie），中继未就绪时回落为控制台密钥登录（详见
 [operations/configuration.md](../operations/configuration.md#hindsight-长期记忆生产默认启用)）。
+
+## Multica 默认服务（默认随本地栈启动，可显式关闭）
+
+Multica 默认服务提供部署级的默认集成；本地与生产一样**默认启动**。compose
+内置上游 multica-ai/multica **v0.11.0** 官方自托管三服务栈（pgvector/pg17
++ API 容器 8080 + web 容器 3000），镜像默认引用与 v0.11.0 release 核验
+一致的 digest 钉扎（GHCR 只发布 latest tag，故为 digest-only 引用）。
+`.env.example` 自带 `COMPOSE_PROFILES=multica`，因此标准本地栈命令即包含
+这三项服务（老 `.env` 需补这一行）：
+
+```bash
+# 标准启动即包含 multica-postgres / multica / multica-web：
+docker compose -f docker-compose.local.yml up -d
+# 显式关闭：把 .env 的 COMPOSE_PROFILES 置空或删掉该行（需要与其它
+# profile 并存时写逗号列表，如 multica,hindsight）；或单次显式启动：
+docker compose -f docker-compose.local.yml --profile multica up -d multica multica-web
+```
+
+首启是**半配置状态，不是零配置可用**：API 容器自动建表（`./migrate up`），
+但绝不初始化账号/PAT/workspace——这三者没有任何受支持的自动播种，也不是
+"写一次配置就能跳过"的步骤。本地入口（均仅 loopback）：web
+`http://localhost:18100`（`MULTICA_WEB_LOOPBACK_PORT`，浏览器只需该
+origin，API/WS 由 web 服务端代理）；API `http://localhost:18101`
+（`MULTICA_API_LOOPBACK_PORT`，供宿主机源码运行的 backend/配置中心直连）。
+空卷初始化是手动步骤：在 web 入口用邮箱注册（无邮件配置时验证码打印在
+`docker compose -f docker-compose.local.yml logs multica` 的
+`[DEV] Verification code` 行），创建 workspace，铸造 PAT（原生界面或官方
+CLI `multica login`），再把五项默认值**全部**回填 `.env`
+（`MULTICA_DEFAULT_*`，all-or-nothing；本地源码 backend 用
+`MULTICA_DEFAULT_BASE_URL=http://localhost:18101`、
+`MULTICA_DEFAULT_WEB_URL=http://localhost:18100`）。
+
+五项默认值全空时按未提供部署默认处理（`/health/ready` 的 `multica_default`
+项显示 `disabled`），超级助手按每用户自配 multica 集成独立工作；部分填写
+是配置错误（部署 fail-closed，readiness 显示 `unavailable`）；配置完整且
+服务不可达时该项为 `unavailable`——本地/开发环境仅 advisory，不影响启动与
+本地验证（生产 readiness 语义见 operations 文档）。`MULTICA_DEFAULT_PAT`
+是部署级密钥（compose 掩码锚点只对 backend/executor 放行
+`MULTICA_DEFAULT_PAT`，`MULTICA_JWT_SECRET`/`MULTICA_POSTGRES_PASSWORD`
+对全部平台进程置空）；内网地址允许清单
+`SUPER_ASSISTANT_MULTICA_INTERNAL_BASE_URLS` 独立于 MCP 清单（详见
+[operations/configuration.md](../operations/configuration.md#multica-默认服务默认启用可显式关闭)）。
 
 ## 集成副本执行器
 

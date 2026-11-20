@@ -425,6 +425,18 @@ jobs:
           PROD_HINDSIGHT_SERVICE_TOKEN: ${{ secrets.PROD_HINDSIGHT_SERVICE_TOKEN }}
           PROD_HINDSIGHT_IMAGE: ${{ vars.PROD_HINDSIGHT_IMAGE }}
           PROD_HINDSIGHT_POSTGRES_IMAGE: ${{ vars.PROD_HINDSIGHT_POSTGRES_IMAGE }}
+          # Optional Multica deployment-level default: the full five-value set
+          # (all-five-or-none; a partial set fails the deployment) plus digest
+          # image overrides. The bundled stack itself is enabled by default and
+          # toggled server-side via MULTICA_ENABLED in .env.
+          PROD_MULTICA_DEFAULT_BASE_URL: ${{ vars.PROD_MULTICA_DEFAULT_BASE_URL }}
+          PROD_MULTICA_DEFAULT_WEB_URL: ${{ vars.PROD_MULTICA_DEFAULT_WEB_URL }}
+          PROD_MULTICA_DEFAULT_WORKSPACE_ID: ${{ vars.PROD_MULTICA_DEFAULT_WORKSPACE_ID }}
+          PROD_MULTICA_DEFAULT_WORKSPACE_NAME: ${{ vars.PROD_MULTICA_DEFAULT_WORKSPACE_NAME }}
+          PROD_MULTICA_DEFAULT_PAT: ${{ secrets.PROD_MULTICA_DEFAULT_PAT }}
+          PROD_MULTICA_BACKEND_IMAGE: ${{ vars.PROD_MULTICA_BACKEND_IMAGE }}
+          PROD_MULTICA_WEB_IMAGE: ${{ vars.PROD_MULTICA_WEB_IMAGE }}
+          PROD_MULTICA_POSTGRES_IMAGE: ${{ vars.PROD_MULTICA_POSTGRES_IMAGE }}
         run: |
           bash scripts/ci/materialize-production-dependencies.sh
           test -s deploy/production.dependencies.env
@@ -484,6 +496,10 @@ jobs:
           KANEO_ADMIN_PASSWORD: ci-only-Kaneo-Admin-2026!
           GRAFANA_IMAGE: grafana/grafana:13.3.1@sha256:0615ec4fbd4072004b7d86b46ded63013a74b7d6eb1119273dd89e8fa25c13cf
           GRAFANA_ADMIN_PASSWORD: ci-only-Grafana-Admin-2026!
+          # The Multica profile services interpolate their verified digest-pinned
+          # defaults from the compose file itself, so no synthetic Multica
+          # variable is needed here. CI only builds: the profile is never
+          # activated in this job, so no Multica image is pulled or started.
         run: |
           set -Eeuo pipefail
           docker compose -f docker-compose.prod.yml build
@@ -714,6 +730,18 @@ jobs:
           PROD_HINDSIGHT_SERVICE_TOKEN: ${{ secrets.PROD_HINDSIGHT_SERVICE_TOKEN }}
           PROD_HINDSIGHT_IMAGE: ${{ vars.PROD_HINDSIGHT_IMAGE }}
           PROD_HINDSIGHT_POSTGRES_IMAGE: ${{ vars.PROD_HINDSIGHT_POSTGRES_IMAGE }}
+          # Optional Multica deployment-level default: the full five-value set
+          # (all-five-or-none; a partial set fails the deployment) plus digest
+          # image overrides. The bundled stack itself is enabled by default and
+          # toggled server-side via MULTICA_ENABLED in .env.
+          PROD_MULTICA_DEFAULT_BASE_URL: ${{ vars.PROD_MULTICA_DEFAULT_BASE_URL }}
+          PROD_MULTICA_DEFAULT_WEB_URL: ${{ vars.PROD_MULTICA_DEFAULT_WEB_URL }}
+          PROD_MULTICA_DEFAULT_WORKSPACE_ID: ${{ vars.PROD_MULTICA_DEFAULT_WORKSPACE_ID }}
+          PROD_MULTICA_DEFAULT_WORKSPACE_NAME: ${{ vars.PROD_MULTICA_DEFAULT_WORKSPACE_NAME }}
+          PROD_MULTICA_DEFAULT_PAT: ${{ secrets.PROD_MULTICA_DEFAULT_PAT }}
+          PROD_MULTICA_BACKEND_IMAGE: ${{ vars.PROD_MULTICA_BACKEND_IMAGE }}
+          PROD_MULTICA_WEB_IMAGE: ${{ vars.PROD_MULTICA_WEB_IMAGE }}
+          PROD_MULTICA_POSTGRES_IMAGE: ${{ vars.PROD_MULTICA_POSTGRES_IMAGE }}
         run: |
           bash scripts/ci/materialize-production-dependencies.sh
           test -s deploy/production.dependencies.env

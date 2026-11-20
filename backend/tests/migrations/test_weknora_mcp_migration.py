@@ -387,7 +387,10 @@ def test_head_is_single_and_pins_weknora_mcp(tmp_path, monkeypatch):
     cfg = _config(tmp_path / "weknora-heads-check.db")
     scripts = ScriptDirectory.from_config(cfg)
     assert scripts.get_heads() == [LATEST_HEAD]
-    assert LATEST_HEAD == "0153_weknora_operations_merge"
-    assert set(scripts.get_revision(LATEST_HEAD).down_revision) == {
+    # WeKnora 合入后的单头继续被后续迁移（multica profiles）线性延伸；
+    # WeKnora 合并点自身的身份不受延伸影响，仍在此钉住。
+    assert LATEST_HEAD == "0154_multica_profiles"
+    assert scripts.get_revision(LATEST_HEAD).down_revision == "0153_weknora_operations_merge"
+    assert set(scripts.get_revision("0153_weknora_operations_merge").down_revision) == {
         "0152_operations_report_plan", "0152_weknora_mcp",
     }

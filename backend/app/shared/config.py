@@ -325,6 +325,24 @@ class Settings(BaseSettings):
     # 秒（8 小时），平台与 Grafana 会话独立、不随平台退出即时撤销。
     grafana_session_ttl_seconds: int = Field(default=28800, ge=60, le=86400)
 
+    # Multica 默认服务（可选的部署级默认集成）。五项全部留空 = 部署未提供
+    # 默认值，超级助手按每用户自配 multica 集成独立工作；不完整即视为未
+    # 提供默认（advisory 探针跳过），all-or-nothing 完整性由 deploy-prod.sh
+    # 在部署期 fail-closed。PAT 是部署级密钥：compose 掩码锚点把它对
+    # env_file 服务置空，仅 backend 与 pipeline_executor 显式取回真值
+    # （显式键优先于 merge 键，与 KANEO_ADMIN_PASSWORD 例外同构）。
+    multica_default_base_url: str = ""
+    # 浏览器可访问的 Multica 原生 Web 入口（无凭据 http(s) origin），
+    # 不从 API 地址推导；与 HINDSIGHT_WEB_URL 同为可选非密钥值。
+    multica_default_web_url: str = ""
+    multica_default_workspace_id: str = ""
+    multica_default_workspace_name: str = ""
+    multica_default_pat: str = Field(default="", repr=False)
+    # Multica 内网地址允许清单（逗号分隔的 origin+路径前缀）。刻意独立于
+    # MCP 的 SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS：默认空，不随 MCP 清单
+    # 扩大信任面；仅部署声明内网 Multica（如 http://multica:3000）时填写。
+    super_assistant_multica_internal_base_urls: str = ""
+
     @field_validator("kaneo_web_url", mode="before")
     @classmethod
     def kaneo_web_url_requires_https(cls, value: object) -> object:
@@ -769,6 +787,71 @@ def production_config_errors(current: Settings) -> list[str]:
     # fixtures and on-device integrations.
     if current.steward_browser_allow_private_networks:
         _insecure.append("STEWARD_BROWSER_ALLOW_PRIVATE_NETWORKS must be false")
+    # 可选 Multica 默认集成：四个非密钥值（地址/浏览器入口/工作区 ID/名称）
+    # 对每个加载 .env 的服务一致可见，部分配置必须在所有进程一致 fail-closed，
+    # 不允许部分默认值静默健康。PAT 刻意不参与这里的 all-or-nothing 判定：
+    # compose 掩码锚点把它对 env_file 服务（如 task_worker/本地 migrate）合法
+    # 置空，只有 backend 与 pipeline_executor 显式取回真值——全局强求 PAT 会
+    # 让无关进程启动即崩（KANEO_ADMIN_PASSWORD 同构先例）。五值完整契约由
+    # deploy-prod.sh 部署期 all-or-nothing 校验与 backend readiness
+    # （partial → unavailable/503）收口。
+    multica_non_secret = (
+        current.multica_default_base_url,
+        current.multica_default_web_url,
+        current.multica_default_workspace_id,
+        current.multica_default_workspace_name,
+    )
+    if any(str(value or "").strip() for value in multica_non_secret) and not all(
+        str(value or "").strip() for value in multica_non_secret
+    ):
+        _insecure.append(
+            "MULTICA_DEFAULT_* values must be all set or all empty"
+        )
+    # 形态校验：BASE_URL 允许内网 origin（compose 内网地址是常态）；
+    # WEB_URL 是浏览器入口，设置时必须是浏览器可达的公网 host。
+    for key, value, require_public in (
+        ("MULTICA_DEFAULT_BASE_URL", current.multica_default_base_url, False),
+        ("MULTICA_DEFAULT_WEB_URL", current.multica_default_web_url, True),
+    ):
+        raw = str(value or "").strip()
+        if not raw:
+            continue
+        try:
+            parsed = urlsplit(raw)
+            hostname = parsed.hostname
+            parsed.port
+        except ValueError:
+            parsed = None
+            hostname = None
+        invalid = (
+            parsed is None
+            or parsed.scheme not in {"http", "https"}
+            or not hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or bool(parsed.query)
+            or bool(parsed.fragment)
+            or parsed.path not in {"", "/"}
+            or any(character.isspace() for character in raw)
+        )
+        if invalid:
+            _insecure.append(
+                f"{key} must be an absolute HTTP(S) origin without credentials, "
+                "path, query, or fragment"
+            )
+            continue
+        if not require_public:
+            continue
+        is_local = hostname.lower() in {"localhost", "backend", "multica"}
+        try:
+            address = ipaddress.ip_address(hostname)
+            is_local = is_local or address.is_loopback or address.is_unspecified
+        except ValueError:
+            pass
+        if is_local:
+            _insecure.append(
+                f"{key} must use a browser-reachable public host in production"
+            )
     _insecure.extend(_integrated_dbx_config_errors(current))
     _insecure.extend(required_dependency_config_errors(current))
     for key, value in (

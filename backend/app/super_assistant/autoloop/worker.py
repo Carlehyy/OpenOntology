@@ -21,12 +21,28 @@ logger = logging.getLogger(__name__)
 
 def _connection(db, owner_id, payload):
     owner = db.get(User, owner_id, populate_existing=True)
-    config = multica_service.active_config(db, owner_id)
-    if not owner or not owner.is_active or not config:
+    if not owner or not owner.is_active:
         raise ValueError("multica_unavailable")
-    if config.workspace_id != payload.get("workspaceId"):
+    # A committed step carries the source it was planned under: the frozen
+    # profile revision when present, else its endpoint/workspace evidence
+    # resolved to the unique source of that pair. A legacy payload that
+    # proves neither is rejected instead of borrowing the active profile:
+    # after an A→B switch that guess would retarget an unfinished step
+    # planned under A onto B, so it fails closed into the manual not-sent
+    # path. New steps always freeze profileRevisionId plus base/workspace.
+    revision_id = str(payload.get("profileRevisionId") or "") or None
+    base_url = str(payload.get("baseUrl") or "")
+    workspace_id = str(payload.get("workspaceId") or "")
+    if revision_id:
+        config = multica_service.config_for_revision(db, owner_id, revision_id)
+    elif base_url and workspace_id:
+        config = multica_service.config_for_source(
+            db, owner_id, base_url=base_url, workspace_id=workspace_id)
+    else:
+        raise ValueError("source_unprovable")
+    if workspace_id and config.workspace_id != workspace_id:
         raise ValueError("workspace_changed")
-    if config.base_url != payload.get("baseUrl"):
+    if base_url and config.base_url != base_url:
         raise ValueError("connector_changed")
     return config, multica_service.decrypt_token(config)
 
@@ -65,10 +81,13 @@ def _binding(db, action, payload, issue):
         return
     try:
         with db.begin_nested():
+            provenance = {**(payload.get("provenance") or {"kind": "created_issue"}),
+                "baseUrl": payload["baseUrl"]}
+            if payload.get("profileRevisionId"):
+                provenance["profileRevisionId"] = payload["profileRevisionId"]
             db.add(AutoLoopBinding(owner_id=action.owner_id, workspace_id=payload["workspaceId"],
                 source_scope=scope, source_thread=thread, issue_key=target,
-                provenance={**(payload.get("provenance") or {"kind": "created_issue"}),
-                    "baseUrl": payload["baseUrl"]},
+                provenance=provenance,
                 established_event_id=action.event_id, rule_id=payload.get("ruleId"),
                 rule_version=payload.get("ruleVersion")))
             db.flush()
@@ -176,7 +195,13 @@ def reconcile_unknown(owner_id, step_id, *, session_factory=None):
                 store.retry_failed_step(db, owner_id=owner_id, step_id=step_id)
             db.commit()
             return changed
-        config, secret = _connection(db, owner_id, step.request_payload)
+        try:
+            config, secret = _connection(db, owner_id, step.request_payload)
+        except (ValueError, multica_service.MulticaServiceError):
+            # The step's frozen source is unprovable or unusable; the unknown
+            # effect stays visible for manual handling instead of being read
+            # through a guessed source.
+            return False
         base, workspace = config.base_url, config.workspace_id
         kind, request_id, payload = step.kind, step.remote_request_id, dict(step.request_payload)
     if kind == "issue.comment":
@@ -214,7 +239,10 @@ def retry_failed(owner_id, step_id, *, session_factory=None):
                 proof.get("kind") == "remote_rejection" and proof.get("httpStatus") == 429):
             return False
         if step.kind != "decision.answered":
-            _connection(db, owner_id, step.request_payload)
+            try:
+                _connection(db, owner_id, step.request_payload)
+            except (ValueError, multica_service.MulticaServiceError):
+                return False  # unprovable or unusable source: never requeue
         changed = store.retry_failed_step(db, owner_id=owner_id, step_id=step_id)
         db.commit()
         return changed

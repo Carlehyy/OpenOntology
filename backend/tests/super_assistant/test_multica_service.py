@@ -4,13 +4,17 @@ from __future__ import annotations
 import json
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from app.auth.models import User
 from app.shared.database import Base
 from app.super_assistant import multica_client, multica_service
-from app.super_assistant.models import SuperAssistantMulticaConfig
+from app.super_assistant.models import (
+    SuperAssistantMulticaConfig,
+    SuperAssistantMulticaProfile,
+    SuperAssistantMulticaProfileRevision,
+)
 from app.super_assistant.schemas import MulticaConfigUpdate
 from app.super_assistant.multica_client import MulticaClientError
 
@@ -23,6 +27,7 @@ def session(tmp_path):
     )
     Base.metadata.create_all(bind=engine, tables=[
         User.__table__, SuperAssistantMulticaConfig.__table__,
+        SuperAssistantMulticaProfile.__table__, SuperAssistantMulticaProfileRevision.__table__,
     ])
     TestingSession = sessionmaker(bind=engine, autocommit=False, autoflush=False)
     with TestingSession() as db:
@@ -35,18 +40,50 @@ def session(tmp_path):
 
 
 def _enabled_config(db, **overrides):
-    # upsert 语义：同一测试内多次调用时更新现有行而不是重复插主键
+    # upsert 语义：同一测试内多次调用时更新现有行而不是重复插主键。
+    # 服务层已 profile-only（无 schema 缺失回退、无 lazy legacy 采纳）：
+    # 门控数据必须落在真实 custom profile/revision 上，旧表行只是携带
+    # profile 指针的生效投影。畸形状态（缺凭据/空工作区/enabled=False）
+    # 无法经 save_config 构造，因此直接以 ORM 落库并同步指针。
+    profile = db.scalar(select(SuperAssistantMulticaProfile).where(
+        SuperAssistantMulticaProfile.owner_id == "user-1",
+    ))
+    if profile is None:
+        profile = SuperAssistantMulticaProfile(
+            owner_id="user-1", name="我的 multica", kind="custom", is_active=True,
+        )
+        db.add(profile)
+        db.flush()
+    revision = db.scalar(
+        select(SuperAssistantMulticaProfileRevision)
+        .where(SuperAssistantMulticaProfileRevision.profile_id == profile.id)
+        .order_by(SuperAssistantMulticaProfileRevision.revision_no.desc())
+    )
+    if revision is None:
+        revision = SuperAssistantMulticaProfileRevision(
+            profile_id=profile.id, revision_no=1,
+        )
+        db.add(revision)
+        db.flush()
+    revision.base_url = overrides.get("base_url", "http://127.0.0.1:8080")
+    revision.workspace_id = overrides.get("workspace_id", "ws-1")
+    revision.workspace_name = overrides.get("workspace_name", "My Workspace")
+    revision.token_encrypted = overrides.get(
+        "token_encrypted", multica_service.encrypt("mul-token"),
+    )
+    revision.enabled = overrides.get("enabled", True)
     config = db.get(SuperAssistantMulticaConfig, "user-1")
     if config is None:
         config = SuperAssistantMulticaConfig(owner_id="user-1", base_url="", workspace_id="")
         db.add(config)
-    config.base_url = overrides.get("base_url", "http://127.0.0.1:8080")
-    config.workspace_id = overrides.get("workspace_id", "ws-1")
-    config.workspace_name = overrides.get("workspace_name", "My Workspace")
-    config.token_encrypted = overrides.get(
-        "token_encrypted", multica_service.encrypt("mul-token"),
-    )
-    config.enabled = overrides.get("enabled", True)
+    config.base_url = revision.base_url
+    config.workspace_id = revision.workspace_id
+    config.workspace_name = revision.workspace_name
+    config.token_encrypted = revision.token_encrypted
+    config.enabled = revision.enabled
+    config.profile_id = profile.id
+    config.profile_revision_id = revision.id
+    config.source_kind = "custom"
     db.commit()
     return config
 
@@ -332,24 +369,179 @@ def test_execute_create_task_reports_unknown_assignee(session, monkeypatch):
 
 def test_external_task_query_and_cancel_preserve_provider_identity(session, monkeypatch):
     _enabled_config(session)
+    # legacy 形态的 ref（不含 profile_revision_id 等来源键）只在显式
+    # 供应 revision_id 时被接受；新工作产生的 ref 由 execute_tool 带全来源键
+    revision_id = multica_service.get_config(session, "user-1").profile_revision_id
+    assert revision_id is not None
     ref = json.dumps({"issue_ref": "MYW-99", "task_id": None})
     monkeypatch.setattr(
         multica_client,
         "get_issue",
-        lambda *args: {"id": "issue-99", "identifier": "MYW-99", "status": "in_progress"},
+        lambda *args: {
+            "id": "issue-99", "identifier": "MYW-99", "status": "in_progress",
+            # 来源校验：issue 必须携带与生效配置一致的 workspace 身份
+            "workspace_id": "ws-1",
+        },
     )
     monkeypatch.setattr(
         multica_client,
-        "get_active_task",
-        lambda *args: {"id": "task-99", "status": "running"},
+        "list_task_runs",
+        lambda *args: [{
+            "id": "task-99", "status": "running", "issue_id": "issue-99", "workspace_id": "ws-1",
+        }],
     )
     monkeypatch.setattr(
         multica_client,
         "cancel_task",
-        lambda *args: {"status": "cancelled", "id": "task-99"},
+        lambda *args: {
+            "status": "cancelled", "id": "task-99", "issue_id": "issue-99", "workspace_id": "ws-1",
+        },
     )
-    observed = multica_service.query_external_task(session, "user-1", ref)
+    observed = multica_service.query_external_task(session, "user-1", ref, revision_id=revision_id)
     assert observed["status"] == "running"
-    assert json.loads(observed["remote_task_ref"]) == {"issue_ref": "MYW-99", "task_id": "task-99"}
+    assert json.loads(observed["remote_task_ref"]) == {
+        "issue_ref": "MYW-99", "task_id": "task-99", "issue_id": "issue-99",
+        "profile_revision_id": revision_id,
+        "base_url": "http://127.0.0.1:8080",
+        "workspace_id": "ws-1",
+    }
     cancelled = multica_service.cancel_external_task(session, "user-1", observed["remote_task_ref"])
     assert cancelled["status"] == "cancelled"
+
+
+@pytest.mark.parametrize("profile_api", [False, True], ids=["legacy-put", "profile-patch"])
+def test_endpoint_change_requires_new_explicit_credential(session, profile_api):
+    config = _enabled_config(session)
+    profile_id, revision_id = config.profile_id, config.profile_revision_id
+    if profile_api:
+        body = multica_service.MulticaProfileUpdate(base_url="http://127.0.0.1:9090", workspace_id="ws-2")
+        save = lambda: multica_service.update_profile(session, "user-1", profile_id, body)
+    else:
+        body = MulticaConfigUpdate(base_url="http://127.0.0.1:9090", workspace_id="ws-2")
+        save = lambda: multica_service.save_config(session, "user-1", body)
+    with pytest.raises(multica_service.MulticaServiceError, match="重新填写 API Token"):
+        save()
+    # 被拒绝的保存不得追加新 revision：profile 的当前不可变 revision 不变。
+    assert multica_service._current_revision(session, profile_id).id == revision_id
+    assert multica_service.config_for_revision(session, "user-1", revision_id).base_url == "http://127.0.0.1:8080"
+    body.token = "explicit-new-credential"
+    save()
+    updated = multica_service.active_config(session, "user-1")
+    assert updated.base_url == "http://127.0.0.1:9090"
+    assert multica_service.decrypt_token(updated) == "explicit-new-credential"
+    assert multica_service.decrypt_token(multica_service.config_for_revision(session, "user-1", revision_id)) == "mul-token"
+
+
+@pytest.fixture()
+def external_task(session, monkeypatch):
+    config = _enabled_config(session)
+    issue = {"id": "issue-99", "identifier": "MYW-99", "workspace_id": "ws-1", "status": "in_progress"}
+    task = {"id": "task-99", "issue_id": "issue-99", "workspace_id": "ws-1", "status": "running"}
+    data = {"issue": issue, "runs": [task], "calls": [], "cancel_response": {**task, "status": "cancelled"}}
+    data["ref"] = multica_service._external_ref(issue, task, config=config)
+
+    def get_issue(base, token, workspace, reference):
+        data["calls"].append(("get_issue", base, workspace, reference))
+        return data["issue"]
+
+    def list_runs(base, token, workspace, reference):
+        data["calls"].append(("list_task_runs", base, workspace, reference))
+        return data["runs"]
+
+    def cancel(base, token, workspace, reference, task_id):
+        data["calls"].append(("cancel_task", base, workspace, reference, task_id))
+        return data["cancel_response"]
+
+    monkeypatch.setattr(multica_client, "get_issue", get_issue)
+    monkeypatch.setattr(multica_client, "list_task_runs", list_runs)
+    monkeypatch.setattr(multica_client, "cancel_task", cancel)
+    return data
+
+
+@pytest.mark.parametrize("operation", [multica_service.query_external_task, multica_service.cancel_external_task])
+def test_external_task_without_source_never_uses_active_config(session, external_task, operation):
+    ref = json.dumps({"issue_ref": "MYW-99", "task_id": "task-99"})
+    with pytest.raises(multica_service.MulticaServiceError, match="缺少可验证的来源"):
+        operation(session, "user-1", ref)
+    assert external_task["calls"] == []
+
+
+@pytest.mark.parametrize("changed", [
+    {"workspace_id": "foreign-workspace"}, {"workspace_id": None}, {"id": "foreign-issue"}, {"id": None},
+])
+@pytest.mark.parametrize("operation", [multica_service.query_external_task, multica_service.cancel_external_task])
+def test_external_task_rejects_foreign_issue_before_loading_runs(session, external_task, operation, changed):
+    external_task["issue"].update(changed)
+    with pytest.raises(multica_service.MulticaServiceError, match="身份"):
+        operation(session, "user-1", external_task["ref"])
+    assert [call[0] for call in external_task["calls"]] == ["get_issue"]
+
+
+@pytest.mark.parametrize("operation", [multica_service.query_external_task, multica_service.cancel_external_task])
+def test_external_task_observes_original_terminal_run_without_cancelling_rerun(session, external_task, operation):
+    external_task["runs"][0].update(status="completed", result="original result")
+    external_task["runs"].insert(0, {
+        "id": "rerun-100", "issue_id": "issue-99", "workspace_id": "ws-1", "status": "running",
+    })
+    result = operation(session, "user-1", external_task["ref"])
+    assert result["status"] == "completed"
+    assert result["content"] == "original result"
+    assert json.loads(result["remote_task_ref"])["task_id"] == "task-99"
+    assert [call[0] for call in external_task["calls"]] == ["get_issue", "list_task_runs"]
+
+
+@pytest.mark.parametrize("task_id", ["task-99", None])
+@pytest.mark.parametrize("operation", [multica_service.query_external_task, multica_service.cancel_external_task])
+def test_external_task_rejects_missing_or_ambiguous_original_run(session, external_task, operation, task_id):
+    external_task["runs"] = [
+        {"id": "rerun-100", "issue_id": "issue-99", "workspace_id": "ws-1", "status": "running"},
+        {"id": "rerun-101", "issue_id": "issue-99", "workspace_id": "ws-1", "status": "completed"},
+    ]
+    ref = json.loads(external_task["ref"])
+    ref["task_id"] = task_id
+    with pytest.raises(multica_service.MulticaServiceError, match="人工处理"):
+        operation(session, "user-1", json.dumps(ref))
+    assert not any(call[0] == "cancel_task" for call in external_task["calls"])
+
+
+@pytest.mark.parametrize("changed", [
+    {"issue_id": "foreign-issue"}, {"workspace_id": "foreign-workspace"}, {"status": None},
+])
+def test_external_task_rejects_run_identity_mismatch(session, external_task, changed):
+    external_task["runs"][0].update(changed)
+    with pytest.raises(multica_service.MulticaServiceError, match="执行身份"):
+        multica_service.cancel_external_task(session, "user-1", external_task["ref"])
+    assert not any(call[0] == "cancel_task" for call in external_task["calls"])
+
+
+def test_external_task_uses_immutable_issue_id_after_identifier_changes(session, external_task):
+    external_task["issue"]["identifier"] = "RENAMED-99"
+    observed = multica_service.query_external_task(session, "user-1", external_task["ref"])
+    assert external_task["calls"][0][-1] == "issue-99"
+    ref = json.loads(observed["remote_task_ref"])
+    assert ref["issue_id"] == "issue-99"
+    assert ref["issue_ref"] == "RENAMED-99"
+    assert ref["task_id"] == "task-99"
+
+
+def test_external_task_observation_identity_replays_but_advances_with_status(session, external_task):
+    query = lambda: multica_service.query_external_task(session, "user-1", external_task["ref"])
+    first = query()
+    assert query() == first
+    external_task["runs"][0].update(status="completed", result="PAT echo mul-token")
+    completed = query()
+    assert completed["status"] == "completed"
+    assert "mul-token" not in json.dumps(completed)
+    assert "[redacted]" in completed["content"]
+    assert completed["provider_event_id"] != first["provider_event_id"]
+    assert query()["provider_event_id"] == completed["provider_event_id"]
+
+
+def test_external_task_cancel_response_without_original_identity_is_unknown(session, external_task):
+    external_task["cancel_response"] = {"id": "different-run", "status": "cancelled"}
+    with pytest.raises(multica_client.MulticaRequestError) as raised:
+        multica_service.cancel_external_task(session, "user-1", external_task["ref"])
+    assert raised.value.outcome == "unknown"
+    assert external_task["calls"][-1] == (
+        "cancel_task", "http://127.0.0.1:8080", "ws-1", "issue-99", "task-99",
+    )

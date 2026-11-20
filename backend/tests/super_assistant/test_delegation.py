@@ -38,6 +38,8 @@ from app.super_assistant.models import (
     SuperAssistantMemorySource,
     SuperAssistantMessage,
     SuperAssistantMulticaConfig,
+    SuperAssistantMulticaProfile,
+    SuperAssistantMulticaProfileRevision,
     SuperAssistantSkill,
     SuperAssistantToolRun,
     SuperAssistantToolSetting,
@@ -51,6 +53,7 @@ _TABLES = [
     SuperAssistantMemory.__table__, SuperAssistantMemoryProfile.__table__,
     SuperAssistantMemorySetting.__table__, SuperAssistantMemorySource.__table__,
     SuperAssistantMulticaConfig.__table__,
+    SuperAssistantMulticaProfile.__table__, SuperAssistantMulticaProfileRevision.__table__,
 ]
 
 

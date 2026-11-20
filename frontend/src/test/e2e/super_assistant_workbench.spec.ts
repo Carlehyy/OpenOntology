@@ -129,6 +129,43 @@ const multicaEnabledFixture = {
   last_test_status: 'success', last_test_message: '连接成功', last_tested_at: at(0, 8),
 }
 
+const multicaWorkspacesFixture = [
+  { id: 'ws-1', name: 'My Workspace', slug: 'my-workspace' },
+  { id: 'ws-2', name: 'E2E 工作区', slug: 'e2e' },
+]
+
+/** 平台默认 profile：只读（后端维护），kind=platform_default（builtin_key 与后端
+ *  PLATFORM_DEFAULT_BUILTIN_KEY 同值）；web_url 仅部署显式配置时携带（契约：
+ *  custom 恒 null，前端不从 base_url 推测 Web 入口） */
+const multicaDefaultProfileFixture = (overrides: Record<string, unknown> = {}) => ({
+  id: 'mp-default', name: '平台默认', kind: 'platform_default', builtin_key: 'default',
+  web_url: null,
+  is_active: true, enabled: true, base_url: '', workspace_id: '', workspace_name: '',
+  token_set: false, revision: 0, last_test_status: null, last_test_message: null, last_tested_at: null,
+  ...overrides,
+})
+
+/** 自定义 profile：用户自建，可增删改/激活 */
+const multicaCustomProfileFixture = (overrides: Record<string, unknown> = {}) => ({
+  id: 'mp-custom-1', name: '客户支持', kind: 'custom', builtin_key: null,
+  web_url: null,
+  is_active: false, enabled: true, base_url: 'http://127.0.0.1:8080',
+  workspace_id: 'ws-1', workspace_name: 'My Workspace', token_set: true,
+  revision: 1, last_test_status: 'success', last_test_message: '连接成功：admin', last_tested_at: at(0, 8),
+  ...overrides,
+})
+
+/** GET /multica/profiles 的返回（默认仅平台默认行 + 未配置 effective） */
+const multicaProfilesResultFixture = (
+  profiles: Array<Record<string, unknown>>,
+  effective: Record<string, unknown>,
+) => ({
+  profiles,
+  active_profile_id: profiles.find(profile => profile.is_active)?.id ?? null,
+  default_profile_id: profiles.find(profile => profile.kind === 'platform_default')?.id ?? null,
+  effective,
+})
+
 // 内置工具目录夹具：覆盖三个分类 + 一条条件不可用（web_search 平台未配后端）
 const assistantToolsFixture = [
   {
@@ -208,8 +245,12 @@ interface MockOptions {
   notificationsAllRead?: boolean
   /** 完全无消息：制造中转站冷启动空态 */
   notificationsNone?: boolean
-  /** GET /super-assistant/multica/config 的返回（默认未配置态） */
+  /** GET /super-assistant/multica/config 的返回（默认未配置态；同时作为 profiles 的 effective） */
   multicaConfig?: Record<string, unknown>
+  /** GET /super-assistant/multica/profiles 的 profile 目录（默认仅平台默认行）；POST 创建的行会 unshift 进该可变数组 */
+  multicaProfiles?: Array<Record<string, unknown>>
+  /** GET /super-assistant/multica/profiles 强制 500：断言 multica tab 内 API 失败可见（role=alert），不静默 */
+  multicaProfilesGetError?: boolean
   /** 覆盖远程助手目录；传入空数组即空目录 */
   remoteAgents?: Array<Record<string, unknown>>
   /** GET /remote-agents 延迟，用于断言加载完成前不展示空态 CTA */
@@ -238,7 +279,15 @@ async function mockApis(page: Page, options: MockOptions = {}) {
   const chatPersisted = new Map<string, Array<Record<string, unknown>>>()
   const searchQueries: string[] = []
   const createdConvs: Array<Record<string, unknown>> = []
-  const multicaPuts: Array<Record<string, unknown>> = []
+  const multicaProfileRows: Array<Record<string, unknown>> = options.multicaProfiles
+    ? options.multicaProfiles.map(row => ({ ...row }))
+    : [multicaDefaultProfileFixture()]
+  const multicaProfileCreates: Array<Record<string, unknown>> = []
+  const multicaProfilePatches: Array<Record<string, unknown>> = []
+  const multicaProfileDeletes: string[] = []
+  const multicaProfileActivates: string[] = []
+  const multicaProfileTests: Array<Record<string, unknown>> = []
+  const multicaProfileWorkspaceCalls: string[] = []
   const remoteAgentCreates: Array<Record<string, unknown>> = []
   const remoteInviteCreates: string[] = []
   const notifStatePatches: string[] = []
@@ -328,7 +377,6 @@ async function mockApis(page: Page, options: MockOptions = {}) {
     },
   ]
   const multicaTests: Array<Record<string, unknown>> = []
-  const multicaWorkspaceCalls: string[] = []
   const toolPatchCalls: Array<{ name: string; body: { enabled: boolean } }> = []
   const toolsState = assistantToolsFixture.map(item => ({ ...item }))
   let chatDone = false
@@ -843,19 +891,9 @@ async function mockApis(page: Page, options: MockOptions = {}) {
       target.enabled = body.enabled
       return json(route, target)
     }
-    // multica 外部集成：配置读写与连接测试（PUT 后按提交值回显已启用态）
+    // multica 旧单配置契约保留：页面级 /multica: 命令门控仍 GET /multica/config
+    // （写入已迁至 /multica/profiles；新建 profile 的测试连接走旧 /multica/test）
     if (path === '/api/v2/super-assistant/multica/config') {
-      if (request.method() === 'PUT') {
-        const body = request.postDataJSON() as Record<string, unknown>
-        multicaPuts.push(body)
-        return json(route, {
-          ...multicaUnconfiguredFixture,
-          ...body,
-          configured: true,
-          token_set: true,
-          commands: body.enabled === false ? [] : multicaCommandsFixture,
-        })
-      }
       return json(route, options.multicaConfig ?? multicaUnconfiguredFixture)
     }
     if (path === '/api/v2/super-assistant/multica/test') {
@@ -864,21 +902,90 @@ async function mockApis(page: Page, options: MockOptions = {}) {
         ok: true,
         message: '连接成功：admin，可见 2 个工作区',
         account_name: 'admin',
-        workspaces: [
-          { id: 'ws-1', name: 'My Workspace', slug: 'my-workspace' },
-          { id: 'ws-2', name: 'E2E 工作区', slug: 'e2e' },
-        ],
+        workspaces: multicaWorkspacesFixture,
       })
     }
-    // 已保存配置的实时工作区列表：弹窗打开即拉取（与测试连接同一后端数据源）
-    if (path === '/api/v2/super-assistant/multica/workspaces') {
-      multicaWorkspaceCalls.push(request.url())
-      return json(route, {
-        workspaces: [
-          { id: 'ws-1', name: 'My Workspace', slug: 'my-workspace' },
-          { id: 'ws-2', name: 'E2E 工作区', slug: 'e2e' },
-        ],
-      })
+    // multica 多 profile 目录：列表/创建（行目录可变，创建后 unshift 供后续 GET 断言）
+    if (path === '/api/v2/super-assistant/multica/profiles') {
+      if (request.method() === 'POST') {
+        const body = request.postDataJSON() as Record<string, unknown>
+        multicaProfileCreates.push(body)
+        // 契约对齐：token 加密存储、永不回显——行目录与响应体不得携带 token 明文
+        const { token: submittedToken, ...persisted } = body
+        const created = {
+          id: `mp-custom-${multicaProfileCreates.length}`,
+          kind: 'custom',
+          builtin_key: null,
+          // 契约：web_url 仅平台默认 profile 携带，custom 恒为 null
+          web_url: null,
+          is_active: false,
+          revision: 1,
+          token_set: Boolean(submittedToken),
+          workspace_name: (body.workspace_name as string) || '',
+          last_test_status: null,
+          last_test_message: null,
+          last_tested_at: null,
+          ...persisted,
+        }
+        multicaProfileRows.unshift(created)
+        return json(route, created, 201)
+      }
+      if (options.multicaProfilesGetError) {
+        // 错误体不走 {data} 成功信封：真实 FastAPI 错误是裸 {detail}，
+        // apiClient 的 handleApiError/前端 errorText 均按顶层 detail 提取
+        return route.fulfill({
+          status: 500,
+          contentType: 'application/json',
+          body: JSON.stringify({ detail: 'multica 配置目录暂时不可用' }),
+        })
+      }
+      return json(route, multicaProfilesResultFixture(multicaProfileRows, options.multicaConfig ?? multicaUnconfiguredFixture))
+    }
+    const multicaProfileMatch = path.match(/^\/api\/v2\/super-assistant\/multica\/profiles\/([^/]+)(?:\/(activate|test|workspaces))?$/)
+    if (multicaProfileMatch) {
+      const [, profileId, profileAction] = multicaProfileMatch
+      const profileRow = multicaProfileRows.find(row => row.id === profileId)
+      if (profileAction === 'activate' && request.method() === 'POST') {
+        multicaProfileActivates.push(profileId)
+        multicaProfileRows.forEach(row => { row.is_active = row.id === profileId })
+        return json(route, profileRow ?? null)
+      }
+      if (profileAction === 'test' && request.method() === 'POST') {
+        const body = request.postDataJSON() as Record<string, unknown>
+        multicaProfileTests.push({ id: profileId, ...body })
+        if (profileRow) {
+          profileRow.last_test_status = 'success'
+          profileRow.last_test_message = '连接成功：admin'
+          profileRow.last_tested_at = at(0, 12)
+          if (body.token) profileRow.token_set = true
+        }
+        return json(route, {
+          ok: true,
+          message: '连接成功：admin，可见 2 个工作区',
+          account_name: 'admin',
+          workspaces: multicaWorkspacesFixture,
+        })
+      }
+      if (profileAction === 'workspaces') {
+        multicaProfileWorkspaceCalls.push(request.url())
+        return json(route, { workspaces: multicaWorkspacesFixture })
+      }
+      if (!profileRow) return json(route, { detail: 'Multica 配置不存在' }, 404)
+      if (request.method() === 'PATCH') {
+        const body = request.postDataJSON() as Record<string, unknown>
+        multicaProfilePatches.push(body)
+        // 同 POST：token 只换算 token_set 标志，明文不进行目录/响应体
+        const { token: rotatedToken, ...persisted } = body
+        if (rotatedToken) profileRow.token_set = true
+        return json(route, Object.assign(profileRow, persisted))
+      }
+      if (request.method() === 'DELETE') {
+        const index = multicaProfileRows.findIndex(row => row.id === profileId)
+        if (index >= 0) multicaProfileRows.splice(index, 1)
+        multicaProfileDeletes.push(profileId)
+        return route.fulfill({ status: 204 })
+      }
+      return json(route, profileRow)
     }
     // 全局搜索：会话标题 + 消息内容（查询词含「需求」时命中 c-today 的标题与一条消息）
     if (path === '/api/v2/super-assistant/search/conversations') {
@@ -1009,8 +1116,13 @@ async function mockApis(page: Page, options: MockOptions = {}) {
     summarySettingPuts,
     ticketCreates,
     searchQueries,
-    multicaPuts,
     multicaTests,
+    multicaProfileCreates,
+    multicaProfilePatches,
+    multicaProfileDeletes,
+    multicaProfileActivates,
+    multicaProfileTests,
+    multicaProfileWorkspaceCalls,
     remoteAgentCreates,
     remoteInviteCreates,
     notifStatePatches,
@@ -1028,7 +1140,6 @@ async function mockApis(page: Page, options: MockOptions = {}) {
     notifChannelUpdates,
     notifChannelTests,
     notifChannelDeletes,
-    multicaWorkspaceCalls,
     toolPatchCalls,
     weknoraCalls,
     weknoraEntryCalls,
@@ -3641,14 +3752,23 @@ test('项目管理（Kaneo）：免登录票据领取失败时如实报错，空
   await expect(menuAgain.locator('[data-ctx-item="kaneo"]')).toBeVisible()
 })
 
-test('能力拓展：multica 测试连接、工作区下拉与保存', async ({ page }) => {
+test('能力拓展：multica 多 profile——添加、测试连接、选工作区与保存', async ({ page }) => {
   await seedAuth(page)
   const mocks = await mockApis(page)
+  // 契约断言采集：/multica/profiles* 的任何响应体都不得回显 token 明文
+  // （后端加密存储、永不回显；mock 行目录/响应同样遵守）
+  const profileReplies: Array<Record<string, unknown>> = []
+  page.on('response', async response => {
+    if (!response.url().includes('/super-assistant/multica/profiles')) return
+    try {
+      profileReplies.push(await response.json())
+    } catch { /* 204 等空响应体忽略 */ }
+  })
   await page.goto('/#/super-assistant')
 
   // 能力拓展已是真实功能：入口已迁入聊天区域右键菜单（原头部按钮移除），
-  // 打开左侧集成类型 tabs（multica / 远程助手），multica 默认选中并走通
-  // 「测试连接 → 选工作区 → 保存」
+  // 打开左侧集成类型 tabs（multica / 远程助手），multica 默认选中：
+  // 平台默认只读卡 + 空「自定义配置」目录
   const menu = await openChatActionsMenu(page)
   await menu.locator('[data-ctx-item="integrations"]').click()
   const integrationsDialog = page.getByRole('dialog')
@@ -3656,13 +3776,18 @@ test('能力拓展：multica 测试连接、工作区下拉与保存', async ({ 
   const multicaTab = integrationsDialog.locator('[data-integrations-tab="multica"]')
   await expect(multicaTab).toHaveAttribute('aria-selected', 'true')
   await expect(integrationsDialog.getByTestId('multica-config-card')).toBeVisible()
+  await expect(integrationsDialog.getByTestId('multica-default-card')).toContainText('平台默认')
+  await expect(integrationsDialog.getByTestId('multica-default-card')).toContainText('当前使用')
+  await expect(integrationsDialog.getByTestId('multica-default-card')).toContainText('未配置服务地址')
+  // 部署未下发 web_url（null）：不渲染「打开 Multica」外链，也不从 base_url 推测
+  await expect(integrationsDialog.getByTestId('multica-open-web')).toHaveCount(0)
   // 左栏仅两类集成，旧「文件夹同步」不再提供
   await expect(integrationsDialog.locator('[data-integrations-tab]')).toHaveCount(2)
   await expect(integrationsDialog.locator('[data-integrations-tab="folder-sync"]')).toHaveCount(0)
   // 等入场缩放动画结束再量尺寸，避免动画中的包围盒参与比较
   await page.waitForTimeout(300)
 
-  // 切到远程助手 tab 面板替换，切回 multica 表单仍在；弹窗固定宽高：切 tab 前后尺寸不变
+  // 切到远程助手 tab 面板替换，切回 multica 目录仍在；弹窗固定宽高：切 tab 前后尺寸不变
   const shellBefore = await integrationsDialog.boundingBox()
   await integrationsDialog.locator('[data-integrations-tab="remote-agents"]').click()
   await expect(integrationsDialog.getByTestId('multica-config-card')).toHaveCount(0)
@@ -3674,6 +3799,10 @@ test('能力拓展：multica 测试连接、工作区下拉与保存', async ({ 
   await multicaTab.click()
   await expect(integrationsDialog.getByTestId('multica-config-card')).toBeVisible()
 
+  // 添加自定义配置：名称/服务地址/token → 测试连接（无 id 走旧 /multica/test 契约）→ 选工作区 → 保存
+  await integrationsDialog.getByTestId('multica-profile-add-button').click()
+  await expect(integrationsDialog.getByTestId('multica-profile-form')).toBeVisible()
+  await integrationsDialog.getByTestId('multica-profile-name').fill('客户支持')
   await integrationsDialog.getByTestId('multica-base-url').fill('http://127.0.0.1:8080')
   await integrationsDialog.getByTestId('multica-token').fill('mul-e2e-token')
   await integrationsDialog.getByTestId('multica-test-button').click()
@@ -3684,9 +3813,10 @@ test('能力拓展：multica 测试连接、工作区下拉与保存', async ({ 
   await integrationsDialog.getByRole('combobox', { name: 'Multica 工作区' }).click()
   await page.getByRole('option', { name: 'E2E 工作区' }).click()
   await integrationsDialog.getByRole('checkbox', { name: '启用集成' }).check()
-  await integrationsDialog.getByTestId('multica-save-button').click()
-  await expect.poll(() => mocks.multicaPuts.length).toBe(1)
-  expect(mocks.multicaPuts[0]).toMatchObject({
+  await integrationsDialog.getByTestId('multica-profile-save-button').click()
+  await expect.poll(() => mocks.multicaProfileCreates.length).toBe(1)
+  expect(mocks.multicaProfileCreates[0]).toMatchObject({
+    name: '客户支持',
     base_url: 'http://127.0.0.1:8080',
     token: 'mul-e2e-token',
     workspace_id: 'ws-2',
@@ -3694,33 +3824,144 @@ test('能力拓展：multica 测试连接、工作区下拉与保存', async ({ 
     workspace_name: 'E2E 工作区',
     enabled: true,
   })
-  await expect(integrationsDialog).toHaveCount(0)
+  // mock 行目录收录新建行：列表出现该行（非激活态带「激活」按钮），表单收起
+  const profileList = integrationsDialog.getByTestId('multica-profile-list')
+  await expect(profileList.getByTestId('multica-profile-row')).toHaveCount(1)
+  await expect(profileList.getByTestId('multica-profile-row')).toContainText('客户支持')
+  await expect(profileList.getByTestId('multica-profile-activate')).toBeVisible()
+  await expect(integrationsDialog.getByTestId('multica-profile-form')).toHaveCount(0)
 
-  // 窄屏（<md）：头部五按钮已迁入聊天区域右键菜单，弹窗能力不变
+  // token 永不回显：至少「初始目录 + 创建 + 创建后刷新」三轮响应均已到达，
+  // 逐一检查所有 /multica/profiles* 响应体不含 token 字段，界面也不出现明文
+  await expect.poll(() => profileReplies.length).toBeGreaterThanOrEqual(3)
+  for (const reply of profileReplies) {
+    const rows = Array.isArray(reply.profiles)
+      ? reply.profiles as Array<Record<string, unknown>>
+      : [reply]
+    for (const row of rows) expect(row).not.toHaveProperty('token')
+  }
+  await expect(integrationsDialog).not.toContainText('mul-e2e-token')
+
+  // 窄屏（<md）：头部五按钮已迁入聊天区域右键菜单，弹窗能力不变（先关弹窗腾出聊天区）
+  await page.keyboard.press('Escape')
+  await expect(integrationsDialog).toHaveCount(0)
   await page.setViewportSize({ width: 390, height: 844 })
   const narrowMenu = await openChatActionsMenu(page)
   await narrowMenu.locator('[data-ctx-item="integrations"]').click()
   await expect(page.getByRole('dialog').getByRole('heading', { name: '能力拓展' })).toBeVisible()
 })
 
-test('multica 配置弹窗：已配置时打开即拉取全量工作区，无需先点测试连接', async ({ page }) => {
+test('multica 多 profile：激活自定义配置与停用回默认', async ({ page }) => {
   await seedAuth(page)
-  const mocks = await mockApis(page, { multicaConfig: multicaEnabledFixture })
+  const mocks = await mockApis(page, {
+    multicaConfig: multicaEnabledFixture,
+    multicaProfiles: [
+      // 部署显式配置了原生入口：默认卡提供「打开 Multica」外链
+      multicaDefaultProfileFixture({ is_active: false, web_url: 'http://localhost:18100' }),
+      multicaCustomProfileFixture({ is_active: true }),
+    ],
+  })
   await page.goto('/#/super-assistant')
 
-  const configuredMenu = await openChatActionsMenu(page)
-  await configuredMenu.locator('[data-ctx-item="integrations"]').click()
+  const menu = await openChatActionsMenu(page)
+  await menu.locator('[data-ctx-item="integrations"]').click()
   const dialog = page.getByRole('dialog')
-  await expect(dialog.getByRole('heading', { name: '能力拓展' })).toBeVisible()
   await expect(dialog.getByTestId('multica-config-card')).toBeVisible()
 
-  // 打开弹窗即请求工作区列表（此前只有单条已保存兜底，掩盖其余可选工作区）；
-  // StrictMode 开发态 effect 双触发，调用数按 ≥1 断言
-  await expect.poll(() => mocks.multicaWorkspaceCalls.length).toBeGreaterThanOrEqual(1)
-  await expect(mocks.multicaTests.length).toBe(0)
-  await dialog.getByRole('combobox', { name: 'Multica 工作区' }).click()
+  // 激活行：当前使用徽章 + 「停用并回默认」；默认卡非激活；可用命令由 effective 驱动
+  const row = dialog.getByTestId('multica-profile-row')
+  await expect(row).toContainText('客户支持')
+  await expect(row).toContainText('当前使用')
+  await expect(dialog.getByTestId('multica-default-card')).not.toContainText('当前使用')
+  await expect(dialog.getByTestId('multica-effective-commands')).toContainText('/multica:list_agents')
+
+  // 「打开 Multica」只出现在默认卡（部署下发的 web_url 原样使用，新窗口隔离）；
+  // custom 行恒无 web_url，不渲染外链
+  const openWebLink = dialog.getByTestId('multica-default-card').getByTestId('multica-open-web')
+  await expect(openWebLink).toBeVisible()
+  await expect(openWebLink).toHaveAttribute('href', 'http://localhost:18100')
+  await expect(openWebLink).toHaveAttribute('target', '_blank')
+  await expect(openWebLink).toHaveAttribute('rel', 'noopener noreferrer')
+  await expect(row.getByTestId('multica-open-web')).toHaveCount(0)
+
+  // 停用并回默认 = 激活平台默认 profile（POST /profiles/{default_id}/activate）
+  await dialog.getByTestId('multica-profile-deactivate').click()
+  await expect.poll(() => mocks.multicaProfileActivates).toEqual(['mp-default'])
+  await expect(dialog.getByTestId('multica-default-card')).toContainText('当前使用')
+  await expect(row).not.toContainText('当前使用')
+  await expect(row.getByTestId('multica-profile-activate')).toBeVisible()
+
+  // 再激活自定义配置
+  await row.getByTestId('multica-profile-activate').click()
+  await expect.poll(() => mocks.multicaProfileActivates).toEqual(['mp-default', 'mp-custom-1'])
+  await expect(row).toContainText('当前使用')
+})
+
+test('multica 多 profile：编辑保存（PATCH 不回传 token）与删除确认', async ({ page }) => {
+  await seedAuth(page)
+  const mocks = await mockApis(page, {
+    multicaProfiles: [
+      multicaDefaultProfileFixture(),
+      multicaCustomProfileFixture(),
+    ],
+  })
+  await page.goto('/#/super-assistant')
+
+  const menu = await openChatActionsMenu(page)
+  await menu.locator('[data-ctx-item="integrations"]').click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.getByTestId('multica-config-card')).toBeVisible()
+
+  // 编辑：打开表单即实时拉取该 profile 的全量工作区（StrictMode 开发态 effect
+  // 双触发，调用数按 ≥1 断言）；表单回显已存字段但 token 永不回显
+  await dialog.getByTestId('multica-profile-row').getByRole('button', { name: '编辑' }).click()
+  const form = dialog.getByTestId('multica-profile-form')
+  await expect(form).toBeVisible()
+  await expect(form.getByTestId('multica-profile-name')).toHaveValue('客户支持')
+  await expect(form.getByTestId('multica-base-url')).toHaveValue('http://127.0.0.1:8080')
+  await expect(form.getByTestId('multica-token')).toHaveValue('')
+  await expect(form.getByTestId('multica-token')).toHaveAttribute('placeholder', /已保存（留空保留）/)
+  await expect.poll(() => mocks.multicaProfileWorkspaceCalls.length).toBeGreaterThanOrEqual(1)
+  await expect(mocks.multicaProfileTests.length).toBe(0)
+  await form.getByRole('combobox', { name: 'Multica 工作区' }).click()
   await expect(page.getByRole('option', { name: 'My Workspace' })).toBeVisible()
-  await expect(page.getByRole('option', { name: 'E2E 工作区' })).toBeVisible()
+  await page.getByRole('option', { name: 'My Workspace' }).click()
+
+  // 保存：PATCH 语义负载；空 token 不发送（保留已存凭据）
+  await form.getByTestId('multica-profile-name').fill('客户支持 v2')
+  await dialog.getByTestId('multica-profile-save-button').click()
+  await expect.poll(() => mocks.multicaProfilePatches.length).toBe(1)
+  expect(mocks.multicaProfilePatches[0]).toMatchObject({
+    name: '客户支持 v2',
+    base_url: 'http://127.0.0.1:8080',
+    workspace_id: 'ws-1',
+    enabled: true,
+  })
+  expect(Object.keys(mocks.multicaProfilePatches[0])).not.toContain('token')
+  await expect(dialog.getByTestId('multica-profile-row')).toContainText('客户支持 v2')
+
+  // 删除走 ConfirmDialog（不做静默直删）；删除正在生效的配置时提示回落默认
+  await dialog.getByTestId('multica-profile-delete').click()
+  const confirmDialog = page.getByRole('dialog', { name: /删除配置「客户支持 v2」/ })
+  await expect(confirmDialog).toBeVisible()
+  await confirmDialog.getByRole('button', { name: '删除' }).click()
+  await expect.poll(() => mocks.multicaProfileDeletes).toEqual(['mp-custom-1'])
+  await expect(dialog.getByTestId('multica-profile-row')).toHaveCount(0)
+  await expect(dialog.getByTestId('multica-profile-form')).toHaveCount(0)
+})
+
+test('multica 多 profile：目录加载失败时弹窗内可见报错（不静默）', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page, { multicaProfilesGetError: true })
+  await page.goto('/#/super-assistant')
+
+  const menu = await openChatActionsMenu(page)
+  await menu.locator('[data-ctx-item="integrations"]').click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.getByTestId('multica-config-card')).toBeVisible()
+  // 回归护栏：面板 onError 不再被 tab 条件吞掉，multica tab 内 role=alert 可见
+  // 且报错文案透传后端 detail（errorText 对字符串 detail 原样返回）
+  await expect(dialog.getByRole('alert')).toContainText('multica 配置目录暂时不可用')
 })
 
 test('⌘K / Ctrl+K 唤起全局搜索面板', async ({ page }) => {

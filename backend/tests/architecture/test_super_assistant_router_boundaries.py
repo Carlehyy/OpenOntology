@@ -332,14 +332,14 @@ DELEGATES = {
         "mcp_server_service",
         "install_platform_api_hub_mcp",
     ),
-    "list_assistant_tools": ("runtime", "builtin_tool_catalog"),
+    "list_assistant_tools": ("runtime", "read_builtin_tool_catalog"),
     "update_assistant_tool_enabled": (
         "runtime",
         "set_builtin_tool_enabled",
     ),
     "get_multica_config": (
         "multica_service",
-        "get_config",
+        "read_config",
     ),
     "update_multica_config": (
         "multica_service",
@@ -825,10 +825,14 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     # 不挂平台守卫，一次性票据即凭证）共 2 个操作（2 条路径）。
     # WeKnora 领域知识一键免登录（与 Kaneo 中继同构）新增 /weknora/entry 的
     # POST 与 /weknora/sso/consume 的 GET（经 weknora-gateway 反代抵达，
-    # 不挂平台守卫，登录响应经原生 #oidc_result= 管道交接）共 2 个操作
-    # （2 条路径）。
-    assert len(paths) == 97
-    assert sum(len(item) for item in paths.values()) == 125
+    # 不挂平台守卫，登录响应经原生 #oidc_result= 管道交接）共 2 条路径
+    # （2 个操作）。
+    # multica 多 profile（0154）新增 /multica/profiles 的 list/create、
+    # /multica/profiles/{profile_id} 的 patch/delete、/activate 与 /test 的
+    # post、/workspaces 的 get 共 7 个操作（5 条路径，multica.py 子路由）；
+    # 旧 /multica/config|test|workspaces 四端点契约不变。
+    assert len(paths) == 102
+    assert sum(len(item) for item in paths.values()) == 132
     assert hashlib.sha256(payload).hexdigest() == (
-        "10abf2d761ada7e9847c2f7442b1102520263a70ace5c96218ad2155db604643"
+        "76dfc8516e39d5f5269c8b2b1cfab1d27087794901a48b0029a6ad71f74d49f0"
     )

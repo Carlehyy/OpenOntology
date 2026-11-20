@@ -216,6 +216,70 @@ def probe_grafana() -> None:
         raise RuntimeError("Grafana shared admin check failed")
 
 
+_MULTICA_DEFAULT_SETTING_KEYS = (
+    "multica_default_base_url",
+    "multica_default_web_url",
+    "multica_default_workspace_id",
+    "multica_default_workspace_name",
+    "multica_default_pat",
+)
+
+
+def multica_default_config_state() -> str:
+    """Classify the five deployment-default Multica values.
+
+    Returns ``complete`` (all five set), ``partial`` (some set), or
+    ``disabled`` (all empty). A partial set is never silently healthy: it
+    means the deployment intended a default but cannot deliver one, so
+    callers must surface it explicitly instead of treating it as
+    unconfigured (readiness marks it unavailable).
+    """
+    values = [
+        str(getattr(settings, key) or "").strip()
+        for key in _MULTICA_DEFAULT_SETTING_KEYS
+    ]
+    if all(values):
+        return "complete"
+    if not any(values):
+        return "disabled"
+    return "partial"
+
+
+def probe_multica_default() -> None:
+    """Readiness probe for the optional deployment-default Multica service.
+
+    Verifies the same live contract as profile activation: the deployment
+    PAT authenticates (``GET /api/me``) and the configured workspace is
+    visible to it (``GET /api/workspaces`` membership). Both calls go
+    through ``multica_client`` — base URL validated against the independent
+    Multica allowlist, redirects never followed so the PAT cannot leak to
+    another host, and every request bounded. Non-complete settings (for
+    example the PAT-masked env_file services) skip the probe: classifying
+    partial/disabled is the caller's job, and an unauthenticated probe is
+    meaningless. Failures raise static component text only and cut the
+    upstream exception chain, so URLs, PATs, and response bodies can never
+    reach logs or readiness output.
+    """
+    from app.super_assistant import multica_client
+
+    if multica_default_config_state() != "complete":
+        return
+    base_url = settings.multica_default_base_url.strip()
+    token = settings.multica_default_pat.strip()
+    workspace_id = settings.multica_default_workspace_id.strip()
+    try:
+        multica_client.fetch_me(base_url, token)
+        workspaces = multica_client.list_workspaces(base_url, token)
+    except Exception:
+        raise RuntimeError(
+            "Multica default service is unavailable"
+        ) from None
+    if not any(str(item.get("id") or "") == workspace_id for item in workspaces):
+        raise RuntimeError(
+            "Multica default workspace is not visible to the default PAT"
+        )
+
+
 PROBES: tuple[tuple[str, Callable[[], None]], ...] = (
     ("PostgreSQL", probe_postgresql),
     ("Redis", probe_redis),
@@ -226,11 +290,18 @@ PROBES: tuple[tuple[str, Callable[[], None]], ...] = (
     ("Kaneo", probe_kaneo),
     ("Grafana", probe_grafana),
     ("Chromium CDP", probe_browser),
+    ("Multica default", probe_multica_default),
 )
 # Grafana is deliberately advisory at startup: a runtime failure marks deep
 # readiness 503 while every other service keeps running; deployment-level
 # fail-closed startup is owned by the grafana-bootstrap service.
-NON_BLOCKING_PROBES = frozenset({"Chromium CDP", "Grafana"})
+# Multica default never blocks process startup (the bundled stack starts
+# after the core deployment), but production readiness gates on it once the
+# five-value default is configured: the platform-default profile is
+# materialized from these settings and auto-selected as the user default,
+# so an unreachable default service is a real configured failure, not an
+# optional per-user convenience. Development/test readiness stays advisory.
+NON_BLOCKING_PROBES = frozenset({"Chromium CDP", "Grafana", "Multica default"})
 
 
 def probe_startup_dependencies() -> None:
@@ -241,6 +312,9 @@ def probe_startup_dependencies() -> None:
     the API diagnostics needed to repair that browser. n8n gets the same
     advisory treatment outside production so a developer without an n8n
     instance can still boot the API; production keeps n8n fail-closed.
+    The optional Multica default integration never blocks startup in any
+    environment (the bundled stack is started after the core deployment);
+    production readiness still fails closed while a default is configured.
     All other configured services are part of the process-start contract.
     """
     failed: list[str] = []

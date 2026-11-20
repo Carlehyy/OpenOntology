@@ -586,6 +586,13 @@ def _revalidate_mcp_after_approval(db, item: dict[str, Any]) -> str | None:
     return None
 
 
+def read_builtin_tool_catalog(db, owner_id: str) -> list[dict[str, Any]]:
+    """Materialize deployment drift at the tool-directory entry point."""
+    if multica_service.sync_deployment_default(db, owner_id):
+        db.commit()
+    return builtin_tool_catalog(db, owner_id)
+
+
 def builtin_tool_catalog(db, owner_id: str) -> list[dict[str, Any]]:
     """内置工具目录全景（GET /api/v2/super-assistant/tools 数据源）。
 
@@ -1154,6 +1161,10 @@ def stream_chat(*, conversation_id: str, owner_id: str, assistant_message_id: st
         if not conversation or not assistant_message:
             yield sse("error", {"message": "会话不存在"})
             return
+
+        # Materialize deployment drift before streaming or waiting on providers.
+        if multica_service.sync_deployment_default(db, owner_id):
+            db.commit()
 
         yield sse("meta", {
             "conversationId": conversation.id,

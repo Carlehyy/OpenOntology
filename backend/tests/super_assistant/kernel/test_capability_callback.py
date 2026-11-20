@@ -39,6 +39,83 @@ def test_capability_revision_and_callback_are_immutable_and_scoped(db):
         append_agent_callback(db, owner_id="other", run_id=run.id, call_id=call.id, connector_id="connector-1", provider_event_id="event-2", event_type="call.progress", payload={"call_id": call.id, "progress_seq": 1, "connector_id": "connector-1", "provider_event_id": "event-2"})
 
 
+def test_capability_revision_comparison_is_exact_except_enabled(db):
+    """The immutability comparison is the exact baseline one: every persisted
+    field must match on re-registration of the same (key, revision) — only
+    ``enabled`` stays mutable.  The fixture row is the genuine bd0971cc
+    Multica ``multica_create_task`` shape (query/cancel already proven and
+    wired at revision 2, empty workspace_scope, user_untrusted, no scopes):
+    because current connector derivation is byte-identical, the upgraded
+    runtime re-registers cleanly against real legacy rows with no relaxation."""
+    # Exactly what _persist_connector_capability(source="multica") derives at
+    # bd0971cc for multica_create_task (query/cancel executors wired).
+    def legacy_descriptor():
+        return AgentDescriptor(
+            agent_id="multica:multica_create_task", key="multica_create_task",
+            revision=2, transport="multica", capabilities=("workspace",),
+            supports_cancel=True, supports_query_status=True,
+        )
+
+    row = persist_capability_revision(
+        db, legacy_descriptor(), source="multica",
+        trust_level=TrustLevel.USER_UNTRUSTED, manifest_hash="legacy-digest",
+        side_effect_class="external_async",
+    )
+    db.commit()
+    assert row.supports_cancel is True and row.supports_query_status is True
+    assert row.workspace_scope == [] and row.network_scope == [] and row.secret_refs == []
+
+    # Identical re-registration (same digest, same derived shape): the stored
+    # row is reused as-is and never rewritten.
+    reused = persist_capability_revision(
+        db, legacy_descriptor(), source="multica",
+        trust_level=TrustLevel.USER_UNTRUSTED, manifest_hash="legacy-digest",
+        side_effect_class="external_async",
+    )
+    db.commit()
+    assert reused is row
+    assert db.query(CapabilityRevision).filter_by(key="multica_create_task").count() == 1
+
+    # ``enabled`` is the only mutable field: a disabled snapshot still
+    # resolves to its row so callers can fail closed on it themselves.
+    row.enabled = False
+    db.flush()
+    assert persist_capability_revision(
+        db, legacy_descriptor(), source="multica",
+        trust_level=TrustLevel.USER_UNTRUSTED, manifest_hash="legacy-digest",
+        side_effect_class="external_async",
+    ) is row
+    row.enabled = True
+    db.flush()
+
+    # Any other drift on the same (key, revision) is an immutability
+    # violation: a different digest, a changed derived contract flag, or a
+    # newly derived scope field must never silently reuse the legacy row.
+    with pytest.raises(ContractError, match="immutable"):
+        persist_capability_revision(
+            db, legacy_descriptor(), source="multica",
+            trust_level=TrustLevel.USER_UNTRUSTED, manifest_hash="other-digest",
+            side_effect_class="external_async",
+        )
+    drifted = AgentDescriptor(
+        agent_id="multica:multica_create_task", key="multica_create_task",
+        revision=2, transport="multica", capabilities=("workspace",),
+        supports_cancel=True, supports_query_status=False,
+    )
+    with pytest.raises(ContractError, match="immutable"):
+        persist_capability_revision(
+            db, drifted, source="multica",
+            trust_level=TrustLevel.USER_UNTRUSTED, manifest_hash="legacy-digest",
+            side_effect_class="external_async",
+        )
+    with pytest.raises(ContractError, match="immutable"):
+        persist_capability_revision(
+            db, legacy_descriptor(), source="multica",
+            trust_level=TrustLevel.USER_UNTRUSTED, manifest_hash="legacy-digest",
+            side_effect_class="external_async", workspace_scope=["/new/scope"],
+        )
+
+
 def test_callback_connector_is_fenced_by_call_target(db):
     owner = User(id=str(uuid.uuid4()), username=f"cap-{uuid.uuid4().hex[:8]}", email=f"{uuid.uuid4().hex}@test.local", password_hash="x", role="admin")
     db.add(owner); db.flush()

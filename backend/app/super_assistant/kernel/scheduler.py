@@ -161,6 +161,7 @@ def _poll_external_calls_once() -> None:
     integrations retain the existing outcome-unknown behavior.
     """
     from .contracts import CallStatus, RunStatus
+    from .connectors import MULTICA_TOOL_KEYS
     from .models import ExecutionCall, ExecutionRun
     from .runtime import _resolve_external_connector
     from .store import _now
@@ -198,17 +199,13 @@ def _poll_external_calls_once() -> None:
                 # A revoked/mismatched immutable revision is terminal for
                 # this Call. Other resolution failures (for example a
                 # temporarily unavailable connector) remain retryable.
+                # Multica Calls bound to a profile revision are judged against
+                # their immutable revision instead of the active profile, so a
+                # config switch (A→B) does not fence Calls still owed to A.
                 stale = False
                 try:
-                    from .runtime import _capability_revision_for_target
-                    from .models import CapabilityRevision
-                    stale = _capability_revision_for_target(db, run.owner_id, call.target_ref) != int(call.capability_revision)
-                    if not stale and call.target_ref:
-                        snapshot = db.scalar(select(CapabilityRevision).where(
-                            CapabilityRevision.key == str(call.target_ref),
-                            CapabilityRevision.revision == int(call.capability_revision),
-                        ))
-                        stale = snapshot is not None and not snapshot.enabled
+                    from .runtime import _external_call_capability_stale
+                    stale = _external_call_capability_stale(db, run, call)
                 except Exception:
                     stale = False
                 if stale:
@@ -242,9 +239,30 @@ def _poll_external_calls_once() -> None:
             db.rollback()
             try:
                 observed = asyncio.run(operation(remote_task_ref=remote_ref))
-            except Exception:
-                logger.exception("external call observation failed for run=%s call=%s", run.id, call.id)
-                _release_external_call(claimed_call_id, worker_id)
+            except Exception as exc:
+                # A Multica service failure is a durable identity verdict, not
+                # a transport hiccup: the original run cannot be confirmed
+                # (ambiguous history), the issue identity does not verify, or
+                # the bound source is gone.  Polling again every cycle can
+                # never repair that, so fence the Call into manual attention
+                # with a static reason — the raw upstream message never
+                # reaches durable state.  Transport-level failures stay
+                # transient and keep the existing release-and-retry path.
+                identity_failure = False
+                if str(call.target_ref or "") in MULTICA_TOOL_KEYS:
+                    from app.super_assistant.multica_service import MulticaServiceError
+
+                    identity_failure = isinstance(exc, MulticaServiceError)
+                if identity_failure:
+                    logger.warning(
+                        "multica task identity unavailable for run=%s call=%s",
+                        run.id, call.id,
+                    )
+                    _mark_external_call_manual(
+                        claimed_call_id, worker_id, "multica_task_identity_unavailable")
+                else:
+                    logger.exception("external call observation failed for run=%s call=%s", run.id, call.id)
+                    _release_external_call(claimed_call_id, worker_id)
                 continue
             if not isinstance(observed, dict):
                 _release_external_call(claimed_call_id, worker_id)
@@ -259,6 +277,16 @@ def _poll_external_calls_once() -> None:
                 "content": observed.get("content"),
                 "artifacts": observed.get("artifacts") or [],
             }
+            # Multica queries return the enriched reference (learned
+            # task/issue identity).  The reconciler persists it onto the
+            # Call so later polls target the pinned original execution
+            # and can never drift to a rerun.  The key is only present when
+            # a reference was actually observed, so every other provider's
+            # payload — and with it the hash-derived observation identity in
+            # the outbox — keeps its historical shape across the upgrade.
+            observed_ref = observed.get("remote_task_ref")
+            if observed_ref:
+                payload["remote_task_ref"] = observed_ref
             _enqueue_reconcile_observation(
                 claimed_run_id, claimed_call_id, payload, worker_id,
             )

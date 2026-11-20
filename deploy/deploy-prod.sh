@@ -33,6 +33,9 @@ pre_migration_revision=""
 bootstrap_tmp_path=""
 weknora_bootstrap_active=0
 kaneo_bootstrap_active=0
+# Default for check_image_digest, which validate_multica_config may reach
+# before the strict-mode switch below re-derives it from STRICT_IMAGE_DIGESTS.
+strict_image_digests_enabled=0
 log() { printf '[%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 if [ -L "$APP_DIR" ]; then
   log "$APP_DIR must be a real deployment directory; refusing to follow a symlink"
@@ -67,6 +70,23 @@ HINDSIGHT_IMAGE_PIN="ghcr.io/vectorize-io/hindsight:1.2.0@sha256:19d0c08f3df79ac
 # amd64 实拉/官方重取当前 tag 头 sha256:7d0a4146… 待网络恢复）。拉取失败时
 # 运维重取多架构 digest 并覆盖 .env，禁止浮动 tag。
 HINDSIGHT_POSTGRES_IMAGE_PIN="pgvector/pgvector:pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f"
+# Multica 默认服务与本地栈一样默认启用（MULTICA_ENABLED 留空/true 即启用，
+# 仅显式 false 关闭）。官方自托管栈契约已按上游 multica-ai/multica v0.11.0
+# （commit cb190810a659c1a61c4a86d9f6ecfc9df4b086d8 源码树 + GHCR OCI
+# revision/version 标签）核验：pgvector/pg17 + backend（容器内 8080，
+# /healthz=ready）+ web（容器内 3000，服务端代理 API）。GHCR 只发布
+# latest tag，因此 pin 用与 v0.11.0 revision 一致的多架构 digest。启动
+# 用单独的 --profile multica 有界调用，时机在最终核心 up 之后、readiness
+# 门禁等待之前——五项 MULTICA_DEFAULT_* 完整时生产 readiness 会门禁
+# multica_default，先启动才能避免“等就绪才启动”的自我死锁；五项全空时
+# 该启动仍只是尽力而为（失败仅告警，readiness 不受影响）。MULTICA_DEFAULT_PAT
+# 与 MULTICA_JWT_SECRET/MULTICA_POSTGRES_PASSWORD 是部署级密钥：只落服务器
+# .env（或受控 manifest 物化 PAT），绝不进部署日志。
+MULTICA_INTERNAL=0
+MULTICA_BACKEND_IMAGE_PIN="ghcr.io/multica-ai/multica-backend@sha256:099fd0d1eea8fc4cf03254c6dff86f7de206662ff71db8dc9a78e66726dd65a4"
+MULTICA_WEB_IMAGE_PIN="ghcr.io/multica-ai/multica-web@sha256:ba8fd0fda94a9ec141e15d77e591db8ee4b246720a722d6f9dffd185ee48863b"
+# 与 HINDSIGHT_POSTGRES_IMAGE_PIN 同一官方 pgvector pg17 多架构 digest。
+MULTICA_POSTGRES_IMAGE_PIN="pgvector/pgvector:pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f"
 
 compose_environment() {
   # Docker Compose gives exported shell variables precedence over the project
@@ -74,6 +94,11 @@ compose_environment() {
   # .env, so clear every interpolation/config authority that could otherwise
   # make the containers differ from what this script validated. Values are
   # deliberately named here rather than printed or dynamically expanded.
+  # COMPOSE_PROFILES is set (empty) instead of unset: profile activation is
+  # script-owned (--profile hindsight/multica/integrated-dbx flags only).
+  # Unsetting would let a server .env that carries the local-dev default
+  # COMPOSE_PROFILES=multica smuggle the multica stack into the core
+  # `up -d --remove-orphans`, bypassing the bounded isolated start below.
   env \
     -u ENVIRONMENT \
     -u PUBLIC_PORT \
@@ -177,6 +202,27 @@ compose_environment() {
     -u HINDSIGHT_IMAGE \
     -u HINDSIGHT_POSTGRES_IMAGE \
     -u HINDSIGHT_HF_OFFLINE \
+    -u MULTICA_ENABLED \
+    -u MULTICA_BACKEND_IMAGE \
+    -u MULTICA_WEB_IMAGE \
+    -u MULTICA_POSTGRES_IMAGE \
+    -u MULTICA_POSTGRES_DB \
+    -u MULTICA_POSTGRES_USER \
+    -u MULTICA_POSTGRES_PASSWORD \
+    -u MULTICA_JWT_SECRET \
+    -u MULTICA_WEB_PORT \
+    -u MULTICA_WEB_BIND_ADDR \
+    -u MULTICA_APP_ENV \
+    -u MULTICA_FRONTEND_ORIGIN \
+    -u MULTICA_APP_URL \
+    -u MULTICA_ALLOW_SIGNUP \
+    -u MULTICA_DATABASE_STARTUP_TIMEOUT \
+    -u MULTICA_DEFAULT_BASE_URL \
+    -u MULTICA_DEFAULT_WEB_URL \
+    -u MULTICA_DEFAULT_WORKSPACE_ID \
+    -u MULTICA_DEFAULT_WORKSPACE_NAME \
+    -u MULTICA_DEFAULT_PAT \
+    -u SUPER_ASSISTANT_MULTICA_INTERNAL_BASE_URLS \
     -u STEWARD_INTERNAL_PROXY_BASE_URL \
     -u STEWARD_BROWSER_HTTP_LEASE_SECONDS \
     -u STEWARD_BROWSER_HTTP_FRAME_INTERVAL_MS \
@@ -197,8 +243,8 @@ compose_environment() {
     -u COMPOSE_ENV_FILES \
     -u COMPOSE_FILE \
     -u COMPOSE_PATH_SEPARATOR \
-    -u COMPOSE_PROFILES \
     -u COMPOSE_PROJECT_NAME \
+    COMPOSE_PROFILES= \
     "$@"
 }
 compose() {
@@ -513,9 +559,20 @@ stop_disabled_hindsight_stack() {
   fi
 }
 
+stop_disabled_multica_stack() {
+  # 与 Hindsight 同构：显式关闭（MULTICA_ENABLED=false）时仅停掉历史遗留的
+  # 可选容器（不删卷，数据留给再次启用或外部 Multica 就绪时复用）；启用时
+  # 的拉取/启动由核心 up 之后、readiness 门禁之前的
+  # start_multica_default_stack 负责。
+  if [ "$MULTICA_INTERNAL" = "0" ]; then
+    compose --profile multica stop multica multica-web multica-postgres >/dev/null 2>&1 || true
+  fi
+}
+
 start_required_dependency_services() {
   start_integrated_dbx_if_needed
   stop_disabled_hindsight_stack
+  stop_disabled_multica_stack
   # CDP must be configured and is checked by deep readiness, but an unhealthy
   # browser must not prevent the API process from starting for diagnostics.
   # python_kernel_gateway executes user scripts for Python pipelines; it is
@@ -633,6 +690,57 @@ check_hindsight_control_plane_entry() {
     else
       log "warning: the Hindsight control-plane root returned HTTP ${root_status:-none} instead of the expected login redirect; verify HINDSIGHT_CP_ACCESS_KEY reached the container"
     fi
+  fi
+}
+
+start_multica_default_stack() {
+  # Multica 默认栈的独立启动入口（与 Hindsight 同构的隔离调用）：是全脚本
+  # 唯一携带 --profile multica 的启动调用，且有 COMPOSE_CALL_TIMEOUT 时间
+  # 上界。调用时机在最终核心 up 成功之后、readiness 门禁等待之前——生产
+  # readiness 在五项 MULTICA_DEFAULT_* 配置完整时会门禁 multica_default，
+  # 先启动才能避免“等就绪才启动”的自我死锁；五项全空时 readiness 不看
+  # multica_default，这里的失败只降级为告警。官方镜像契约已核验（backend
+  # /healthz 容器健康检查 + web 健康检查），启动后做有界健康等待；空卷
+  # 首启会在容器内先跑 ./migrate up，等待窗口须覆盖该预算。默认 300 秒与
+  # Hindsight 的隔离启动先例一致：首次部署要在这个有界调用内拉满三个
+  # 钉扎镜像（backend/web/pgvector，GHCR + Docker Hub），慢链路下更短的
+  # 上界会在首拉时超时。启动失败只停掉本次起了一半的容器（卷保留，
+  # 下次部署自动重试，已拉取的镜像层会被复用），绝不触碰核心服务；
+  # 若五值已配置，随后的 readiness 门禁会如实把部署判为失败。绝不宣称空
+  # 卷已初始化账号/PAT/workspace——那是管理员在 Multica 原生界面/官方
+  # CLI 的手动步骤（见 configuration.md）。
+  [ "$MULTICA_INTERNAL" = "1" ] || return 0
+  if ! command -v timeout >/dev/null 2>&1; then
+    log "warning: the timeout command is unavailable, so the bounded Multica start cannot be enforced; starting it unbounded before the readiness gate"
+  fi
+  local start_timeout="${MULTICA_START_TIMEOUT:-300}"
+  case "$start_timeout" in
+    ''|*[!0-9]*|0)
+      log "warning: MULTICA_START_TIMEOUT must be a positive integer; using 300s for this deployment"
+      start_timeout=300
+      ;;
+  esac
+  log "starting the Multica default stack in a separate bounded compose invocation (before the readiness gate, so a configured multica_default check cannot deadlock on a stack that was never started)"
+  local up_status=0
+  COMPOSE_CALL_TIMEOUT="$start_timeout" \
+    compose --profile multica up -d multica multica-web || up_status=$?
+  if [ "$up_status" -ne 0 ]; then
+    if [ "$up_status" -eq 124 ]; then
+      log "warning: the Multica default stack did not start within ${start_timeout}s; stopping it for this deployment (volumes are preserved and the next deployment retries)"
+    else
+      log "warning: the Multica default stack failed to start (exit ${up_status}: image pull or container start); stopping it for this deployment (volumes are preserved and the next deployment retries)"
+    fi
+    COMPOSE_CALL_TIMEOUT="$start_timeout" \
+      compose --profile multica stop multica multica-web multica-postgres >/dev/null 2>&1 || true
+    log "hint: inspect on the server with 'docker compose --profile multica logs multica multica-postgres'"
+    return 0
+  fi
+  # 有界健康等待（官方 /healthz 容器健康检查；空库首启含迁移预算）。
+  if wait_for_service_healthy multica 36 5 multica; then
+    log "multica default stack started and the official backend /healthz check is healthy"
+  else
+    log "warning: the Multica backend did not report a healthy /healthz within the bounded wait; leaving the containers up for operator inspection (volumes are preserved; when the five-value default is configured the readiness gate below will report this deployment as failed)"
+    log "hint: inspect on the server with 'docker compose --profile multica logs multica multica-postgres'"
   fi
 }
 
@@ -1069,6 +1177,17 @@ bootstrap_production_env() {
   # 运维显式写 false 即可关闭（存量 false 服务器见 configure_hindsight_env
   # 的一次性迁移）。
   set_env_value_in_file HINDSIGHT_ENABLED true "$bootstrap_tmp_path"
+  # Multica 默认栈同样生产默认启用（与本地 COMPOSE_PROFILES=multica 默认
+  # 一致）：镜像 pin/端口/栈密钥由 configure_multica_env 生成，五项
+  # MULTICA_DEFAULT_* 保持全空（空卷的账号/PAT/workspace 必须由管理员在
+  # 原生界面创建后回填，部署绝不代写）；栈本体由
+  # start_multica_default_stack 在 readiness 门禁等待前有界启动。运维显式
+  # 写 false 即可关闭。
+  set_env_value_in_file MULTICA_ENABLED true "$bootstrap_tmp_path"
+  # COMPOSE_PROFILES 是本地开发旋钮（.env.example 默认 multica）：服务器
+  # 上 profile 归 deploy-prod.sh 独占（compose_environment 固定空值），
+  # 引导时显式置空，运维手工 compose 调用不会意外激活 multica profile。
+  set_env_value_in_file COMPOSE_PROFILES "" "$bootstrap_tmp_path"
   sync "$bootstrap_tmp_path" 2>/dev/null || sync
   # Publishing with a same-directory hard link is atomic and never replaces
   # an existing file, directory or dangling secret-mount symlink. A check then
@@ -1512,6 +1631,20 @@ hindsight_web_url_origin_ok() {
   [ -n "$rest" ] || return 1
 }
 
+check_image_digest() {
+  local key="$1"
+  local value
+  value="$(env_value "$key")"
+  if [[ ! "$value" =~ @sha256:[0-9a-fA-F]{64}$ ]]; then
+    if [ "$strict_image_digests_enabled" = "1" ]; then
+      log "$key must be pinned to an immutable @sha256 digest"
+      exit 1
+    fi
+    log "$key must be pinned to an immutable @sha256 digest"
+    exit 1
+  fi
+}
+
 configure_hindsight_env() {
   # Hindsight 长期记忆：生产默认启用（开箱即用），运维可随时显式关闭。
   # 历史模板/引导曾默认 false；对"从未开通"的存量服务器做一次性迁移——
@@ -1590,6 +1723,225 @@ configure_hindsight_env() {
   current="$(env_value HINDSIGHT_POSTGRES_IMAGE)"
   [ -n "$current" ] || updates+=("HINDSIGHT_POSTGRES_IMAGE=${HINDSIGHT_POSTGRES_IMAGE_PIN}")
   set_env_values_in_file "${APP_DIR}/.env" "${updates[@]}"
+}
+
+configure_multica_env() {
+  # Multica 默认服务（profile `multica`，生产默认启用，与本地默认一致：
+  # MULTICA_ENABLED 留空/true 均为启用，仅显式 false 关闭——multica 是新
+  # 能力，没有历史 false 模板需要迁移，运维显式写下的 false 永远被尊重）。
+  # 官方 v0.11.0 栈契约已核验：与 Hindsight 同构地落 pin 与密钥。五项默认
+  # 集成值 all-or-nothing 且保持可选：全空合法（栈先跑起来，管理员在原生
+  # 界面完成账号/PAT/workspace 后再回填；此时 readiness 不门禁
+  # multica_default），部分填写是部署错误（fail-closed），完整填写才启用
+  # 部署级默认集成（此后生产 readiness 门禁 multica_default）。PAT 由管理
+  # 员在 Multica 原生界面/官方 CLI 创建后填入服务器 .env（或经受控 manifest
+  # 物化）——部署绝不宣称空卷已初始化账号/PAT/workspace。
+  local current base_url web_url web_port bind_addr ws_id ws_name default_pat
+  local -a updates=()
+  case "$(env_value MULTICA_ENABLED)" in
+    1|true|TRUE|yes|YES|"") MULTICA_INTERNAL=1 ;;
+    0|false|FALSE|no|NO) MULTICA_INTERNAL=0 ;;
+    *)
+      log "MULTICA_ENABLED must be true or false"
+      exit 1
+      ;;
+  esac
+  if [ "$MULTICA_INTERNAL" = "0" ]; then
+    log "Multica default service profile is disabled (MULTICA_ENABLED=false); the bundled stack stays stopped and the five-value default is validated as-is"
+    set_env_value MULTICA_ENABLED false
+    return 0
+  fi
+  updates+=("MULTICA_ENABLED=true")
+  # 官方镜像 digest pin：已存在的值（含运维自选的其它 @sha256 钉扎）一律
+  # 保留；validate 阶段统一拒绝非 digest 引用。
+  current="$(env_value MULTICA_BACKEND_IMAGE)"
+  [ -n "$current" ] || updates+=("MULTICA_BACKEND_IMAGE=${MULTICA_BACKEND_IMAGE_PIN}")
+  current="$(env_value MULTICA_WEB_IMAGE)"
+  [ -n "$current" ] || updates+=("MULTICA_WEB_IMAGE=${MULTICA_WEB_IMAGE_PIN}")
+  current="$(env_value MULTICA_POSTGRES_IMAGE)"
+  [ -n "$current" ] || updates+=("MULTICA_POSTGRES_IMAGE=${MULTICA_POSTGRES_IMAGE_PIN}")
+  # web 宿主发布端口与绑定地址。Multica web 自带账号登录/PAT 铸造界面，
+  # 不得明文公网暴露：默认只绑 loopback（SSH 隧道或同宿主 TLS 反代使用），
+  # 需要反代跨机到达时才显式放开 MULTICA_WEB_BIND_ADDR（须为 IP 字面量，
+  # 且必须置于 TLS 反代之后）。API 容器不发布宿主端口。
+  current="$(env_value MULTICA_WEB_PORT)"
+  [ -n "$current" ] || updates+=("MULTICA_WEB_PORT=18100")
+  bind_addr="$(env_value MULTICA_WEB_BIND_ADDR)"
+  if [ -z "$bind_addr" ]; then
+    updates+=("MULTICA_WEB_BIND_ADDR=127.0.0.1")
+    log "Multica web UI is bound to loopback only (default MULTICA_WEB_BIND_ADDR=127.0.0.1); access it via an SSH tunnel or a same-host TLS reverse proxy, never expose the plaintext login/PAT UI"
+  fi
+  # Multica 栈自身密钥：留空/本地开发兜底值时生成强随机值（与 Hindsight
+  # 密钥同构；JWT_SECRET 用于 Multica 自身会话签名，与平台凭据无关）。
+  for secret_assignment in "MULTICA_JWT_SECRET:32" "MULTICA_POSTGRES_PASSWORD:24"; do
+    current="$(env_value "${secret_assignment%%:*}")"
+    case "$current" in
+      ""|multica-local-jwt-secret-change-me|multica-local-password)
+        updates+=("${secret_assignment%%:*}=$(random_hex "${secret_assignment#*:}")")
+        log "generated independent Multica runtime secret: ${secret_assignment%%:*}"
+        ;;
+    esac
+  done
+  # 五值默认集的推导只在“其余四值已齐、仅差派生项”时进行：全空集合保持
+  # 全空（栈正常启动、无部署级默认，readiness 不门禁 multica_default——
+  # 管理员在原生界面完成账号/PAT/workspace 后再回填），部分填写则原样交给
+  # validate 的 all-or-nothing fail-closed，绝不替管理员把半成品配置补成
+  # “完整”。
+  base_url="$(env_value MULTICA_DEFAULT_BASE_URL)"
+  web_url="$(env_value MULTICA_DEFAULT_WEB_URL)"
+  ws_id="$(env_value MULTICA_DEFAULT_WORKSPACE_ID)"
+  ws_name="$(env_value MULTICA_DEFAULT_WORKSPACE_NAME)"
+  default_pat="$(env_value MULTICA_DEFAULT_PAT)"
+  if [ -n "$ws_id" ] && [ -n "$ws_name" ] && [ -n "$default_pat" ]; then
+    # bundled 部署的默认内网地址：未显式配置时按官方容器端口契约（API 固定
+    # 8080）推导并落 .env（显式配置一律尊重，可指向外部 Multica）。
+    if [ -z "$base_url" ]; then
+      base_url="http://multica:8080"
+      updates+=("MULTICA_DEFAULT_BASE_URL=${base_url}")
+      log "configured MULTICA_DEFAULT_BASE_URL from the bundled multica service (official container contract: API on 8080)"
+    fi
+    # 浏览器入口 WEB_URL 不做推导：web 宿主端口默认只绑 loopback，按
+    # PUBLIC_TLS_IP 推导出的明文 origin 既不可达也不安全。回填五值时必须
+    # 显式给出平台用户浏览器可达的 origin（通常是指向该端口的 TLS 反代
+    # HTTPS 地址），validate 会拒绝缺失/形态错误。
+    if [ -z "$web_url" ]; then
+      web_port="$(env_value MULTICA_WEB_PORT)"
+      web_port="${web_port:-18100}"
+      log "MULTICA_DEFAULT_WEB_URL is not set while the rest of the five-value default is present; set the browser-reachable Multica web origin (e.g. the HTTPS origin of your TLS reverse proxy for port ${web_port}) so the five-value default can take effect"
+      unset web_port
+    fi
+  fi
+  # Multica 内网地址允许清单独立于 MCP 清单：未显式配置时按同源补齐，绝不
+  # 写入 SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS。
+  current="$(env_value SUPER_ASSISTANT_MULTICA_INTERNAL_BASE_URLS)"
+  if [ -z "$current" ] && [ -n "$base_url" ]; then
+    updates+=("SUPER_ASSISTANT_MULTICA_INTERNAL_BASE_URLS=${base_url}")
+    log "configured SUPER_ASSISTANT_MULTICA_INTERNAL_BASE_URLS for the bundled multica origin (independent of the MCP allowlist)"
+  fi
+  set_env_values_in_file "${APP_DIR}/.env" "${updates[@]}"
+}
+
+multica_default_origin_ok() {
+  # MULTICA_DEFAULT_BASE_URL/WEB_URL 的部署期形态校验：http(s) origin（可带
+  # 端口/IPv6 括号），不带凭据/路径/查询/fragment；允许单个尾部斜杠。
+  local value="${1:-}" rest
+  case "$value" in
+    http://*|https://*) ;;
+    *) return 1 ;;
+  esac
+  case "$value" in
+    *\#*|*\?*|*@*) return 1 ;;
+  esac
+  rest="${value#*://}"
+  case "$rest" in
+    /) return 1 ;;
+    */) rest="${rest%/}" ;;
+  esac
+  case "$rest" in
+    */*) return 1 ;;
+  esac
+  [ -n "$rest" ] || return 1
+}
+
+multica_bind_addr_ok() {
+  # MULTICA_WEB_BIND_ADDR 只允许 IP 字面量（IPv4 点分十进制或 IPv6 冒号
+  # 十六进制），拒绝 host:port、CIDR、scheme 等会改变发布语义的值；docker
+  # 端口发布会对地址做最终校验，这里提前给出可操作的部署错误。
+  local value="${1:-}" octet
+  [ -n "$value" ] || return 1
+  case "$value" in
+    *[!0-9A-Fa-f:.]*) return 1 ;;
+  esac
+  octet='([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])'
+  if [[ "$value" =~ ^$octet\.$octet\.$octet\.$octet$ ]]; then
+    return 0
+  fi
+  [[ "$value" == *:* ]] || return 1
+  [[ "$value" =~ ^[0-9A-Fa-f:]+$ ]]
+}
+
+validate_multica_config() {
+  # 启用与未启用都先做五项默认值的 all-or-nothing 校验（部分填写是部署
+  # 错误）；五项全空在两种状态下都合法——启用时栈正常跑、无部署级默认
+  # （readiness 不门禁 multica_default），管理员在原生界面完成初始化后
+  # 回填。仅在启用 bundled 栈时才强校验镜像/密钥/端口。
+  local multica_pat
+  local configured_count=0 key value
+  for key in \
+    MULTICA_DEFAULT_BASE_URL MULTICA_DEFAULT_WEB_URL \
+    MULTICA_DEFAULT_WORKSPACE_ID MULTICA_DEFAULT_WORKSPACE_NAME \
+    MULTICA_DEFAULT_PAT; do
+    value="$(env_value "$key")"
+    [ -n "$value" ] && configured_count=$((configured_count + 1))
+  done
+  if [ "$configured_count" -ne 0 ] && [ "$configured_count" -ne 5 ]; then
+    log "MULTICA_DEFAULT_* must be all set or all empty (found ${configured_count}/5); a partial default configuration is refused"
+    exit 1
+  fi
+  [ "$MULTICA_INTERNAL" = "1" ] || return 0
+  # 官方镜像 digest 门禁：三个镜像引用（默认 pin 或运维覆盖）都必须是
+  # 不可变 @sha256；GHCR 只发布 latest tag，浮动引用一律拒绝。
+  for key in MULTICA_BACKEND_IMAGE MULTICA_WEB_IMAGE MULTICA_POSTGRES_IMAGE; do
+    [ -n "$(env_value "$key")" ] || {
+      log "$key is required when MULTICA_ENABLED=true (configure_multica_env writes the verified official pin)"
+      exit 1
+    }
+    check_image_digest "$key"
+  done
+  # 栈自身密钥：由 configure_multica_env 生成，绝不接受空值/开发兜底值。
+  for key in MULTICA_JWT_SECRET MULTICA_POSTGRES_PASSWORD; do
+    value="$(env_value "$key")"
+    case "$value" in
+      ""|multica-local-jwt-secret-change-me|multica-local-password)
+        log "$key must be a deployment-generated strong value when MULTICA_ENABLED=true (configure_multica_env generates it)"
+        exit 1
+        ;;
+    esac
+  done
+  # 五值默认集完整时才校验形态：BASE_URL 允许内网 origin；WEB_URL 是所有
+  # 平台用户浏览器可达的入口，不做部署期推导，必须显式给出（loopback 绑定
+  # 下推导值既不可达也不安全）。
+  if [ "$configured_count" -eq 5 ]; then
+    if ! multica_default_origin_ok "$(env_value MULTICA_DEFAULT_BASE_URL)"; then
+      log "MULTICA_DEFAULT_BASE_URL must be an absolute http(s) origin without credentials, path, query, or fragment"
+      exit 1
+    fi
+    if ! multica_default_origin_ok "$(env_value MULTICA_DEFAULT_WEB_URL)"; then
+      log "MULTICA_DEFAULT_WEB_URL must be an absolute http(s) origin without credentials, path, query, or fragment; set the browser-reachable web origin explicitly (the deployment never derives it)"
+      exit 1
+    fi
+    multica_pat="$(env_value MULTICA_DEFAULT_PAT)"
+    if [ "${#multica_pat}" -lt 8 ]; then
+      log "MULTICA_DEFAULT_PAT must contain at least 8 characters"
+      exit 1
+    fi
+    case "$multica_pat" in
+      *[[:space:]]*) log "MULTICA_DEFAULT_PAT must not contain whitespace"; exit 1 ;;
+    esac
+    unset multica_pat
+  fi
+  case "$(env_value MULTICA_WEB_PORT)" in
+    ""|*[!0-9]*)
+      log "MULTICA_WEB_PORT must be an integer between 1 and 65535"
+      exit 1
+      ;;
+    *)
+      if [ "$(env_value MULTICA_WEB_PORT)" -lt 1 ] \
+          || [ "$(env_value MULTICA_WEB_PORT)" -gt 65535 ]; then
+        log "MULTICA_WEB_PORT must be an integer between 1 and 65535"
+        exit 1
+      fi
+      ;;
+  esac
+  # web 绑定地址：只接受 IP 字面量（IPv4 点分十进制或 IPv6），杜绝
+  # host:port/scheme 之类会改变发布语义的值；默认 127.0.0.1（loopback）。
+  value="$(env_value MULTICA_WEB_BIND_ADDR)"
+  value="${value:-127.0.0.1}"
+  if ! multica_bind_addr_ok "$value"; then
+    log "MULTICA_WEB_BIND_ADDR must be a plain IPv4 or IPv6 address (default 127.0.0.1); exposing the Multica login/PAT UI beyond loopback requires a TLS reverse proxy"
+    exit 1
+  fi
+  log "validated Multica default service URLs and deployment credentials"
 }
 
 validate_hindsight_config() {
@@ -1923,6 +2275,10 @@ dependency_key_allowed() {
     KANEO_APP_IMAGE|KANEO_POSTGRES_IMAGE|\
     HINDSIGHT_DB_PASSWORD|HINDSIGHT_API_KEY|HINDSIGHT_SERVICE_TOKEN|\
     HINDSIGHT_IMAGE|HINDSIGHT_POSTGRES_IMAGE|\
+    MULTICA_DEFAULT_PAT|MULTICA_DEFAULT_WEB_URL|\
+    MULTICA_DEFAULT_BASE_URL|MULTICA_DEFAULT_WORKSPACE_ID|\
+    MULTICA_DEFAULT_WORKSPACE_NAME|\
+    MULTICA_BACKEND_IMAGE|MULTICA_WEB_IMAGE|MULTICA_POSTGRES_IMAGE|\
     SUPER_ASSISTANT_MCP_STDIO_ENABLED|SUPER_ASSISTANT_MCP_STDIO_ALLOWED_COMMANDS)
       return 0
       ;;
@@ -2010,6 +2366,7 @@ configure_weknora_env
 configure_kaneo_env
 configure_grafana_env
 configure_hindsight_env
+configure_multica_env
 # Chromium is bundled with the production Compose stack. Pin the internal CDP
 # URL so existing server-side .env files receive the newly required setting.
 set_env_value STEWARD_BROWSER_CDP_URL http://browser:9222
@@ -2400,7 +2757,8 @@ redact_compose_logs() {
     WEKNORA_JWT_SECRET WEKNORA_SYSTEM_AES_KEY WEKNORA_SYSTEM_SIGNING_KEY \
     KANEO_ADMIN_PASSWORD KANEO_DB_PASSWORD KANEO_AUTH_SECRET \
     HINDSIGHT_DB_PASSWORD HINDSIGHT_API_KEY HINDSIGHT_SERVICE_TOKEN \
-    HINDSIGHT_CP_ACCESS_KEY; do
+    HINDSIGHT_CP_ACCESS_KEY \
+    MULTICA_DEFAULT_PAT MULTICA_JWT_SECRET MULTICA_POSTGRES_PASSWORD; do
     value="$(env_value "$key")"
     [ -z "$value" ] || sensitive_values+=("$value")
   done
@@ -2625,6 +2983,7 @@ validate_weknora_config
 validate_kaneo_config
 validate_grafana_config
 validate_hindsight_config
+validate_multica_config
 if [ -z "$(env_value ENCRYPTION_KEY)" ]; then
   log "ENCRYPTION_KEY is empty; preserving the existing SECRET_KEY-derived encryption key"
 fi
@@ -2661,19 +3020,6 @@ case "$process_plugin_runner_mode" in
     ;;
 esac
 unset process_plugin_runner_assignment_state process_plugin_runner_mode
-check_image_digest() {
-  local key="$1"
-  local value
-  value="$(env_value "$key")"
-  if [[ ! "$value" =~ @sha256:[0-9a-fA-F]{64}$ ]]; then
-    if [ "$strict_image_digests_enabled" = "1" ]; then
-      log "$key must be pinned to an immutable @sha256 digest"
-      exit 1
-    fi
-    log "$key must be pinned to an immutable @sha256 digest"
-    exit 1
-  fi
-}
 # The browser consumes attacker-controlled page content and is therefore a
 # security boundary even when the operator intentionally keeps the broader
 # image policy in warning mode during migration. Never allow its tag to drift.
@@ -2697,6 +3043,14 @@ if [ "$HINDSIGHT_INTERNAL" = "1" ]; then
   for image_key in HINDSIGHT_IMAGE HINDSIGHT_POSTGRES_IMAGE; do
     check_image_digest "$image_key"
   done
+fi
+# Multica 默认栈同理：只在 MULTICA_ENABLED=true 时参与 digest 门禁（三个
+# 官方镜像引用；默认 pin 由 configure_multica_env 落 .env，validate 阶段
+# 拒绝非 digest 引用）。
+if [ "$MULTICA_INTERNAL" = "1" ]; then
+  check_image_digest MULTICA_BACKEND_IMAGE
+  check_image_digest MULTICA_WEB_IMAGE
+  check_image_digest MULTICA_POSTGRES_IMAGE
 fi
 if [ "${DEPLOY_VALIDATE_ONLY:-0}" = "1" ]; then
   log "production environment validation succeeded"
@@ -2868,6 +3222,13 @@ if ! run_with_retry compose up -d --remove-orphans; then
   log "restore the pre-deploy database/files backup before rolling back the application"
   exit 1
 fi
+# Multica 默认栈必须在 readiness 门禁等待之前启动：五项 MULTICA_DEFAULT_*
+# 配置完整时，生产 readiness 会门禁 multica_default（backend 真实探测
+# Multica），等核心就绪之后再启动会形成“readiness 等 Multica、Multica
+# 等部署成功”的自我死锁。这里是独立的有界 compose 调用，失败只停掉本次
+# 起了一半的 multica 容器（卷保留），绝不回滚已成功的核心 up；五值未配置
+# 时 readiness 不看 multica_default，失败仅是特性级告警。
+start_multica_default_stack || log "warning: the Multica default stack start reported an internal failure; the core deployment above is unaffected"
 log "waiting for backend, pipeline executor, replica executor and frontend readiness: ${READINESS_URL}"
 for i in $(seq 1 60); do
   if curl -fsS --connect-timeout 5 --max-time 10 "$READINESS_URL" >/dev/null \
@@ -2886,6 +3247,7 @@ for i in $(seq 1 60); do
     log "deployment succeeded"
     # 可选记忆栈在核心成功后单独启动（backend 已就绪，Hindsight 的 LLM 回调
     # 目标存在）。调用侧兜底：函数内部任何未预期非零也只记录告警。
+    # Multica 默认栈已在上方 readiness 门禁等待之前启动（见调用处注释）。
     start_hindsight_memory_stack || log "warning: the optional Hindsight memory stack start reported an internal failure; the succeeded core deployment above is unaffected"
     compose ps
     exit 0
@@ -2898,7 +3260,8 @@ compose ps || true
 redact_compose_logs backend dbx browser frontend pipeline_executor \
   integrated_replica_executor \
   weknora-app weknora-ui weknora-gateway weknora-docreader \
-  kaneo-db kaneo-app kaneo-gateway grafana grafana-bootstrap || true
+  kaneo-db kaneo-app kaneo-gateway grafana grafana-bootstrap \
+  multica multica-web multica-postgres || true
 stop_new_runtime_after_failed_deploy
 log "migration reached head; restore the pre-deploy backup before rolling back the application"
 exit 1

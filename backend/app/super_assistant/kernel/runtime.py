@@ -22,7 +22,7 @@ from app.shared.database import SessionLocal
 from app.super_assistant import delegation, provider
 from app.super_assistant.models import SuperAssistantConversation
 
-from .contracts import CallOutcome, CallStatus, RunStatus
+from .contracts import CallOutcome, CallStatus, ContractError, RunStatus
 from .context import ContextCandidate, ContextPackPlanner, ContextTier, SourceRef
 from .context_sources import collect_context_candidates, mark_selected_context_sources
 from .reconciler import ReconcileAction, RemoteObservation, decide_reconciliation, normalize_remote_state
@@ -40,7 +40,21 @@ from .models import (
 from .policies import ErrorEnvelope, ExecutionPolicy, SideEffectClass, requires_approval
 from .artifacts import MAX_ARTIFACT_BYTES, validate_object_storage_ref
 from .store import _add_outbox, _hash_payload, _now, acquire_lease, append_event, assert_lease, create_run, renew_lease
-from .connectors import ConnectorRegistry, McpToolConnector, MulticaToolConnector, PluginRunnerConnector, ProcessPluginConnector, TrustLevel
+from .connectors import (
+    MULTICA_TOOL_KEYS,
+    ConnectorRegistry,
+    McpToolConnector,
+    MulticaToolConnector,
+    PluginRunnerConnector,
+    ProcessPluginConnector,
+    TrustLevel,
+    multica_config_digest_value,
+    multica_config_for,
+    multica_learned_remote_ref,
+    multica_ref_metadata,
+    stable_manifest_hash,
+    verify_multica_ref_source,
+)
 
 
 # Implementations are registered by application bootstrap (and by tests).
@@ -303,6 +317,15 @@ async def process_execution_message(payload: dict) -> None:
         if before == RunStatus.QUEUED.value:
             run.status = RunStatus.ACTIVE.value; run.version += 1
             append_event(db, run, event_type="run.status_changed", payload={"from": before, "to": run.status, "reason": "activation", "actor": "worker", "version": run.version}, actor={"kind": "worker"}, command_id=str(payload.get("command_id") or uuid.uuid4()), idempotency_key=f"activate:{run.id}", lease=token)
+            # First activation only: materialize the deployment-derived
+            # default Multica profile inside this same short transaction (the
+            # one that commits below, before any provider/model I/O — the
+            # service takes the owner lock only on settings drift and never
+            # does network work under it).  This keeps the tool menu below
+            # and every later source freeze reading a settled projection.
+            from app.super_assistant import multica_service
+
+            multica_service.sync_deployment_default(db, run.owner_id)
         conversation = db.scalar(select(SuperAssistantConversation).where(SuperAssistantConversation.id == run.conversation_id))
         if conversation is None: raise RuntimeError("conversation missing for execution Run")
         # Read pending user inputs into this activation, but do not consume
@@ -626,48 +649,86 @@ def _resolve_external_connector(db, run: ExecutionRun, call: ExecutionCall):
             return connector_registry.resolve(target, int(call.capability_revision))
         except Exception:
             pass
-    if target in {"multica_list_agents", "multica_list_tasks", "multica_create_task"}:
+    if target in MULTICA_TOOL_KEYS:
         try:
             from app.super_assistant import multica_service
-            config = multica_service.active_config(db, run.owner_id)
-            if config is not None:
-                digest = _external_config_hash({"kind": "multica", "base_url": config.base_url, "workspace_id": config.workspace_id, "token": config.token_encrypted})
-                if _capability_revision_for_target(db, run.owner_id, target) != int(call.capability_revision):
-                    return None
-                def execute(arguments: dict) -> str:
-                    session = SessionLocal()
-                    try:
-                        return multica_service.execute_tool(session, run.owner_id, target, arguments)
-                    finally:
-                        session.close()
+            # Source proof, fail closed: a Multica Call executes only against
+            # the source it can prove — an explicit revision binding (Call
+            # column, else revision metadata carried by the reference),
+            # endpoint/workspace evidence on an old reference, or, for
+            # pure-legacy references, the frozen capability digest.  Nothing
+            # ever borrows the currently active profile.
+            bound_revision_id, ref_base_url, ref_workspace_id = _multica_call_evidence(call)
+            capability_revision = int(call.capability_revision)
+            config, resolved_revision_id = _multica_resolve_source(
+                db, run.owner_id, target, capability_revision,
+                bound_revision_id, ref_base_url, ref_workspace_id,
+            )
+            # Cross-workspace identity: a provider reference that records its
+            # source must match the source this Call just resolved to.
+            verify_multica_ref_source(call.remote_task_ref, config, resolved_revision_id)
+            digest = multica_config_digest_value(config)
 
-                def query(remote_task_ref: str) -> dict:
-                    session = SessionLocal()
-                    try:
-                        return multica_service.query_external_task(session, run.owner_id, remote_task_ref)
-                    finally:
-                        session.close()
+            def execute(arguments: dict) -> str:
+                session = SessionLocal()
+                try:
+                    _, proven_revision_id = _multica_resolve_source(
+                        session, run.owner_id, target, capability_revision,
+                        bound_revision_id, ref_base_url, ref_workspace_id,
+                    )
+                    return multica_service.execute_tool(
+                        session, run.owner_id, target, arguments,
+                        revision_id=proven_revision_id,
+                    )
+                finally:
+                    session.close()
 
-                def cancel(remote_task_ref: str) -> dict:
-                    session = SessionLocal()
-                    try:
-                        return multica_service.cancel_external_task(session, run.owner_id, remote_task_ref)
-                    finally:
-                        session.close()
+            def query(remote_task_ref: str) -> dict:
+                session = SessionLocal()
+                try:
+                    bound, proven_revision_id = _multica_resolve_source(
+                        session, run.owner_id, target, capability_revision,
+                        bound_revision_id, ref_base_url, ref_workspace_id,
+                    )
+                    verify_multica_ref_source(remote_task_ref, bound, proven_revision_id)
+                    return multica_service.query_external_task(
+                        session, run.owner_id, remote_task_ref,
+                        revision_id=proven_revision_id,
+                    )
+                finally:
+                    session.close()
 
-                connector = MulticaToolConnector(
-                    tool_name=target,
-                    executor=execute,
-                    query_executor=query if target == "multica_create_task" else None,
-                    cancel_executor=cancel if target == "multica_create_task" else None,
-                    # Revision 2 records the newly proven async query/cancel
-                    # contract; old revision-1 Calls remain immutable and
-                    # continue to use their historical synchronous snapshot.
-                    revision=int(call.capability_revision), manifest_hash=digest,
-                )
-                _persist_connector_capability(db, connector, source="multica")
-                connector_registry.register(connector)
-                return connector
+            def cancel(remote_task_ref: str) -> dict:
+                session = SessionLocal()
+                try:
+                    bound, proven_revision_id = _multica_resolve_source(
+                        session, run.owner_id, target, capability_revision,
+                        bound_revision_id, ref_base_url, ref_workspace_id,
+                    )
+                    verify_multica_ref_source(remote_task_ref, bound, proven_revision_id)
+                    return multica_service.cancel_external_task(
+                        session, run.owner_id, remote_task_ref,
+                        revision_id=proven_revision_id,
+                    )
+                finally:
+                    session.close()
+
+            connector = MulticaToolConnector(
+                tool_name=target,
+                executor=execute,
+                query_executor=query if target == "multica_create_task" else None,
+                cancel_executor=cancel if target == "multica_create_task" else None,
+                # Revision 2 records the newly proven async query/cancel
+                # contract; old revision-1 Calls remain immutable and
+                # continue to use their historical synchronous snapshot.
+                revision=capability_revision, manifest_hash=digest,
+                profile_revision_id=resolved_revision_id,
+                profile_base_url=str(config.base_url or "") or None,
+                profile_workspace_id=str(config.workspace_id or "") or None,
+            )
+            _persist_connector_capability(db, connector, source="multica")
+            connector_registry.register(connector)
+            return connector
         except Exception:
             logger.exception("failed to resolve Multica connector target=%s", target)
     try:
@@ -823,6 +884,12 @@ def _persist_connector_capability(db, connector, *, source: str) -> None:
         persisted_hash = getattr(connector, "manifest_hash", None)
         if persisted_hash:
             digest = persisted_hash
+        # Multica snapshots deliberately record no extra scope fields here:
+        # the manifest digest already freezes the endpoint/workspace/token
+        # triple, and source isolation is enforced per Call by
+        # ``_multica_resolve_source``/``verify_multica_ref_source``.  Generic
+        # extra fields would make every snapshot persisted by an older code
+        # shape trip the immutable-revision contract on re-registration.
     row = persist_capability_revision(
         db,
         descriptor,
@@ -1685,32 +1752,216 @@ def _persist_assistant_artifact(db, run, call, attempt, content: str, token):
     return artifact
 
 
+def _multica_call_evidence(call) -> tuple[str | None, str | None, str | None]:
+    """Source evidence a Multica Call carries: (bound revision id, reference
+    base_url, reference workspace_id).  The Call column is authoritative;
+    revision metadata embedded in the reference binds legacy rows that were
+    reconciled against refs written by a bound flow."""
+    metadata = multica_ref_metadata(call.remote_task_ref)
+    bound = call.multica_profile_revision_id or (metadata or {}).get("profile_revision_id")
+    return (
+        str(bound) if bound else None,
+        (metadata or {}).get("base_url"),
+        (metadata or {}).get("workspace_id"),
+    )
+
+
+def _multica_resolve_source(
+    db, owner_id: str, target: str, capability_revision: int,
+    bound_revision_id: str | None, ref_base_url: str | None, ref_workspace_id: str | None,
+):
+    """Resolve ``(config, revision_id)`` a Multica Call must execute against.
+
+    Fail-closed source proof — raises :class:`ContractError` when the source
+    cannot be proven, so an old reference is never retargeted to the currently
+    active profile:
+
+    - an explicit binding (Call column, else revision metadata on the
+      reference) resolves that immutable revision forever — a profile switch,
+      soft delete or token edit (new retired revision) keeps it resolvable,
+      only an explicit revocation fails;
+    - endpoint/workspace evidence on an old reference resolves the unique
+      usable revision of exactly that source via ``config_for_source``;
+    - a pure-legacy reference is resolved from the authoritative persisted
+      capability digest: the frozen ``CapabilityRevision.manifest_hash`` is
+      the only durable record of the source the Call was created under, and
+      the owner's revisions are read across any later profile switch to find
+      a usable unrevoked revision whose digest proves it.  A digest whose
+      credential was explicitly revoked on any matching revision — including
+      an identical twin row — fails closed.  Without a persisted snapshot —
+      or when no usable revision matches — nothing proves the source, and
+      the Call fails closed instead of guessing.
+
+    The returned revision id is what closures must hand to the service layer
+    (its query/cancel contract requires an explicit source); the active
+    profile is never borrowed for a legacy Call.
+    """
+    if bound_revision_id:
+        config = multica_config_for(db, owner_id, bound_revision_id)
+        if config is None:
+            raise ContractError("multica profile revision is no longer resolvable")
+        return config, bound_revision_id
+    if ref_base_url and ref_workspace_id:
+        config = multica_config_for(
+            db, owner_id, base_url=ref_base_url, workspace_id=ref_workspace_id,
+        )
+        if config is None:
+            raise ContractError("multica reference source is no longer resolvable")
+        return config, str(config.id)
+    snapshot = _capability_snapshot(db, target, capability_revision)
+    if snapshot is None:
+        raise ContractError("multica legacy call has no persisted capability snapshot")
+    if not snapshot.enabled:
+        raise ContractError("multica legacy capability is disabled")
+    revision = _multica_revision_for_digest(db, owner_id, snapshot.manifest_hash)
+    if revision is None:
+        raise ContractError("multica legacy call no longer matches any usable source revision")
+    return revision, str(revision.id)
+
+
+def _multica_revision_for_digest(db, owner_id: str, manifest_hash: str):
+    """The owner's usable unrevoked revision whose digest proves the source.
+
+    A canonical pure DB read, narrowly scoped to the owner's profiles.  It
+    mirrors the service's revision semantics (``config_for_revision`` /
+    ``config_for_source``): retired revisions stay resolvable — a token edit
+    must not strand pending work on the old credential — while revoked,
+    disabled or incomplete revisions never authorize execution.  Identical
+    digests cover the identical endpoint/workspace/credential triple, so the
+    deterministic latest-first pick among them is proof, not a guess — with
+    one security carve-out: when ANY digest-matching revision is revoked, the
+    credential behind that digest was explicitly withdrawn, and no twin row
+    may be substituted for it; resolution fails closed instead.  Explicit
+    bindings (Call column or reference evidence) never pass through here.
+    Returns ``None`` (fail closed) when no usable revision matches.
+    """
+    from app.super_assistant.models import (
+        SuperAssistantMulticaProfile,
+        SuperAssistantMulticaProfileRevision,
+    )
+
+    rows = db.scalars(select(SuperAssistantMulticaProfileRevision).join(
+        SuperAssistantMulticaProfile,
+        SuperAssistantMulticaProfile.id == SuperAssistantMulticaProfileRevision.profile_id,
+    ).where(
+        SuperAssistantMulticaProfile.owner_id == str(owner_id),
+    ).order_by(
+        SuperAssistantMulticaProfileRevision.created_at.desc(),
+        SuperAssistantMulticaProfileRevision.revision_no.desc(),
+    )).all()
+    matches: list[SuperAssistantMulticaProfileRevision] = []
+    for row in rows:
+        if not (str(row.base_url or "").strip() and str(row.workspace_id or "").strip() and row.token_encrypted):
+            continue
+        if multica_config_digest_value(row) == manifest_hash:
+            matches.append(row)
+    if any(row.revoked_at is not None for row in matches):
+        # A revoked match revokes the credential itself: an unrevoked twin
+        # with the identical ciphertext must never be substituted for it.
+        return None
+    for row in matches:
+        if row.enabled:
+            return row
+    return None
+
+
+def _multica_freeze_source(db, owner_id: str):
+    """``(digest, revision_id)`` of the ONE effective binding NEW work freezes.
+
+    A single projection read returns both the manifest digest (which derives
+    the frozen capability revision number) and the profile revision id (which
+    becomes the Call's immutable source binding).  Because both come from the
+    same effective revision row, a profile switch between tool menu and
+    launch — or any other change of the effective binding mid-flight — can
+    never freeze a digest from one source with the revision id of another.
+    ``None`` means no usable source is active.
+    """
+    config = multica_config_for(db, owner_id)
+    if config is None:
+        return None
+    revision_id = str(getattr(config, "profile_revision_id", "") or "") or None
+    return multica_config_digest_value(config), revision_id
+
+
+def _multica_freeze_capability(db, owner_id: str, target: str) -> tuple[int, str | None]:
+    """``(capability_revision, source binding)`` frozen from one binding read.
+
+    Both values derive from the single :func:`_multica_freeze_source` read, so
+    the persisted capability digest behind the revision number and the Call's
+    ``multica_profile_revision_id`` always describe the same effective source.
+    """
+    default = 2 if target == "multica_create_task" else 1
+    frozen = _multica_freeze_source(db, owner_id)
+    if frozen is None:
+        return default, None
+    digest, revision_id = frozen
+    return _capability_revision_for_hash(db, target, digest, default), revision_id
+
+
+def _external_call_capability_stale(db, run, call) -> bool:
+    """True when a Call's frozen capability can no longer authorize it.
+
+    Multica Calls are judged against their proven source: an unprovable source
+    is terminal (fail closed), a bound revision whose persisted snapshot hash
+    drifted is terminal, and transient resolution errors stay retryable.
+    Other targets keep the historical revision-number and enabled semantics.
+    """
+    target = str(call.target_ref or "")
+    if target in MULTICA_TOOL_KEYS:
+        try:
+            bound_revision_id, ref_base_url, ref_workspace_id = _multica_call_evidence(call)
+            config, _ = _multica_resolve_source(
+                db, run.owner_id, target, int(call.capability_revision),
+                bound_revision_id, ref_base_url, ref_workspace_id,
+            )
+        except ContractError:
+            return True
+        except Exception:
+            logger.exception("failed to resolve multica source for target=%s", target)
+            return False
+        if bound_revision_id:
+            snapshot = _capability_snapshot(db, target, int(call.capability_revision))
+            return snapshot is not None and snapshot.manifest_hash != multica_config_digest_value(config)
+        return False
+    try:
+        if _capability_revision_for_target(db, run.owner_id, target) != int(call.capability_revision):
+            return True
+        if target:
+            from .models import CapabilityRevision
+
+            snapshot = db.scalar(select(CapabilityRevision).where(
+                CapabilityRevision.key == target,
+                CapabilityRevision.revision == int(call.capability_revision),
+            ))
+            return snapshot is not None and not snapshot.enabled
+    except Exception:
+        logger.exception("failed to resolve capability staleness for target=%s", target)
+        return False
+    return False
+
+
+def _capability_revision_for_hash(db, key: str, manifest_hash: str, default: int) -> int:
+    from .models import CapabilityRevision
+    from sqlalchemy import inspect
+    bind = db.get_bind()
+    if bind is None or not inspect(bind).has_table(CapabilityRevision.__tablename__):
+        return default
+    rows = db.scalars(select(CapabilityRevision).where(
+        CapabilityRevision.key == key,
+    ).order_by(CapabilityRevision.revision.desc())).all()
+    for row in rows:
+        if row.enabled and row.manifest_hash == manifest_hash:
+            return int(row.revision)
+    return (int(rows[0].revision) + 1) if rows else default
+
+
 def _capability_revision_for_target(db, owner_id: str, target_ref: str | None) -> int:
     """Resolve the immutable revision recorded on a new external Call."""
     target = str(target_ref or "").strip()
-    def revision_for_hash(key: str, manifest_hash: str, default: int) -> int:
-        from .models import CapabilityRevision
-        from sqlalchemy import inspect
-        bind = db.get_bind()
-        if bind is None or not inspect(bind).has_table(CapabilityRevision.__tablename__):
-            return default
-        rows = db.scalars(select(CapabilityRevision).where(
-            CapabilityRevision.key == key,
-        ).order_by(CapabilityRevision.revision.desc())).all()
-        for row in rows:
-            if row.enabled and row.manifest_hash == manifest_hash:
-                return int(row.revision)
-        return (int(rows[0].revision) + 1) if rows else default
-
     if target.startswith("multica_"):
-        from app.super_assistant import multica_service
-        config = multica_service.active_config(db, owner_id)
-        if config is not None:
-            digest = _external_config_hash({
-                "kind": "multica", "base_url": config.base_url,
-                "workspace_id": config.workspace_id, "token": config.token_encrypted,
-            })
-            return revision_for_hash(target, digest, 2 if target == "multica_create_task" else 1)
+        frozen = _multica_freeze_source(db, owner_id)
+        if frozen is not None:
+            return _capability_revision_for_hash(db, target, frozen[0], 2 if target == "multica_create_task" else 1)
         return 2 if target == "multica_create_task" else 1
     try:
         from app.super_assistant.models import SuperAssistantProcessPlugin
@@ -1738,7 +1989,7 @@ def _capability_revision_for_target(db, owner_id: str, target_ref: str | None) -
                     "headers": server.headers_encrypted, "env": server.env_encrypted,
                     "tools": server.tool_manifest or [],
                 })
-                return revision_for_hash(target, digest, int(getattr(server, "manifest_revision", 1) or 1))
+                return _capability_revision_for_hash(db, target, digest, int(getattr(server, "manifest_revision", 1) or 1))
         from app.super_assistant.models import SuperAssistantRemoteAgent
         remote = db.scalar(select(SuperAssistantRemoteAgent).where(
             SuperAssistantRemoteAgent.owner_id == owner_id,
@@ -1751,14 +2002,17 @@ def _capability_revision_for_target(db, owner_id: str, target_ref: str | None) -
                 "token": remote.token_encrypted, "mode": remote.mode,
                 "timeout_seconds": remote.timeout_seconds, "rap_version": remote.rap_version,
             })
-            return revision_for_hash(remote.key, digest, 1)
+            return _capability_revision_for_hash(db, remote.key, digest, 1)
     except Exception:
         logger.exception("failed to resolve capability revision for target=%s", target)
     return 1
 
 
 def _external_config_hash(value: dict) -> str:
-    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+    # Single implementation: the formula lives in the connectors layer
+    # (``stable_manifest_hash``) so the Multica digest and every manifest
+    # hash here share it without an import cycle.
+    return stable_manifest_hash(value)
 
 
 def _capability_snapshot(db, key: str, revision: int):
@@ -1876,6 +2130,7 @@ def _persist_waiting_state(db, run, turn, step, wait, token, *, call=None):
             # The model decision is closed above; the requested remote work is
             # a separate long-lived Call so reconciliation can advance it
             # without reopening the model Call.
+            multica_revision_binding = None
             if ontology_request is not None:
                 from app.super_assistant.ontology_tools import (
                     ONTOLOGY_EXECUTE_CAPABILITY,
@@ -1893,13 +2148,25 @@ def _persist_waiting_state(db, run, turn, step, wait, token, *, call=None):
                     {"message": str(wait.get("message") or run.goal), "session_ref": wait.get("session_ref")},
                     ensure_ascii=False,
                 )
-                capability_revision = _capability_revision_for_target(db, run.owner_id, target_ref)
-                snapshot = _capability_snapshot(db, str(target_ref or "agent"), int(capability_revision)) if target_ref else None
-                side_effect_class = getattr(snapshot, "side_effect_class", None) or SideEffectClass.EXTERNAL_ASYNC.value
                 call_capability = f"external:{target_ref or 'agent'}"
                 call_target = target_ref
                 call_idem = f"external:{run.id}:{run.version}:{target_ref or 'agent'}"
-            external_call = ExecutionCall(run_id=run.id, turn_id=turn.id, step_id=step.id if step is not None else None, call_index=_next_call_index(db, run.id), capability_key=call_capability, capability_revision=capability_revision, target_ref=call_target, input_snapshot_ref=input_ref, side_effect_class=side_effect_class, authorization_snapshot_ref=run.permission_snapshot_ref, idempotency_key=call_idem, status="offered", outcome="not_sent", lease_epoch=token.epoch, lease_owner=token.owner, lease_expires_at=token.expires_at)
+                if str(call_target or "") in MULTICA_TOOL_KEYS:
+                    # One effective-binding read freezes BOTH the capability
+                    # digest (-> frozen revision number) and the profile
+                    # source binding together: a config switch between tool
+                    # menu and launch may change the pair, but the Call can
+                    # never carry a digest from one source with the revision
+                    # id of another.  An unavailable source stays unbound and
+                    # remains subject to the same fail-closed snapshot proof
+                    # as every legacy Call.
+                    capability_revision, multica_revision_binding = _multica_freeze_capability(
+                        db, run.owner_id, str(call_target))
+                else:
+                    capability_revision = _capability_revision_for_target(db, run.owner_id, target_ref)
+                snapshot = _capability_snapshot(db, str(target_ref or "agent"), int(capability_revision)) if target_ref else None
+                side_effect_class = getattr(snapshot, "side_effect_class", None) or SideEffectClass.EXTERNAL_ASYNC.value
+            external_call = ExecutionCall(run_id=run.id, turn_id=turn.id, step_id=step.id if step is not None else None, call_index=_next_call_index(db, run.id), capability_key=call_capability, capability_revision=capability_revision, target_ref=call_target, input_snapshot_ref=input_ref, side_effect_class=side_effect_class, authorization_snapshot_ref=run.permission_snapshot_ref, idempotency_key=call_idem, status="offered", outcome="not_sent", lease_epoch=token.epoch, lease_owner=token.owner, lease_expires_at=token.expires_at, multica_profile_revision_id=multica_revision_binding)
             db.add(external_call); db.flush()
             append_event(db, run, event_type="call.intent", payload={"call_id": external_call.id, "capability_key": external_call.capability_key, "capability_revision": capability_revision, "input_snapshot_ref": external_call.input_snapshot_ref or f"run:{run.id}:external", "side_effect_class": side_effect_class, "idempotency_key": external_call.idempotency_key}, actor={"kind": "worker"}, command_id=f"call:{external_call.id}:intent", idempotency_key=f"call-intent:{external_call.id}", lease=token)
             append_event(db, run, event_type="call.outcome_changed", payload={"call_id": external_call.id, "status": "offered", "outcome": "not_sent", "evidence_ref": None, "connector_id": target_ref, "provider_event_id": None}, actor={"kind": "worker"}, command_id=f"call:{external_call.id}:waiting", idempotency_key=f"call-waiting:{external_call.id}", connector_id=target_ref, lease=token)
@@ -2096,9 +2363,39 @@ async def reconcile_execution_message(payload: dict) -> bool:
         call = db.scalar(select(ExecutionCall).where(ExecutionCall.id == str(call_id), ExecutionCall.run_id == str(run_id)).with_for_update())
         if run is None or call is None:
             db.rollback(); return True
+        # A query observation may learn the original task/issue identity its
+        # reference was missing.  Persist that enrichment even when the
+        # provider event itself is a duplicate, so later polls reconcile the
+        # pinned execution instead of re-resolving whatever is active now.
+        learned_ref = _bounded_ref(payload.get("remote_task_ref"))
+        if learned_ref is None:
+            learning = "noop"
+        else:
+            learning = multica_learned_remote_ref(call, learned_ref)
+        if learning == "rejected":
+            # The candidate reference contradicts the identity this Call
+            # pinned (rerun task id, foreign issue, different source).  The
+            # observation describes a different remote execution: drop it
+            # with no effects so a wrong task's status can never close, fail
+            # or retarget the original Call.  The message is consumed rather
+            # than nak'ed — redelivery cannot repair a foreign identity, and
+            # the scheduler keeps polling the pinned reference for the truth.
+            logger.warning(
+                "dropped foreign multica observation for run=%s call=%s",
+                run.id, call.id,
+            )
+            db.rollback()
+            return True
+        ref_learned = learning == "adopted"
         provider_event_id = _bounded_provider_event_id(payload.get("provider_event_id"))
         connector_id = _bounded_provider_event_id(payload.get("connector_id"))
         evidence_ref = _bounded_ref(payload.get("evidence_ref"))
+        # The payload hash keeps its historical shape (no ``remote_task_ref``
+        # key): pre-upgrade stored events must redeliver-and-ack against the
+        # hash they were written with, and Multica observations do not need
+        # the reference here — their ``provider_event_id`` fingerprint already
+        # covers the enriched reference, status and content, so a changed
+        # reference is a different event identity, not a hash conflict.
         provider_payload_hash = _hash_payload({
             "run_id": run.id, "call_id": call.id,
             "remote_state": payload.get("remote_state") or payload.get("status"),
@@ -2116,7 +2413,10 @@ async def reconcile_execution_message(payload: dict) -> bool:
                 # touching Call state or creating duplicate Artifacts.
                 if (prior.payload or {}).get("provider_payload_hash") != provider_payload_hash:
                     raise ValueError("provider_event_id payload hash conflict")
-                db.rollback()
+                if ref_learned:
+                    db.commit()
+                else:
+                    db.rollback()
                 return True
         latest_attempt = db.scalar(select(ExecutionAttempt).where(ExecutionAttempt.call_id == call.id).order_by(ExecutionAttempt.attempt_no.desc()))
         try:

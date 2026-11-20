@@ -101,10 +101,11 @@ def _trusted_url_parts(value: str) -> tuple[str, str, int, str]:
     return parsed.scheme, parsed.hostname.lower().rstrip("."), port, path
 
 
-def _trusted_internal_url(url: str) -> bool:
+def _trusted_internal_url(url: str, *, internal_base_urls: str | None = None) -> bool:
     from app.shared.config import settings
 
-    bases = [item.strip() for item in settings.super_assistant_mcp_internal_base_urls.split(",") if item.strip()]
+    configured = settings.super_assistant_mcp_internal_base_urls if internal_base_urls is None else internal_base_urls
+    bases = [item.strip() for item in configured.split(",") if item.strip()]
     if not bases:
         return False
     try:
@@ -134,8 +135,10 @@ def _trusted_internal_url(url: str) -> bool:
     return False
 
 
-def validate_mcp_url(url: str, *, require_https: bool = False) -> str:
-    if _trusted_internal_url((url or "").strip()):
+def validate_mcp_url(
+    url: str, *, require_https: bool = False, internal_base_urls: str | None = None,
+) -> str:
+    if _trusted_internal_url((url or "").strip(), internal_base_urls=internal_base_urls):
         return (url or "").strip()
     value = (url or "").strip()
     parsed = urlsplit(value)

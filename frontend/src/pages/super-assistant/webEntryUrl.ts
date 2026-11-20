@@ -34,12 +34,16 @@ function isLoopbackHostname(hostname: string): boolean {
 }
 
 /**
- * 解析不随当前访问主机改写的原生入口地址（Kaneo 用）。
+ * 解析不随当前访问主机改写的原生入口地址（Kaneo / Multica 平台默认入口用）。
  *
  * Kaneo 前端的 API/认证 origin 均固定注入自后端 KANEO_WEB_URL：若像 WeKnora
  * 那样把回环主机改写成当前访问主机，会与上游 trustedOrigins/cookie/API 不一致
  * （登录 403 或远程不可达）。因此严格保留后端 canonical origin，仅做 http(s)
  * 协议校验；本地 localhost 默认可用，远程访问须由部署方显式配置 KANEO_WEB_URL。
+ *
+ * Multica 平台默认 profile 的 web_url 同用此策略：MULTICA_DEFAULT_WEB_URL 由
+ * 部署显式给出、契约写明不做推导（.env.example「原生入口，不做推导」），回环
+ * 值也原样保留，绝不从 API base_url 猜测 Web 入口；custom profile 恒无此字段。
  */
 export function resolveNativeWebUrl(raw: string | null | undefined): string | null {
   return resolveWebUrl(raw, '')

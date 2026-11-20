@@ -9,6 +9,7 @@ from sqlalchemy import select, update
 
 from app.auth.models import User
 from app.shared.database import SessionLocal
+from app.super_assistant import multica_service
 from app.super_assistant.provider import ensure_autoloop_available
 from app.super_assistant.autoloop.models import AutoLoopDispatch, AutoLoopEvent, utcnow
 from app.super_assistant.autoloop.store import append_event, claim_dispatch, finish_dispatch, recover_dispatches
@@ -113,6 +114,15 @@ def process_dispatch(dispatch_id: str, *, session_factory=None) -> None:
                 error="owner_inactive", data={"dispatchId": dispatch_id})
             db.commit()
             return
+        # Commit any default-profile write before routing calls a provider.
+        # Only drift requires releasing and re-acquiring the dispatch lease row.
+        if multica_service.sync_deployment_default(db, owner.id):
+            db.commit()
+            current = db.scalar(select(AutoLoopDispatch).where(AutoLoopDispatch.id == dispatch_id)
+                                .with_for_update().execution_options(populate_existing=True))
+            if current is None or current.state != "claimed" or current.lease_token != token:
+                raise RoutingDeferred("AutoLoop dispatch lease changed")
+            event = db.scalar(select(AutoLoopEvent).where(AutoLoopEvent.id == current.event_id))
         prepared = db.scalar(select(AutoLoopEvent).where(AutoLoopEvent.id == prepared_id))
         ensure_autoloop_available()
         business_router(db, event, prepared)

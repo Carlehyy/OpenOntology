@@ -49,6 +49,11 @@ Kaneo 项目管理（官方 2.49.0，独立单用户账号）随同一套 Compos
 与邮件验证登录全程关闭。首版未接 S3/SMTP，附件上传与邮件找回密码不可用。
 细节见 [Kaneo 本地初始化](./docs/development/setup.md#kaneo-本地初始化)。
 
+Multica（官方 v0.11.0）也随标准本地栈启动，原生 Web 位于
+`http://localhost:18100`。首次空卷需在原生界面创建账号、工作区和 PAT；将五项
+`MULTICA_DEFAULT_*` 注入后，超级助手自动使用平台默认实例，支持登记自定义
+实例和切换。细节见 [Multica 默认服务](./docs/development/setup.md#multica-默认服务默认随本地栈启动可显式关闭)。
+
 超级助手长期记忆是可选服务：本地 `docker compose --profile hindsight up -d`
 启用（loopback `http://127.0.0.1:18888`），不启用或故障时仅记忆特性降级，
 聊天不受影响。细节见
