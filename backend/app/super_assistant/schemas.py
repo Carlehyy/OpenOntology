@@ -428,6 +428,28 @@ class MulticaConfigOut(BaseModel):
     last_tested_at: datetime | None
 
 
+class MulticaProfileOut(BaseModel):
+    id: str
+    name: str
+    # custom | platform_default（平台默认只读，编辑/删除返回 409）
+    kind: str
+    builtin_key: str | None = None
+    web_url: str | None = None
+    is_active: bool
+    enabled: bool
+    base_url: str
+    workspace_id: str
+    workspace_name: str = ""
+    # 凭据加密存储、永不回显（token_set 由 token_encrypted 是否存在推导）
+    token_set: bool
+    revision: int
+    last_test_status: str | None = None
+    last_test_message: str | None = None
+    last_tested_at: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
 class RemoteAgentOut(BaseModel):
     id: str
     key: str
@@ -569,11 +591,64 @@ class MulticaConfigUpdate(BaseModel):
     @field_validator("token", mode="before")
     @classmethod
     def strip_token(cls, value: str | None) -> str | None:
-        return None if value is None else str(value).strip()
+        return None if value is None else str(value).strip() or None
 
     @field_validator("workspace_name", mode="before")
     @classmethod
     def strip_workspace_name(cls, value: str | None) -> str | None:
+        return None if value is None else str(value).strip() or None
+
+
+class MulticaProfileCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    base_url: str = Field(min_length=1, max_length=500)
+    workspace_id: str = Field(min_length=1, max_length=100)
+    # 工作区显示名（纯展示用途，测试连接时自动回填）
+    workspace_name: str | None = Field(default=None, max_length=200)
+    # token 可选留空：创建时留空表示先不落凭据；enabled=True 时必须提供
+    token: str | None = Field(default=None, max_length=500)
+    enabled: bool = True
+
+    @field_validator("name", "base_url", "workspace_id", mode="before")
+    @classmethod
+    def strip_required_fields(cls, value: str) -> str:
+        return str(value).strip()
+
+    @field_validator("token", "workspace_name", mode="before")
+    @classmethod
+    def strip_optional_fields(cls, value: str | None) -> str | None:
+        return None if value is None else str(value).strip() or None
+
+
+class MulticaProfileUpdate(BaseModel):
+    # 全部可选：缺省/None 表示不修改；token 留空/缺省表示保留已存凭据
+    # （永不回显）；内容变化追加新 revision，旧 revision 不可变
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    base_url: str | None = Field(default=None, min_length=1, max_length=500)
+    workspace_id: str | None = Field(default=None, min_length=1, max_length=100)
+    workspace_name: str | None = Field(default=None, max_length=200)
+    token: str | None = Field(default=None, max_length=500)
+    enabled: bool | None = None
+
+    @field_validator("base_url", "workspace_id", mode="before")
+    @classmethod
+    def strip_required_fields(cls, value: str | None) -> str | None:
+        return None if value is None else str(value).strip()
+
+    @field_validator("name", "token", "workspace_name", mode="before")
+    @classmethod
+    def strip_optional_fields(cls, value: str | None) -> str | None:
+        return None if value is None else str(value).strip() or None
+
+
+class MulticaProfileTestRequest(BaseModel):
+    # 草稿测试（保存前）传入表单值；缺省回落到该 profile 当前 revision
+    base_url: str | None = Field(default=None, max_length=500)
+    token: str | None = Field(default=None, max_length=500)
+
+    @field_validator("base_url", "token", mode="before")
+    @classmethod
+    def strip_optional_fields(cls, value: str | None) -> str | None:
         return None if value is None else str(value).strip() or None
 
 
@@ -605,6 +680,17 @@ class MulticaWorkspacesOut(BaseModel):
     # 已保存配置的实时工作区列表（GET /multica/workspaces）：
     # 配置弹窗打开即拉取，替代"只显示已保存单条"的兜底
     workspaces: list[MulticaWorkspaceOut] = Field(default_factory=list)
+
+
+class MulticaProfilesOut(BaseModel):
+    # GET /multica/profiles：全部可见 profile（含平台默认）与生效状态。
+    # active_profile_id 为当前激活绑定；default_profile_id 为部署侧
+    # multica_default_* 派生的平台默认（未配置时为 None）；
+    # effective 为旧 /multica/config 同构的生效视图（供旧前端直迁）。
+    profiles: list[MulticaProfileOut] = Field(default_factory=list)
+    active_profile_id: str | None = None
+    default_profile_id: str | None = None
+    effective: MulticaConfigOut | None = None
 
 
 class MemoryCreate(BaseModel):

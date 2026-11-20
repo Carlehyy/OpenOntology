@@ -1,4 +1,5 @@
 import asyncio
+import json
 import uuid
 import pytest
 from datetime import timezone
@@ -735,7 +736,8 @@ def test_kernel_scheduler_polls_due_external_call_and_wakes_run(db, monkeypatch)
             return {"status": "running", "remote_task_ref": "poll-ref"}
 
         async def query_status(self, **kwargs):
-            return {"status": "completed", "content": "轮询完成", "artifacts": [{"kind": "poll.report", "mime_type": "application/json", "content": {"ok": True}}], "provider_event_id": "poll-1"}
+            return {"status": "completed", "content": "轮询完成", "artifacts": [{"kind": "poll.report", "mime_type": "application/json", "content": {"ok": True}}], "provider_event_id": "poll-1",
+                    "remote_task_ref": '{"issue_ref":"PRJ-1","task_id":"run-1","profile_revision_id":"rev-poll"}'}
 
         async def cancel(self, **kwargs):
             return {"status": "unsupported"}
@@ -760,6 +762,9 @@ def test_kernel_scheduler_polls_due_external_call_and_wakes_run(db, monkeypatch)
     ).one()
     assert queued.payload["call_id"] == external.id
     assert queued.payload["remote_state"] == "completed"
+    # The enriched reference returned by the poll rides along so the durable
+    # reconciler can persist the learned original task identity.
+    assert json.loads(queued.payload["remote_task_ref"])["task_id"] == "run-1"
 
 
 def test_scheduler_continues_cancel_after_run_reaches_terminal_state(db, monkeypatch):
@@ -802,6 +807,73 @@ def test_scheduler_continues_cancel_after_run_reaches_terminal_state(db, monkeyp
     monkeypatch.setattr(kernel_scheduler, "SessionLocal", TestSession)
     kernel_scheduler._poll_external_calls_once()
     assert cancelled == ["terminal-ref"]
+
+
+def test_scheduler_fences_multica_call_when_task_identity_unavailable(db, monkeypatch):
+    """An ambiguous provider history (two runs, no pinned id) is a durable
+    identity verdict: the Call is fenced into manual attention under a static
+    reason instead of re-polling every cycle, and the diagnosis issues reads
+    only — no cancel/create POST against the provider."""
+    from app.super_assistant import multica_client, multica_service
+    from app.super_assistant.kernel.models import ExecutionCall, InboxItem
+
+    run, owner, _ = _runtime_fixture(db, monkeypatch, goal="multica 来源不唯一")
+    _multica_client_fixture(monkeypatch, "ws-a")
+    profile = _create_multica_profile(
+        db, monkeypatch, owner.id, name="不唯一实例",
+        base_url="http://127.0.0.1:19071", workspace_id="ws-a", token="token-a")
+    multica_service.activate_profile(db, owner.id, profile.id)
+    revision = multica_service._current_revision(db, profile.id).id
+    db.commit()
+
+    call = _multica_call_row(
+        run, target="multica_create_task", capability_revision=2, binding=revision,
+        remote_task_ref=json.dumps({"issue_ref": "MYW-20", "task_id": None,
+                                     "issue_id": "20202020-2020-4202-8202-202020202020",
+                                     "profile_revision_id": revision}),
+        suffix="ambiguous",
+    )
+    call.status = "waiting_external"; call.outcome = "remote_running"
+    run.status = "waiting_external"
+    db.add(call)
+    db.commit()
+
+    traffic: list[str] = []
+    monkeypatch.setattr(
+        multica_client, "get_issue",
+        lambda base_url, token, workspace_id, issue_ref: (
+            traffic.append("get_issue"),
+            {"id": "20202020-2020-4202-8202-202020202020", "identifier": issue_ref,
+             "workspace_id": workspace_id, "status": "in_progress"})[1])
+    monkeypatch.setattr(
+        multica_client, "list_task_runs",
+        lambda base_url, token, workspace_id, issue_id: (
+            traffic.append("task_runs"),
+            [{"id": "task-a", "issue_id": issue_id, "workspace_id": workspace_id,
+              "status": "completed", "result": "旧结果"},
+             {"id": "task-b", "issue_id": issue_id, "workspace_id": workspace_id,
+              "status": "in_progress", "result": "重跑中"}])[1])
+    monkeypatch.setattr(multica_client, "cancel_task",
+                        lambda *_args, **_kwargs: traffic.append("cancel") or {})
+    monkeypatch.setattr(multica_client, "create_issue",
+                        lambda *_args, **_kwargs: traffic.append("create") or {})
+
+    monkeypatch.setattr(kernel_scheduler, "SessionLocal", TestSession)
+    kernel_scheduler._poll_external_calls_once()
+    db.expire_all()
+    fenced = db.query(ExecutionCall).filter_by(id=call.id).one()
+    assert fenced.manual_attention is True
+    assert fenced.status == "reconciling" and fenced.outcome == "outcome_unknown"
+    # Static operator-facing reason; the raw upstream message is not persisted.
+    assert fenced.remote_observed_state_ref == "multica_task_identity_unavailable"
+    assert db.query(InboxItem).filter_by(
+        run_id=run.id, kind="manual_attention").count() == 1
+    # The ambiguity was diagnosed with reads only: no provider POST fired.
+    assert sorted(set(traffic)) == ["get_issue", "task_runs"]
+
+    first_round = list(traffic)
+    kernel_scheduler._poll_external_calls_once()
+    assert traffic == first_round  # fenced Calls are skipped: no polling loop
 
 
 def test_external_acceptance_without_bounded_remote_ref_requires_manual_attention(db, monkeypatch):
@@ -993,3 +1065,953 @@ def test_waiting_call_cannot_retarget_after_remote_agent_revision_change(db, mon
     assert new_revision == 2
     new_connector = runtime._resolve_external_connector(db, run, SimpleNamespace(target_ref=agent.id, capability_revision=new_revision))
     assert new_connector is not None and new_connector.endpoint == "https://8.8.8.8/run"
+
+
+def _multica_client_fixture(monkeypatch, *workspace_ids):
+    """Patch the actual multica client: profile creation/activation performs a
+    live /api/me plus workspace-visibility check against these workspaces."""
+    from app.super_assistant import multica_client
+
+    monkeypatch.setattr(
+        multica_client, "fetch_me",
+        lambda *_args, **_kwargs: {"name": "fixture", "email": "fixture@test.invalid"},
+    )
+    monkeypatch.setattr(
+        multica_client, "list_workspaces",
+        lambda *_args, **_kwargs: [
+            {"id": workspace, "name": workspace, "slug": workspace}
+            for workspace in workspace_ids
+        ],
+    )
+
+
+def _create_multica_profile(db, monkeypatch, owner_id, *, name, base_url, workspace_id, token):
+    from app.super_assistant import multica_service
+    from app.super_assistant.schemas import MulticaProfileCreate
+
+    return multica_service.create_profile(db, owner_id, MulticaProfileCreate(
+        name=name, base_url=base_url, workspace_id=workspace_id,
+        workspace_name=workspace_id, token=token, enabled=True,
+    ))
+
+
+def _multica_call_row(run, *, target, capability_revision, binding=None, remote_task_ref=None, suffix=""):
+    from app.super_assistant.kernel.models import ExecutionCall
+
+    return ExecutionCall(
+        run_id=run.id, call_index=0,
+        capability_key=f"external:{target}", capability_revision=capability_revision,
+        target_ref=target, input_snapshot_ref='{"arguments":{}}',
+        side_effect_class="external_async", idempotency_key=f"multica-{target}-{suffix}",
+        status="offered", outcome="not_sent",
+        multica_profile_revision_id=binding, remote_task_ref=remote_task_ref,
+    )
+
+
+def test_multica_bound_call_executes_queries_and_cancels_source_after_profile_switch(db, monkeypatch):
+    """Integration through the real service: after A→B the bound Call's
+    execute/query/cancel keep hitting source A's endpoint and credentials."""
+    from app.super_assistant import multica_client, multica_service
+    from app.super_assistant.kernel.contracts import ContractError
+
+    run, owner, _ = _runtime_fixture(db, monkeypatch, goal="multica 来源绑定")
+    _multica_client_fixture(monkeypatch, "ws-a", "ws-b")
+    profile_a = _create_multica_profile(
+        db, monkeypatch, owner.id, name="实例 A",
+        base_url="http://127.0.0.1:19001", workspace_id="ws-a", token="token-a")
+    profile_b = _create_multica_profile(
+        db, monkeypatch, owner.id, name="实例 B",
+        base_url="http://127.0.0.1:19002", workspace_id="ws-b", token="token-b")
+    multica_service.activate_profile(db, owner.id, profile_a.id)
+    revision_a = multica_service._current_revision(db, profile_a.id).id
+    db.commit()
+
+    call = _multica_call_row(
+        run, target="multica_create_task",
+        capability_revision=runtime._capability_revision_for_target(db, owner.id, "multica_create_task"),
+        binding=revision_a, suffix="integration",
+    )
+    db.add(call)
+    db.commit()  # closures resolve the bound source in separate worker sessions
+
+    seen: list[tuple] = []
+    issue_uuid = "11111111-1111-4111-8111-111111111111"
+
+    def fake_create_issue(base_url, token, workspace_id, **kwargs):
+        seen.append(("create", base_url, token, workspace_id))
+        return {"id": issue_uuid, "identifier": "MYW-1", "title": "t", "status": "open"}
+
+    def fake_get_issue(base_url, token, workspace_id, issue_ref):
+        seen.append(("get_issue", base_url, token, workspace_id))
+        return {"id": issue_uuid, "identifier": "MYW-1",
+                "workspace_id": workspace_id, "status": "in_progress"}
+
+    def fake_list_task_runs(base_url, token, workspace_id, issue_id):
+        seen.append(("task_runs", base_url, token, workspace_id))
+        return [{"id": "task-1", "issue_id": issue_id, "workspace_id": workspace_id,
+                 "status": "in_progress", "result": "部分结果"}]
+
+    def fake_cancel_task(base_url, token, workspace_id, issue_id, task_id):
+        seen.append(("cancel", base_url, token, workspace_id))
+        return {"id": task_id, "issue_id": issue_id, "workspace_id": workspace_id,
+                "status": "cancelled"}
+
+    monkeypatch.setattr(multica_client, "create_issue", fake_create_issue)
+    monkeypatch.setattr(multica_client, "get_issue", fake_get_issue)
+    monkeypatch.setattr(multica_client, "list_task_runs", fake_list_task_runs)
+    monkeypatch.setattr(multica_client, "cancel_task", fake_cancel_task)
+
+    connector = runtime._resolve_external_connector(db, run, call)
+    assert connector is not None
+    assert connector.profile_revision_id == revision_a
+    assert connector.profile_workspace_id == "ws-a"
+    # The frozen capability snapshot keeps the historical shape: the workspace
+    # is covered by the digest and per-Call source isolation is enforced by
+    # the immutable-revision proof, not by generic extra scope fields.
+    snapshot = db.query(CapabilityRevision).filter_by(
+        key="multica_create_task", revision=call.capability_revision).one()
+    assert snapshot.workspace_scope == []
+    assert snapshot.manifest_hash == runtime.multica_config_digest_value(
+        multica_service.config_for_revision(db, owner.id, revision_a))
+
+    created = asyncio.run(connector.invoke(
+        run_id=run.id, call_id=call.id,
+        input_ref='{"arguments":{"title":"t"}}', deadline=None))
+    assert created["status"] == "running"
+    ref = json.loads(created["remote_task_ref"])
+    assert ref["profile_revision_id"] == revision_a
+    assert ref["base_url"] == "http://127.0.0.1:19001" and ref["workspace_id"] == "ws-a"
+
+    # A → B switch must not retarget the bound Call's query or cancel.
+    multica_service.activate_profile(db, owner.id, profile_b.id)
+    db.commit()
+
+    observed = asyncio.run(connector.query_status(remote_task_ref=created["remote_task_ref"]))
+    assert observed["status"] == "running"
+    # The query learns the original run id through the bare task-run history
+    # and returns the enriched reference for the reconciler to persist.
+    observed_ref = json.loads(observed["remote_task_ref"])
+    assert observed_ref["task_id"] == "task-1" and observed_ref["issue_id"] == issue_uuid
+    assert observed_ref["profile_revision_id"] == revision_a
+    cancelled = asyncio.run(connector.cancel(remote_task_ref=created["remote_task_ref"]))
+    assert cancelled["status"] == "cancelled"
+    # Every provider interaction stayed on source A's endpoint/credentials.
+    assert seen and all(
+        (base_url, token, workspace) == ("http://127.0.0.1:19001", "token-a", "ws-a")
+        for _kind, base_url, token, workspace in seen
+    )
+
+    # Cross-workspace identity: a reference claiming another workspace must
+    # fail closed even though the revision itself still resolves.
+    foreign_ref = json.dumps({
+        "issue_ref": "MYW-1", "task_id": None,
+        "profile_revision_id": revision_a,
+        "base_url": "http://127.0.0.1:19001", "workspace_id": "ws-b",
+    })
+    with pytest.raises(ContractError, match="different workspace"):
+        asyncio.run(connector.query_status(remote_task_ref=foreign_ref))
+
+
+def test_multica_bound_call_fails_closed_when_revision_unresolvable(db, monkeypatch):
+    run, _, _ = _runtime_fixture(db, monkeypatch, goal="multica 失联")
+    call = _multica_call_row(
+        run, target="multica_create_task", capability_revision=2,
+        binding="rev-gone", suffix="gone",
+    )
+    db.add(call)
+    db.commit()
+    assert runtime._resolve_external_connector(db, run, call) is None
+    # The scheduler must fence this Call into manual attention instead of
+    # letting it silently borrow the active profile.
+    assert runtime._external_call_capability_stale(db, run, call) is True
+
+
+def test_multica_bound_call_fails_closed_when_revision_revoked(db, monkeypatch):
+    from datetime import datetime
+
+    from app.super_assistant import multica_service
+
+    run, owner, _ = _runtime_fixture(db, monkeypatch, goal="multica 撤销")
+    _multica_client_fixture(monkeypatch, "ws-a")
+    profile = _create_multica_profile(
+        db, monkeypatch, owner.id, name="撤销实例",
+        base_url="http://127.0.0.1:19011", workspace_id="ws-a", token="token-a")
+    multica_service.activate_profile(db, owner.id, profile.id)
+    revision = multica_service._current_revision(db, profile.id)
+    revision.revoked_at = datetime.now(timezone.utc)  # explicit security revocation
+    call = _multica_call_row(
+        run, target="multica_create_task", capability_revision=2,
+        binding=revision.id, suffix="revoked",
+    )
+    db.add(call)
+    db.commit()
+    assert runtime._resolve_external_connector(db, run, call) is None
+    assert runtime._external_call_capability_stale(db, run, call) is True
+
+
+def test_multica_bound_call_survives_token_edit_and_profile_delete(db, monkeypatch):
+    """Token edits retire a revision but never revoke it, and a soft-deleted
+    profile keeps its immutable history: the bound Call keeps executing and
+    querying its original source and credentials through both."""
+    from app.super_assistant import multica_client, multica_service
+    from app.super_assistant.schemas import MulticaProfileUpdate
+
+    run, owner, _ = _runtime_fixture(db, monkeypatch, goal="multica 不可变来源")
+    _multica_client_fixture(monkeypatch, "ws-a")
+    profile = _create_multica_profile(
+        db, monkeypatch, owner.id, name="不可变实例",
+        base_url="http://127.0.0.1:19061", workspace_id="ws-a", token="token-old")
+    multica_service.activate_profile(db, owner.id, profile.id)
+    revision_old = multica_service._current_revision(db, profile.id).id
+    db.commit()
+
+    ref = json.dumps({"issue_ref": "MYW-9", "task_id": None,
+                      "issue_id": "99999999-9999-4999-8999-999999999999",
+                      "profile_revision_id": revision_old,
+                      "base_url": "http://127.0.0.1:19061", "workspace_id": "ws-a"})
+    call = _multica_call_row(
+        run, target="multica_create_task", capability_revision=2,
+        binding=revision_old, remote_task_ref=ref, suffix="immutable",
+    )
+    db.add(call)
+    db.commit()
+
+    # A token edit appends a new revision and retires (not revokes) the old.
+    multica_service.update_profile(
+        db, owner.id, profile.id, MulticaProfileUpdate(token="token-new"))
+    db.commit()
+    assert multica_service._current_revision(db, profile.id).id != revision_old
+    connector = runtime._resolve_external_connector(db, run, call)
+    assert connector is not None and connector.profile_revision_id == revision_old
+    assert runtime._external_call_capability_stale(db, run, call) is False
+
+    # Soft-deleting the profile keeps the immutable revision resolvable.
+    multica_service.delete_profile(db, owner.id, profile.id)
+    db.commit()
+    connector = runtime._resolve_external_connector(db, run, call)
+    assert connector is not None
+    assert runtime._external_call_capability_stale(db, run, call) is False
+
+    # Queries keep using the retired revision's original credentials.
+    seen: list[tuple] = []
+    monkeypatch.setattr(
+        multica_client, "get_issue",
+        lambda base_url, token, workspace_id, issue_ref: (
+            seen.append((base_url, token, workspace_id)),
+            {"id": "99999999-9999-4999-8999-999999999999", "identifier": issue_ref,
+             "workspace_id": workspace_id, "status": "in_progress"},
+        )[1])
+    monkeypatch.setattr(
+        multica_client, "list_task_runs",
+        lambda base_url, token, workspace_id, issue_id: (
+            seen.append((base_url, token, workspace_id)),
+            [{"id": "task-9", "issue_id": issue_id, "workspace_id": workspace_id,
+              "status": "in_progress", "result": "进行中"}],
+        )[1])
+    observed = asyncio.run(connector.query_status(remote_task_ref=ref))
+    assert observed["status"] == "running"
+    assert seen and all(
+        (base_url, token, workspace_id) == ("http://127.0.0.1:19061", "token-old", "ws-a")
+        for base_url, token, workspace_id in seen
+    )
+
+
+def test_multica_unbound_call_keeps_legacy_active_semantics(db, monkeypatch):
+    """A pure-legacy unbound Call resolves its source from the authoritative
+    persisted capability digest: while the matching revision stays usable it
+    keeps running on that exact source even across a profile switch (the
+    owner's revisions are read across the switch, never the new active
+    profile), and once the source revision is revoked the Call fails closed."""
+    from app.super_assistant import multica_client, multica_service
+
+    run, owner, _ = _runtime_fixture(db, monkeypatch, goal="multica 兼容")
+    _multica_client_fixture(monkeypatch, "ws-a", "ws-b")
+    profile_a = _create_multica_profile(
+        db, monkeypatch, owner.id, name="兼容 A",
+        base_url="http://127.0.0.1:19021", workspace_id="ws-a", token="token-a")
+    profile_b = _create_multica_profile(
+        db, monkeypatch, owner.id, name="兼容 B",
+        base_url="http://127.0.0.1:19022", workspace_id="ws-b", token="token-b")
+    multica_service.activate_profile(db, owner.id, profile_a.id)
+    revision_a = multica_service._current_revision(db, profile_a.id).id
+    db.commit()
+
+    # Persist the frozen capability snapshot first (the upgrade scenario:
+    # the deployment already dispatched Multica work under source A), then
+    # the legacy Call created before profile binding may prove A by digest.
+    bound = _multica_call_row(
+        run, target="multica_list_agents",
+        capability_revision=runtime._capability_revision_for_target(db, owner.id, "multica_list_agents"),
+        binding=revision_a, suffix="legacy-snapshot",
+    )
+    db.add(bound)
+    db.commit()
+    assert runtime._resolve_external_connector(db, run, bound) is not None
+
+    call = _multica_call_row(
+        run, target="multica_list_agents",
+        capability_revision=runtime._capability_revision_for_target(db, owner.id, "multica_list_agents"),
+        binding=None, remote_task_ref='{"issue_ref":"MYW-3","task_id":null}',
+        suffix="legacy",
+    )
+    db.add(call)
+    db.commit()
+
+    seen: list[tuple] = []
+    monkeypatch.setattr(
+        multica_client, "list_agents",
+        lambda base_url, token, workspace_id: seen.append((base_url, token, workspace_id)) or [],
+    )
+    resolved_revisions: list[str] = []
+    real_config_for_revision = multica_service.config_for_revision
+
+    def spy_config_for_revision(session, owner_id, revision_id):
+        resolved_revisions.append(str(revision_id))
+        return real_config_for_revision(session, owner_id, revision_id)
+
+    monkeypatch.setattr(multica_service, "config_for_revision", spy_config_for_revision)
+    connector = runtime._resolve_external_connector(db, run, call)
+    assert connector is not None and connector.profile_revision_id == revision_a
+    asyncio.run(connector.invoke(run_id=run.id, call_id=call.id, input_ref='{"arguments":{}}', deadline=None))
+    assert seen == [("http://127.0.0.1:19021", "token-a", "ws-a")]
+    # Even for a valid legacy capability-digest proof the closure must hand
+    # the service the resolved source revision (query/cancel require source).
+    assert revision_a in resolved_revisions
+
+    # Switching to B changes the active source, but the frozen capability
+    # digest still proves this old Call was created under A: the owner's
+    # revisions are read across the switch and the pending Call keeps
+    # resolving — and executing against — exactly source A.
+    multica_service.activate_profile(db, owner.id, profile_b.id)
+    db.commit()
+    connector = runtime._resolve_external_connector(db, run, call)
+    assert connector is not None and connector.profile_revision_id == revision_a
+    assert runtime._external_call_capability_stale(db, run, call) is False
+    seen.clear()
+    asyncio.run(connector.invoke(run_id=run.id, call_id=call.id, input_ref='{"arguments":{}}', deadline=None))
+    assert seen == [("http://127.0.0.1:19021", "token-a", "ws-a")]
+
+    # An explicit revocation of A's revision removes the only proven source:
+    # the Call fails closed instead of borrowing the now-active profile B.
+    from datetime import datetime
+
+    from app.super_assistant.models import SuperAssistantMulticaProfileRevision
+
+    db.get(SuperAssistantMulticaProfileRevision, revision_a).revoked_at = datetime.now(timezone.utc)
+    db.commit()
+    assert runtime._resolve_external_connector(db, run, call) is None
+    assert runtime._external_call_capability_stale(db, run, call) is True
+
+
+def test_multica_legacy_digest_never_substitutes_a_revoked_twin(db, monkeypatch):
+    """Duplicate credential triples can produce two revisions with the same
+    digest.  The legacy digest scan must fail closed when ANY matching
+    revision was explicitly revoked — an unrevoked twin row is never
+    substituted for a withdrawn credential — while an explicit binding to a
+    still-usable revision keeps resolving (explicit ref wins)."""
+    from datetime import datetime
+
+    from sqlalchemy import select
+
+    from app.super_assistant import multica_service
+    from app.super_assistant.models import SuperAssistantMulticaProfileRevision
+
+    run, owner, _ = _runtime_fixture(db, monkeypatch, goal="multica 撤销孪生")
+    _multica_client_fixture(monkeypatch, "ws-a")
+    profile_a = _create_multica_profile(
+        db, monkeypatch, owner.id, name="孪生 A",
+        base_url="http://127.0.0.1:19101", workspace_id="ws-a", token="token-a")
+    multica_service.activate_profile(db, owner.id, profile_a.id)
+    revision_a = multica_service._current_revision(db, profile_a.id).id
+    row_a = db.get(SuperAssistantMulticaProfileRevision, revision_a)
+    db.commit()
+
+    # A second profile with the identical endpoint/workspace/credential
+    # triple: copy the stored ciphertext so both digests match exactly.
+    profile_b = _create_multica_profile(
+        db, monkeypatch, owner.id, name="孪生 B",
+        base_url=row_a.base_url, workspace_id=row_a.workspace_id, token="token-a")
+    revision_b = db.scalar(select(SuperAssistantMulticaProfileRevision.id).where(
+        SuperAssistantMulticaProfileRevision.profile_id == profile_b.id))
+    db.get(SuperAssistantMulticaProfileRevision, revision_b).token_encrypted = row_a.token_encrypted
+    db.commit()
+    digest = runtime.multica_config_digest_value(row_a)
+
+    # The genuine bd0971cc snapshot shape for the source the legacy Call
+    # was created under.
+    db.add(CapabilityRevision(
+        key="multica_list_agents", revision=1, source="multica",
+        manifest_hash=digest, trust_level="user_untrusted",
+        permissions=[], input_schema={}, output_schema={},
+        side_effect_class="external_async", supports_stream=False,
+        supports_cancel=False, supports_approval=False, supports_artifact=False,
+        supports_query_status=False, workspace_scope=[], network_scope=[],
+        secret_refs=[], enabled=True,
+    ))
+    legacy_call = _multica_call_row(
+        run, target="multica_list_agents", capability_revision=1,
+        binding=None, remote_task_ref='{"issue_ref":"MYW-11","task_id":null}',
+        suffix="revoked-twin",
+    )
+    db.add(legacy_call)
+    db.commit()
+
+    # Both twins are usable: the digest proves the shared source and the
+    # deterministic latest-first pick resolves it.
+    connector = runtime._resolve_external_connector(db, run, legacy_call)
+    assert connector is not None
+    assert runtime._external_call_capability_stale(db, run, legacy_call) is False
+
+    # Revoking the twin the credential was withdrawn on fails the whole
+    # digest closed — the surviving twin row must not be substituted.
+    row_a.revoked_at = datetime.now(timezone.utc)
+    db.commit()
+    assert runtime._resolve_external_connector(db, run, legacy_call) is None
+    assert runtime._external_call_capability_stale(db, run, legacy_call) is True
+
+    # An explicit binding to the still-usable twin keeps resolving: the
+    # revoked-digest carve-out applies only to the legacy digest scan.
+    bound_call = _multica_call_row(
+        run, target="multica_list_agents", capability_revision=1,
+        binding=revision_b, suffix="revoked-twin-bound",
+    )
+    db.add(bound_call)
+    db.commit()
+    assert runtime._resolve_external_connector(db, run, bound_call) is not None
+    assert runtime._external_call_capability_stale(db, run, bound_call) is False
+
+
+def test_multica_legacy_call_without_capability_snapshot_fails_closed(db, monkeypatch):
+    """A deterministic revision number is not source proof: a pure-legacy Call
+    with no persisted capability snapshot never borrows the active profile,
+    even when the computed revision number happens to match."""
+    from app.super_assistant import multica_service
+
+    run, owner, _ = _runtime_fixture(db, monkeypatch, goal="multica 无快照")
+    _multica_client_fixture(monkeypatch, "ws-a")
+    profile = _create_multica_profile(
+        db, monkeypatch, owner.id, name="无快照实例",
+        base_url="http://127.0.0.1:19051", workspace_id="ws-a", token="token-a")
+    multica_service.activate_profile(db, owner.id, profile.id)
+    db.commit()
+
+    call = _multica_call_row(
+        run, target="multica_list_agents",
+        capability_revision=runtime._capability_revision_for_target(db, owner.id, "multica_list_agents"),
+        binding=None, remote_task_ref='{"issue_ref":"MYW-2","task_id":null}',
+        suffix="no-snapshot",
+    )
+    db.add(call)
+    db.commit()
+    # No connector was ever resolved for this target: no snapshot exists, and
+    # the computed revision number matching is not accepted as proof.
+    assert db.query(CapabilityRevision).filter_by(key="multica_list_agents").count() == 0
+    assert runtime._resolve_external_connector(db, run, call) is None
+    assert runtime._external_call_capability_stale(db, run, call) is True
+
+
+def test_multica_unbound_reference_proves_source_by_endpoint_not_active(db, monkeypatch):
+    """An old reference carrying endpoint/workspace evidence resolves exactly
+    that source after a switch; it never borrows the new active profile, and
+    an unknown source fails closed."""
+    from app.super_assistant import multica_client, multica_service
+
+    run, owner, _ = _runtime_fixture(db, monkeypatch, goal="multica 旧引用来源")
+    _multica_client_fixture(monkeypatch, "ws-a", "ws-b")
+    profile_a = _create_multica_profile(
+        db, monkeypatch, owner.id, name="来源 A",
+        base_url="http://127.0.0.1:19031", workspace_id="ws-a", token="token-a")
+    profile_b = _create_multica_profile(
+        db, monkeypatch, owner.id, name="来源 B",
+        base_url="http://127.0.0.1:19032", workspace_id="ws-b", token="token-b")
+    multica_service.activate_profile(db, owner.id, profile_a.id)
+    db.commit()
+
+    legacy_ref = json.dumps({
+        "issue_ref": "MYW-7", "task_id": None,
+        "base_url": "http://127.0.0.1:19031", "workspace_id": "ws-a",
+    })
+    call = _multica_call_row(
+        run, target="multica_create_task", capability_revision=2,
+        binding=None, remote_task_ref=legacy_ref, suffix="source-known",
+    )
+    db.add(call)
+    db.commit()
+
+    # Switch to B first: the old reference must still resolve source A.
+    multica_service.activate_profile(db, owner.id, profile_b.id)
+    db.commit()
+
+    seen: list[tuple] = []
+    source_issue_uuid = "22222222-2222-4222-8222-222222222222"
+    monkeypatch.setattr(
+        multica_client, "get_issue",
+        lambda base_url, token, workspace_id, issue_ref: (
+            seen.append((base_url, token, workspace_id)),
+            {"id": source_issue_uuid, "identifier": issue_ref,
+             "workspace_id": workspace_id, "status": "in_progress"},
+        )[1])
+    monkeypatch.setattr(
+        multica_client, "list_task_runs",
+        lambda base_url, token, workspace_id, issue_id: (
+            seen.append((base_url, token, workspace_id)),
+            [{"id": "task-7", "issue_id": issue_id, "workspace_id": workspace_id,
+              "status": "in_progress", "result": "进行中"}],
+        )[1])
+    connector = runtime._resolve_external_connector(db, run, call)
+    assert connector is not None
+    assert connector.profile_workspace_id == "ws-a"
+    observed = asyncio.run(connector.query_status(remote_task_ref=legacy_ref))
+    assert observed["status"] == "running"
+    # The query enriches the legacy reference with the immutable source and
+    # the unique original run, never with an active rerun.
+    observed_ref = json.loads(observed["remote_task_ref"])
+    assert observed_ref["task_id"] == "task-7" and observed_ref["issue_id"] == source_issue_uuid
+    assert observed_ref["workspace_id"] == "ws-a"
+    assert seen and all(
+        (base_url, token, workspace_id) == ("http://127.0.0.1:19031", "token-a", "ws-a")
+        for base_url, token, workspace_id in seen
+    )
+
+    # A reference whose source never existed cannot be proven: fail closed.
+    unknown_ref = json.dumps({
+        "issue_ref": "MYW-8", "task_id": None,
+        "base_url": "http://127.0.0.1:19999", "workspace_id": "ws-none",
+    })
+    unknown_call = _multica_call_row(
+        run, target="multica_create_task", capability_revision=2,
+        binding=None, remote_task_ref=unknown_ref, suffix="source-unknown",
+    )
+    db.add(unknown_call)
+    db.commit()
+    assert runtime._resolve_external_connector(db, run, unknown_call) is None
+    assert runtime._external_call_capability_stale(db, run, unknown_call) is True
+
+
+def test_multica_external_call_freezes_profile_revision_at_creation(db, monkeypatch):
+    from app.super_assistant import multica_service
+
+    run, owner, _ = _runtime_fixture(db, monkeypatch, goal="multica 创建绑定")
+    _multica_client_fixture(monkeypatch, "ws-a")
+    profile = _create_multica_profile(
+        db, monkeypatch, owner.id, name="冻结实例",
+        base_url="http://127.0.0.1:19041", workspace_id="ws-a", token="token-a")
+    multica_service.activate_profile(db, owner.id, profile.id)
+    revision_a = multica_service._current_revision(db, profile.id).id
+    db.commit()
+    monkeypatch.setattr(runtime.provider, "chat", lambda *_args, **_kwargs: {
+        "content": "已提交", "tool_calls": [],
+        "external_call": {"target_ref": "multica_create_task", "message": "创建任务"},
+    })
+    monkeypatch.setattr(runtime, "requires_approval", lambda *args, **kwargs: False)
+    asyncio.run(runtime.process_execution_message({"run_id": run.id, "command_id": "multica-bind-create"}))
+    external = db.query(runtime.ExecutionCall).filter_by(run_id=run.id, target_ref="multica_create_task").one()
+    assert external.multica_profile_revision_id == revision_a
+
+
+def test_multica_external_call_without_configuration_stays_unbound(db, monkeypatch):
+    run, _, _ = _runtime_fixture(db, monkeypatch, goal="multica 无配置创建")
+    monkeypatch.setattr(runtime.provider, "chat", lambda *_args, **_kwargs: {
+        "content": "已提交", "tool_calls": [],
+        "external_call": {"target_ref": "multica_list_tasks", "message": "查询"},
+    })
+    monkeypatch.setattr(runtime, "requires_approval", lambda *args, **kwargs: False)
+    asyncio.run(runtime.process_execution_message({"run_id": run.id, "command_id": "multica-legacy-create"}))
+    external = db.query(runtime.ExecutionCall).filter_by(run_id=run.id, target_ref="multica_list_tasks").one()
+    assert external.multica_profile_revision_id is None
+
+
+def test_multica_call_freezes_digest_and_revision_from_one_binding(db, monkeypatch):
+    """The frozen capability digest (-> revision number) and the profile
+    revision binding of a new Call must come from the SAME effective-binding
+    read.  A profile switch between tool menu and launch may change the pair
+    atomically, but the Call can never mix a digest from one source with the
+    revision id of another (which would corrupt the immutable snapshot)."""
+    from sqlalchemy import select
+
+    from app.super_assistant import multica_service
+    from app.super_assistant.models import SuperAssistantMulticaProfileRevision
+
+    run, owner, _ = _runtime_fixture(db, monkeypatch, goal="multica 同源冻结")
+    _multica_client_fixture(monkeypatch, "ws-a", "ws-b")
+    profile_a = _create_multica_profile(
+        db, monkeypatch, owner.id, name="冻结 A",
+        base_url="http://127.0.0.1:19091", workspace_id="ws-a", token="token-a")
+    profile_b = _create_multica_profile(
+        db, monkeypatch, owner.id, name="冻结 B",
+        base_url="http://127.0.0.1:19092", workspace_id="ws-b", token="token-b")
+    multica_service.activate_profile(db, owner.id, profile_a.id)
+    revision_a = multica_service._current_revision(db, profile_a.id).id
+    revision_b = db.scalar(select(SuperAssistantMulticaProfileRevision.id).where(
+        SuperAssistantMulticaProfileRevision.profile_id == profile_b.id))
+    db.commit()
+    row_a = db.get(SuperAssistantMulticaProfileRevision, revision_a)
+    row_b = db.get(SuperAssistantMulticaProfileRevision, revision_b)
+    digest_a = runtime.multica_config_digest_value(row_a)
+    digest_b = runtime.multica_config_digest_value(row_b)
+
+    def snapshot_row(revision: int, digest: str) -> CapabilityRevision:
+        return CapabilityRevision(
+            key="multica_create_task", revision=revision, source="multica",
+            manifest_hash=digest, trust_level="user_untrusted",
+            permissions=[], input_schema={}, output_schema={},
+            side_effect_class="external_async", supports_stream=False,
+            supports_cancel=True, supports_approval=False, supports_artifact=False,
+            supports_query_status=True, workspace_scope=[], network_scope=[],
+            secret_refs=[], enabled=True,
+        )
+
+    # Capability history: source A froze at revision 2, a later source B at 3.
+    db.add(snapshot_row(2, digest_a))
+    db.add(snapshot_row(3, digest_b))
+    db.commit()
+
+    # The effective binding changes between two consecutive reads (menu read
+    # A, launch would read B).  The launch must freeze BOTH values from the
+    # one read it performs — an implementation that reads the digest and the
+    # binding separately would freeze revision 2 (A's digest) with B's id.
+    projections = [
+        SimpleNamespace(base_url=row_a.base_url, workspace_id=row_a.workspace_id,
+                        token_encrypted=row_a.token_encrypted, profile_revision_id=revision_a),
+        SimpleNamespace(base_url=row_b.base_url, workspace_id=row_b.workspace_id,
+                        token_encrypted=row_b.token_encrypted, profile_revision_id=revision_b),
+    ]
+    reads = {"count": 0}
+
+    def sequencing_config_for(_db, _owner_id, revision_id=None, *, base_url=None, workspace_id=None):
+        value = projections[min(reads["count"], len(projections) - 1)]
+        reads["count"] += 1
+        return value
+
+    monkeypatch.setattr(runtime, "multica_config_for", sequencing_config_for)
+    monkeypatch.setattr(runtime.provider, "chat", lambda *_args, **_kwargs: {
+        "content": "已提交", "tool_calls": [],
+        "external_call": {"target_ref": "multica_create_task", "message": "创建任务"},
+    })
+    monkeypatch.setattr(runtime, "requires_approval", lambda *args, **kwargs: False)
+    asyncio.run(runtime.process_execution_message({"run_id": run.id, "command_id": "multica-freeze-one-read"}))
+    external = db.query(runtime.ExecutionCall).filter_by(
+        run_id=run.id, target_ref="multica_create_task").one()
+    # Both frozen values describe source A — the single first read.
+    assert external.capability_revision == 2
+    assert external.multica_profile_revision_id == revision_a
+
+
+def test_reconciler_persists_learned_task_ref_and_never_switches_to_rerun(db, monkeypatch):
+    """A query observation that learns the original task id persists the
+    enriched reference onto the Call; observations whose reference contradicts
+    the pinned identity (a rerun's completed status, a foreign issue) are
+    dropped with no effects, and provider_event_id idempotency holds while
+    the status progresses."""
+    from app.super_assistant.kernel.models import ExecutionCall
+
+    run, _, _ = _runtime_fixture(db, monkeypatch, goal="multica 学习原任务")
+    revision = "rev-learn-1"
+    call = _multica_call_row(
+        run, target="multica_create_task", capability_revision=2,
+        binding=revision,
+        remote_task_ref=json.dumps({"issue_ref": "MYW-5", "task_id": None,
+                                    "profile_revision_id": revision}),
+        suffix="learn",
+    )
+    call.status = "waiting_external"; call.outcome = "remote_running"
+    run.status = "waiting_external"
+    db.add(call)
+    db.commit()
+
+    def observe(provider_event_id, state, content, task_id, issue_ref="MYW-5", issue_id="issue-5"):
+        return asyncio.run(runtime.reconcile_execution_message({
+            "run_id": run.id, "call_id": call.id,
+            "connector_id": "multica:multica_create_task",
+            "provider_event_id": provider_event_id,
+            "remote_state": state, "content": content,
+            "remote_task_ref": json.dumps({
+                "issue_ref": issue_ref, "task_id": task_id, "issue_id": issue_id,
+                "profile_revision_id": revision,
+            }),
+        }))
+
+    def persisted_call():
+        db.expire_all()
+        return db.query(ExecutionCall).filter_by(id=call.id).one()
+
+    # The first poll learns the original run id from the bare history list.
+    assert observe("multica:obs-learn-1", "running", "执行中", "task-5") is True
+    assert json.loads(persisted_call().remote_task_ref)["task_id"] == "task-5"
+
+    # A rerun reporting completion must be dropped whole: the pinned reference
+    # survives AND the wrong task's terminal status never closes the Call.
+    assert observe("multica:obs-learn-2", "completed", "重跑完成", "task-9") is True
+    current = persisted_call()
+    assert json.loads(current.remote_task_ref)["task_id"] == "task-5"
+    assert current.status == "waiting_external" and current.outcome == "remote_running"
+    assert current.evidence_ref is None
+
+    # Redelivery of an already-applied observation is idempotent.
+    assert observe("multica:obs-learn-1", "running", "执行中", "task-5") is True
+    assert json.loads(persisted_call().remote_task_ref)["task_id"] == "task-5"
+
+    # A foreign issue is dropped the same way, even with a terminal status.
+    assert observe("multica:obs-learn-4", "completed", "外来完成", "task-5",
+                   issue_ref="MYW-6", issue_id="issue-6") is True
+    current = persisted_call()
+    assert json.loads(current.remote_task_ref)["issue_ref"] == "MYW-5"
+    assert current.status == "waiting_external"
+
+    # Status progress on the pinned original closes the Call exactly once.
+    assert observe("multica:obs-learn-3", "completed", "报告完成", "task-5") is True
+    closed = persisted_call()
+    assert closed.status == "closed" and closed.outcome == "completed"
+    assert closed.evidence_ref and closed.evidence_ref.startswith("artifact://")
+    assert observe("multica:obs-learn-3", "completed", "报告完成", "task-5") is True
+    events = db.query(ExecutionEvent).filter(
+        ExecutionEvent.run_id == run.id,
+        ExecutionEvent.provider_event_id.like("multica:obs-learn%"),
+    ).all()
+    # Dropped foreign observations leave no durable events behind.
+    assert sorted(event.provider_event_id for event in events) == [
+        "multica:obs-learn-1", "multica:obs-learn-3",
+    ]
+    assert db.query(Artifact).filter_by(call_id=call.id, kind="external.result").count() == 1
+
+
+def test_multica_old_capability_snapshot_shape_is_reused_after_upgrade(db, monkeypatch):
+    """Upgrade compatibility: a CapabilityRevision frozen by pre-upgrade code
+    (same config digest, the genuine bd0971cc derived shape) must be reused
+    as-is when the upgraded runtime re-resolves the connector under the exact
+    baseline immutability comparison.  Existing rows are never rewritten, so
+    both the old waiting Call and freshly dispatched work keep flowing."""
+    from app.super_assistant import multica_client, multica_service
+    from app.super_assistant.kernel.models import ExecutionCall
+
+    run, owner, _ = _runtime_fixture(db, monkeypatch, goal="multica 升级兼容")
+    _multica_client_fixture(monkeypatch, "ws-a")
+    profile = _create_multica_profile(
+        db, monkeypatch, owner.id, name="升级实例",
+        base_url="http://127.0.0.1:19081", workspace_id="ws-a", token="token-a")
+    multica_service.activate_profile(db, owner.id, profile.id)
+    revision_a = multica_service._current_revision(db, profile.id).id
+    db.commit()
+    config = multica_service.active_config(db, owner.id)
+    # The digest is computed exactly as the pre-upgrade code did — the literal
+    # _external_config_hash over the historical manifest fields.
+    legacy_digest = runtime._external_config_hash({
+        "kind": "multica", "base_url": config.base_url,
+        "workspace_id": config.workspace_id, "token": config.token_encrypted,
+    })
+    assert legacy_digest == runtime.multica_config_digest_value(config)
+
+    # A snapshot row in the genuine bd0971cc shape: multica_create_task had
+    # its query/cancel executors wired already (revision 2 records the proven
+    # async contract), scopes stayed empty.  Old code persisted exactly this,
+    # so the exact-field comparison reuses it without any relaxation.
+    old_row = CapabilityRevision(
+        key="multica_create_task", revision=2, source="multica",
+        manifest_hash=legacy_digest, trust_level="user_untrusted",
+        permissions=[], input_schema={}, output_schema={},
+        side_effect_class="external_async", supports_stream=False,
+        supports_cancel=True, supports_approval=False, supports_artifact=False,
+        supports_query_status=True, workspace_scope=[], network_scope=[],
+        secret_refs=[], enabled=True,
+    )
+    db.add(old_row)
+    db.commit()
+
+    # A waiting Call created before the upgrade carries that revision.
+    old_call = _multica_call_row(
+        run, target="multica_create_task", capability_revision=2,
+        binding=None, remote_task_ref=json.dumps({"issue_ref": "MYW-40", "task_id": None}),
+        suffix="upgrade-old",
+    )
+    old_call.status = "waiting_external"; old_call.outcome = "remote_running"
+    run.status = "waiting_external"
+    db.add(old_call)
+    db.commit()
+
+    monkeypatch.setattr(
+        multica_client, "create_issue",
+        lambda *_args, **_kwargs: {
+            "id": "40404040-4040-4404-8404-404040404040", "identifier": "MYW-41",
+            "title": "t", "status": "open"},
+    )
+    monkeypatch.setattr(
+        multica_client, "get_issue",
+        lambda base_url, token, workspace_id, issue_ref: {
+            "id": "40404040-4040-4404-8404-404040404040", "identifier": issue_ref,
+            "workspace_id": workspace_id, "status": "in_progress"},
+    )
+    monkeypatch.setattr(
+        multica_client, "list_task_runs",
+        lambda base_url, token, workspace_id, issue_id: [
+            {"id": "task-40", "issue_id": issue_id, "workspace_id": workspace_id,
+             "status": "in_progress", "result": "进行中"}],
+    )
+
+    # The upgraded runtime re-resolves and re-persists the connector against
+    # the same digest: the old snapshot shape is reused, not rejected.
+    connector = runtime._resolve_external_connector(db, run, old_call)
+    assert connector is not None
+    reused = db.query(CapabilityRevision).filter_by(
+        key="multica_create_task", revision=2).one()
+    # Existing rows are never rewritten: the genuine pre-upgrade shape survives.
+    assert reused.supports_query_status is True and reused.supports_cancel is True
+    assert reused.workspace_scope == []
+    assert db.query(CapabilityRevision).filter_by(
+        key="multica_create_task", revision=2).count() == 1
+    # New work resolves the same revision from the digest instead of bumping.
+    assert runtime._capability_revision_for_target(db, owner.id, "multica_create_task") == 2
+
+    # The old waiting Call can still be queried through the upgraded path…
+    observed = asyncio.run(connector.query_status(remote_task_ref=old_call.remote_task_ref))
+    assert observed["status"] == "running"
+
+    # …and a fresh Call dispatched by the upgraded code freezes the same
+    # digest, shares the reused snapshot, and executes normally.
+    new_call = _multica_call_row(
+        run, target="multica_create_task", capability_revision=2,
+        binding=revision_a, suffix="upgrade-new",
+    )
+    db.add(new_call)
+    db.commit()
+    new_connector = runtime._resolve_external_connector(db, run, new_call)
+    assert new_connector is not None
+    created = asyncio.run(new_connector.invoke(
+        run_id=run.id, call_id=new_call.id,
+        input_ref='{"arguments":{"title":"升级后新任务"}}', deadline=None))
+    assert created["status"] == "running"
+    assert json.loads(created["remote_task_ref"])["profile_revision_id"] == revision_a
+    assert db.query(CapabilityRevision).filter_by(
+        key="multica_create_task", revision=2).count() == 1
+    assert db.query(ExecutionCall).filter_by(run_id=run.id,
+                                             target_ref="multica_create_task").count() == 2
+
+
+def test_reconcile_redelivers_pre_upgrade_event_and_acks(db, monkeypatch):
+    """The public NATS reconciliation event hash keeps its historical shape:
+    a provider event stored by pre-upgrade code must redeliver-and-ack after
+    the upgrade, a duplicate that finally carries the enriched reference must
+    still persist the enrichment, and a reused event id with different content
+    keeps being rejected."""
+    from app.super_assistant.kernel.models import ExecutionCall
+    from app.super_assistant.kernel.store import append_event
+
+    run, _, _ = _runtime_fixture(db, monkeypatch, goal="multica 事件重投")
+    revision = "rev-redeliver-1"
+    call = _multica_call_row(
+        run, target="multica_create_task", capability_revision=2,
+        binding=revision,
+        remote_task_ref=json.dumps({"issue_ref": "MYW-30", "task_id": None,
+                                    "profile_revision_id": revision}),
+        suffix="redeliver",
+    )
+    call.status = "waiting_external"; call.outcome = "remote_running"
+    run.status = "waiting_external"
+    db.add(call)
+    db.commit()
+
+    # A provider event exactly as pre-upgrade code persisted it: the payload
+    # hash covers the historical six fields and nothing else.
+    pre_upgrade_payload = {
+        "run_id": run.id, "call_id": call.id,
+        "remote_state": "running", "content": "执行中",
+        "evidence_ref": None, "artifacts": None,
+    }
+    pre_upgrade_hash = runtime._hash_payload(pre_upgrade_payload)
+    append_event(
+        db, run, event_type="call.outcome_changed",
+        payload={"call_id": call.id, "status": "waiting_external",
+                 "outcome": "remote_running", "evidence_ref": None,
+                 "connector_id": "multica:multica_create_task",
+                 "provider_event_id": "multica:pre-1",
+                 "provider_payload_hash": pre_upgrade_hash},
+        actor={"kind": "reconciler"}, command_id=f"reconcile:{call.id}:multica:pre-1",
+        idempotency_key=f"reconcile:{call.id}:multica:pre-1",
+        connector_id="multica:multica_create_task",
+        provider_event_id="multica:pre-1",
+    )
+    db.commit()
+
+    def redeliver(extra=None):
+        message = {
+            "run_id": run.id, "call_id": call.id,
+            "connector_id": "multica:multica_create_task",
+            "provider_event_id": "multica:pre-1",
+            "remote_state": "running", "content": "执行中",
+        }
+        message.update(extra or {})
+        return asyncio.run(runtime.reconcile_execution_message(message))
+
+    def persisted_call():
+        db.expire_all()
+        return db.query(ExecutionCall).filter_by(id=call.id).one()
+
+    # Plain redelivery of the pre-upgrade message acks without effects.
+    assert redeliver() is True
+    current = persisted_call()
+    assert current.status == "waiting_external"
+    assert json.loads(current.remote_task_ref)["task_id"] is None
+
+    # A duplicate that now carries the learned original task id still acks and
+    # persists the enrichment — the reference learning must not regress.
+    enriched = json.dumps({"issue_ref": "MYW-30", "task_id": "task-30",
+                           "issue_id": "30303030-3030-4303-8303-303030303030",
+                           "profile_revision_id": revision})
+    assert redeliver({"remote_task_ref": enriched}) is True
+    current = persisted_call()
+    assert json.loads(current.remote_task_ref)["task_id"] == "task-30"
+    assert current.status == "waiting_external"
+
+    # A reused provider event id with different content stays a hard conflict.
+    assert redeliver({"content": "内容被替换"}) is False
+    current = persisted_call()
+    assert current.status == "waiting_external"
+    assert json.loads(current.remote_task_ref)["task_id"] == "task-30"
+
+
+def test_scheduler_poll_payload_keeps_legacy_shape_without_observed_ref(db, monkeypatch):
+    """Providers that do not observe a reference keep the historical payload
+    shape: no ``remote_task_ref`` key is invented, so the outbox observation
+    identity of pre-upgrade integrations is unchanged."""
+    from app.super_assistant.kernel.models import ExecutionDispatchOutbox
+
+    run, _, _ = _runtime_fixture(db, monkeypatch, goal="传统 provider 轮询")
+    target = f"fake.legacy_{uuid.uuid4().hex[:8]}"
+    monkeypatch.setattr(runtime.provider, "chat", lambda *_args, **_kwargs: {
+        "content": "已提交", "tool_calls": [],
+        "external_call": {"target_ref": target, "message": "后台执行"},
+    })
+    monkeypatch.setattr(runtime, "requires_approval", lambda *args, **kwargs: False)
+    asyncio.run(runtime.process_execution_message({"run_id": run.id, "command_id": "legacy-poll"}))
+    external = db.query(runtime.ExecutionCall).filter_by(run_id=run.id, side_effect_class="external_async").one()
+
+    class LegacyPollConnector:
+        def descriptor(self):
+            return AgentDescriptor(
+                agent_id="fake-legacy-poll", key=target, revision=1,
+                transport="mcp", session_policy=SessionPolicy.RESUMABLE,
+                supports_query_status=True,
+            )
+
+        async def invoke(self, **kwargs):
+            return {"status": "running", "remote_task_ref": "legacy-ref"}
+
+        async def query_status(self, **kwargs):
+            return {"status": "completed", "content": "完成", "provider_event_id": "legacy-1"}
+
+        async def cancel(self, **kwargs):
+            return {"status": "unsupported"}
+
+    runtime.connector_registry.register(LegacyPollConnector())
+    asyncio.run(runtime.process_external_call_message({"run_id": run.id, "call_id": external.id}))
+    db.expire_all()
+    monkeypatch.setattr(kernel_scheduler, "SessionLocal", TestSession)
+    db.refresh(external)
+    external.next_reconcile_at = runtime._now()
+    db.commit()
+    kernel_scheduler._poll_external_calls_once()
+    db.expire_all()
+    queued = db.query(ExecutionDispatchOutbox).filter_by(
+        run_id=run.id, subject="sa.execution.reconcile",
+    ).one()
+    assert queued.payload["remote_state"] == "completed"
+    assert "remote_task_ref" not in queued.payload

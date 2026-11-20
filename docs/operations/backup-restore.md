@@ -17,6 +17,9 @@
 - 启用 Hindsight 记忆 profile 时，其 `hindsight_postgres_data` 卷与 `.env` 中
   的 `HINDSIGHT_API_KEY`/`HINDSIGHT_SERVICE_TOKEN` 同恢复点保存
   （`hindsight_model_cache` 仅是模型缓存，可重新下载/预填，不属于恢复权威）；
+- 启用 Multica 默认栈时（生产默认启用），`multica_pgdata` 与
+  `multica_uploads` 必须与服务器 `.env` 同恢复点保存（见下文 Multica
+  配对约束；启用并正常使用后的回滚以该卷备份恢复为准）；
 - 集成副本执行器（标准栈自动启动）的偏移卷 `integrated_replica_state` 与
   PostgreSQL（副本表与控制面所在库）必须同一恢复点保存（启用 CDC 覆盖层时
   `integrated_cdc_state` 同理）；
@@ -52,6 +55,15 @@ SQLite；运行中只复制 `grafana.db` 不构成一致备份）。恢复到全
 PostgreSQL 与卷后，须核对卡片元数据/UID 与 Grafana 内面板、数据源及共享
 管理员一致，并验证预览/编排入口。`GRAFANA_ADMIN_PASSWORD` 随服务器 `.env`
 同恢复点保存（原生改密后已同步的值）。
+
+Multica 的 `multica_pgdata` 必须与服务器 `.env` 中的
+`MULTICA_POSTGRES_PASSWORD` 作为同一恢复点保存（PostgreSQL 角色密码固化
+在数据目录内，旧卷配新生成密码会认证失败）；`multica_uploads`（附件卷）
+与库内附件元数据成对，只恢复一边会出现「库里引用、文件缺失」。五值
+默认集（尤其 `MULTICA_DEFAULT_PAT`）随服务器 `.env` 同恢复点保存：
+Multica 数据卷恢复到更早状态而 `.env` 仍是较新的 PAT 时，令牌可能已随
+卷回滚失效，需在 Multica 原生界面重新铸造并回填。启用并正常使用后的
+回滚边界见 [回滚](./rollback.md)。
 
 服务器 `.env` 与 PostgreSQL/API Hub 数据必须作为同一恢复点管理。
 `ENCRYPTION_KEY`（历史环境中可能由当时的 `SECRET_KEY` 派生）是模型、Connection、

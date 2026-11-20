@@ -612,6 +612,49 @@ export interface MulticaWorkspacesResult {
   workspaces: MulticaTestResult['workspaces']
 }
 
+/** Multica 多 profile 行（GET /super-assistant/multica/profiles）：kind=platform_default
+ *  为平台默认只读 profile，custom 为用户自建（可增删改/激活）；token 加密存储、
+ *  只回显 token_set 标志。 */
+export interface MulticaProfile {
+  id: string
+  name: string
+  kind: 'platform_default' | 'custom' | string
+  builtin_key: string | null
+  /** 原生 Web 入口：仅 platform_default 携带部署显式配置的 MULTICA_DEFAULT_WEB_URL，
+   *  custom 恒为 null；经 http(s) 校验后用于「打开 Multica」链接，前端不做任何推导。 */
+  web_url: string | null
+  is_active: boolean
+  enabled: boolean
+  base_url: string
+  workspace_id: string
+  workspace_name: string
+  token_set: boolean
+  revision: number
+  last_test_status: 'success' | 'error' | null
+  last_test_message: string | null
+  last_tested_at: string | null
+}
+
+/** GET /multica/profiles：profile 目录 + 当前/默认定位 + effective（旧 MulticaConfig）。
+ *  effective 供旧逻辑兜底：页面级 /multica: 命令提示仍走 GET /multica/config，不改契约。 */
+export interface MulticaProfilesResult {
+  profiles: MulticaProfile[]
+  active_profile_id: string | null
+  default_profile_id: string | null
+  effective: MulticaConfig
+}
+
+/** POST/PATCH /multica/profiles 可写字段：PATCH 全部可选；token 只在填写时提交，
+ *  留空即保留已存凭据（后端加密存储、永不回显）。 */
+export interface MulticaProfilePayload {
+  name?: string
+  base_url?: string
+  token?: string | null
+  workspace_id?: string
+  workspace_name?: string | null
+  enabled?: boolean
+}
+
 /** Hindsight 长期记忆（用户级，跨全部 SA 会话共享；删除会话不影响记忆）。
  *  旧 SuperMemory/分区/蒸馏体系已随本迭代退役。 */
 export interface MemorySettings {
@@ -966,6 +1009,25 @@ export const superAssistantApi = {
     apiClientV2.post<MulticaTestResult>('/super-assistant/multica/test', body),
   multicaWorkspaces: () =>
     apiClientV2.get<MulticaWorkspacesResult>('/super-assistant/multica/workspaces'),
+
+  /** 多 profile 目录（含 effective 旧配置快照）：能力拓展弹窗 Multica tab 数据源 */
+  multicaProfiles: () =>
+    apiClientV2.get<MulticaProfilesResult>('/super-assistant/multica/profiles'),
+  createMulticaProfile: (body: MulticaProfilePayload & { name: string; base_url: string; workspace_id: string }) =>
+    apiClientV2.post<MulticaProfile>('/super-assistant/multica/profiles', body),
+  updateMulticaProfile: (id: string, body: MulticaProfilePayload) =>
+    apiClientV2.patch<MulticaProfile>(`/super-assistant/multica/profiles/${id}`, body),
+  /** 激活即切换生效 profile：激活默认 profile 等价「停用自定义、回默认」 */
+  activateMulticaProfile: (id: string) =>
+    apiClientV2.post<MulticaProfile>(`/super-assistant/multica/profiles/${id}/activate`, {}),
+  deleteMulticaProfile: (id: string) =>
+    apiClientV2.delete(`/super-assistant/multica/profiles/${id}`),
+  /** 已存 profile 的连接测试：base_url/token 为空即沿用已存值（token 覆盖不回显） */
+  testMulticaProfile: (id: string, body: { base_url?: string | null; token?: string | null } = {}) =>
+    apiClientV2.post<MulticaTestResult>(`/super-assistant/multica/profiles/${id}/test`, body),
+  /** 已存 profile 的实时工作区列表（与全局 /multica/workspaces 同形） */
+  multicaProfileWorkspaces: (id: string) =>
+    apiClientV2.get<MulticaWorkspacesResult>(`/super-assistant/multica/profiles/${id}/workspaces`),
 
   listRemoteAgents: () => apiClientV2.get<RemoteAgent[]>('/super-assistant/remote-agents'),
   createRemoteAgent: (body: RemoteAgentPayload) =>

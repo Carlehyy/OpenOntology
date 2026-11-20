@@ -446,12 +446,15 @@ class SuperAssistantPluginRunnerJournal(Base):
 
 
 class SuperAssistantMulticaConfig(Base):
-    """每用户一条的 multica 外部集成配置。
+    """每用户一条的 multica 外部集成配置（多 profile 化后的生效投影）。
 
     凭据与 SuperAssistantMcpServer 同约定：PAT 加密存储、永不回显
     （token_set 由 token_encrypted 是否存在推导）。未配置（无行）或
     enabled=False 时，multica 工具不进入超级助手工具目录，/multica:
     命令得到确定性引导而非执行。
+
+    自迁移 0154 起，profile_id/profile_revision_id/source_kind 指向当前配置。
+    配置变更与生效投影同事务更新，历史任务通过各自的 revision 读取来源。
     """
 
     __tablename__ = "super_assistant_multica_configs"
@@ -469,6 +472,88 @@ class SuperAssistantMulticaConfig(Base):
     last_tested_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)
+    # 当前配置的 profile、revision 与来源类型
+    profile_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    profile_revision_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_kind: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
+
+class SuperAssistantMulticaProfile(Base):
+    """multica 多 profile：每用户多套命名的服务绑定。
+
+    kind=platform_default 由部署侧 multica_default_* 设置派生
+    （builtin_key='default'），只读不可编辑/删除，设置变更时由服务层
+    追加新 revision；kind=custom 为用户自建。每 owner 至多一行
+    is_active=true（部分唯一索引兜底并发激活竞态）。删除为软删除
+    （deleted_at），revision 不可变，历史任务可凭 revision id 解析。
+    """
+
+    __tablename__ = "super_assistant_multica_profiles"
+    __table_args__ = (
+        Index(
+            "uq_sa_multica_profile_owner_active",
+            "owner_id",
+            unique=True,
+            sqlite_where=text("is_active = 1"),
+            postgresql_where=text("is_active IS TRUE"),
+        ),
+        Index("ix_sa_multica_profiles_owner_id", "owner_id"),
+        Index("ix_sa_multica_profiles_owner_kind", "owner_id", "kind"),
+        Index(
+            "uq_sa_multica_profile_owner_default", "owner_id", unique=True,
+            sqlite_where=text("kind = 'platform_default'"),
+            postgresql_where=text("kind = 'platform_default'"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    owner_id: Mapped[str] = mapped_column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    # custom | platform_default
+    kind: Mapped[str] = mapped_column(String(20), nullable=False, default="custom")
+    builtin_key: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+
+class SuperAssistantMulticaProfileRevision(Base):
+    """multica profile 的不可变配置版本（凭据与绑定字段的时点快照）。
+
+    修改 profile 内容总是追加新 revision（revision_no 递增）并把旧
+    revision 置 retired_at。旧 revision 的 endpoint、workspace 与加密凭据
+    保持可解析，直到显式安全撤销；切换 active 不 retire/revoke 旧
+    revision，历史任务可继续凭 revision id 解析创建时的凭据。
+    """
+
+    __tablename__ = "super_assistant_multica_profile_revisions"
+    __table_args__ = (
+        UniqueConstraint("profile_id", "revision_no", name="uq_sa_multica_profile_revision_no"),
+        Index("ix_sa_multica_profile_revisions_profile_no", "profile_id", "revision_no"),
+        Index(
+            "uq_sa_multica_profile_current_revision", "profile_id", unique=True,
+            sqlite_where=text("retired_at IS NULL"),
+            postgresql_where=text("retired_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    profile_id: Mapped[str] = mapped_column(
+        String, ForeignKey("super_assistant_multica_profiles.id", ondelete="CASCADE"), nullable=False, index=True,
+    )
+    revision_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    base_url: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    workspace_id: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    workspace_name: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    last_test_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    last_test_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    last_tested_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class SuperAssistantWeKnoraIntegration(Base):

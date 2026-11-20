@@ -34,7 +34,7 @@ def list_assistant_tools(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> list[AssistantToolOut]:
-    return runtime.builtin_tool_catalog(db, current_user.id)
+    return runtime.read_builtin_tool_catalog(db, current_user.id)
 
 
 @router.patch("/tools/{tool_name}", response_model=AssistantToolOut)

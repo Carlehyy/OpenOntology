@@ -51,6 +51,14 @@ MATERIALIZED_KEYS = {
     "KANEO_ADMIN_EMAIL",
     "KANEO_APP_IMAGE",
     "KANEO_POSTGRES_IMAGE",
+    "MULTICA_DEFAULT_BASE_URL",
+    "MULTICA_DEFAULT_WEB_URL",
+    "MULTICA_DEFAULT_WORKSPACE_ID",
+    "MULTICA_DEFAULT_WORKSPACE_NAME",
+    "MULTICA_DEFAULT_PAT",
+    "MULTICA_BACKEND_IMAGE",
+    "MULTICA_WEB_IMAGE",
+    "MULTICA_POSTGRES_IMAGE",
 }
 MATERIALIZER_SOURCE_VALUES = {
     "PROD_PUBLIC_PORT": "8080",
@@ -98,6 +106,22 @@ MATERIALIZER_OPTIONAL_VALUES = {
     "PROD_KANEO_APP_IMAGE": f"example.invalid/kaneo-app@sha256:{'1' * 64}",
     "PROD_KANEO_POSTGRES_IMAGE": (
         f"example.invalid/kaneo-postgres@sha256:{'2' * 64}"
+    ),
+    # The Multica deployment-level default is the full five-value set: the
+    # manifest must be able to carry all five (plus digest image overrides)
+    # so a controlled manifest can provision a complete default. The PAT is
+    # the only secret of the five; the rest is deployment configuration.
+    "PROD_MULTICA_DEFAULT_BASE_URL": "http://multica:8080",
+    "PROD_MULTICA_DEFAULT_WEB_URL": "https://multica.example.com",
+    "PROD_MULTICA_DEFAULT_WORKSPACE_ID": "00000000-0000-0000-0000-000000000001",
+    "PROD_MULTICA_DEFAULT_WORKSPACE_NAME": "OpenOntology default workspace",
+    "PROD_MULTICA_DEFAULT_PAT": "synthetic-multica-default-pat",
+    "PROD_MULTICA_BACKEND_IMAGE": (
+        f"example.invalid/multica-backend@sha256:{'3' * 64}"
+    ),
+    "PROD_MULTICA_WEB_IMAGE": f"example.invalid/multica-web@sha256:{'4' * 64}",
+    "PROD_MULTICA_POSTGRES_IMAGE": (
+        f"example.invalid/multica-postgres@sha256:{'5' * 64}"
     ),
 }
 
@@ -240,6 +264,7 @@ def test_committed_manifest_template_declares_contract_without_secrets():
         "MINIO_ACCESS_KEY",
         "MINIO_SECRET_KEY",
         "N8N_API_KEY",
+        "MULTICA_DEFAULT_PAT",
     }
     assert all(manifest[key] == "" for key in secret_keys)
     assert ".internal" not in template.read_text(encoding="utf-8")
@@ -402,9 +427,17 @@ def _assert_weknora_compose_graph():
     ] == "service_healthy"
 
     # The dependency graph must be acyclic; a gateway->backend edge is safe
-    # only because backend never depends on the gateway.
+    # only because backend never depends on the gateway. depends_on may use
+    # either the mapping or the plain list form (multica-web follows the
+    # upstream list form), so normalize lists to dependency-name sets first.
+    def _dependency_names(block: dict) -> set[str]:
+        depends_on = block.get("depends_on") or {}
+        if isinstance(depends_on, list):
+            return {str(item) for item in depends_on}
+        return set(depends_on.keys())
+
     graph = {
-        name: set((block.get("depends_on") or {}).keys())
+        name: _dependency_names(block)
         for name, block in {**local, **prod}.items()
     }
     visiting: set[str] = set()
@@ -425,10 +458,95 @@ def _assert_weknora_compose_graph():
         visit(service)
 
 
+def _assert_multica_compose_graph():
+    local = _compose_services(ROOT / "docker-compose.local.yml")
+    prod = _compose_services(ROOT / "docker-compose.prod.yml")
+
+    for services in (local, prod):
+        for name in ("multica-postgres", "multica", "multica-web"):
+            assert services[name]["profiles"] == ["multica"]
+        # The official healthchecks keep the upstream contract: the API
+        # container probes /healthz (ready) and the web container its own
+        # origin; uploads persist on the upstream /app/data/uploads volume.
+        assert "multica_uploads:/app/data/uploads" in services[
+            "multica"
+        ]["volumes"]
+        assert "multica_pgdata:/var/lib/postgresql/data" in services[
+            "multica-postgres"
+        ]["volumes"]
+
+    # Production exposure contract: the API container never publishes a host
+    # port; the web UI (native login/PAT minting) binds loopback by default
+    # and must be reached through an SSH tunnel or a TLS reverse proxy.
+    assert "ports" not in prod["multica"]
+    assert "ports" not in prod["multica-postgres"]
+    assert prod["multica-web"]["ports"] == [
+        "${MULTICA_WEB_BIND_ADDR:-127.0.0.1}:${MULTICA_WEB_PORT:-18100}:3000"
+    ]
+    assert prod["multica-web"]["networks"] == ["multica_internal"]
+    # The official API container stays solely on the private network: only
+    # the calling backend / pipeline_executor join multica_internal, so the
+    # API never becomes reachable from the default compose network.
+    assert prod["multica"]["networks"] == ["multica_internal"]
+    assert prod["multica-postgres"]["networks"] == ["multica_internal"]
+
+    # Local exposure stays loopback-only for both the web and API ports.
+    assert local["multica-web"]["ports"] == [
+        "127.0.0.1:${MULTICA_WEB_LOOPBACK_PORT:-18100}:3000"
+    ]
+    assert local["multica"]["ports"] == [
+        "127.0.0.1:${MULTICA_API_LOOPBACK_PORT:-18101}:8080"
+    ]
+
+    # Secret masking: every env_file consumer keeps the empty masks for the
+    # Multica PAT and the stack's own JWT/DB secrets; only backend and
+    # pipeline_executor re-declare the real PAT for the deployment default
+    # and the AutoLoop worker.
+    masked = {"MULTICA_DEFAULT_PAT", "MULTICA_JWT_SECRET",
+              "MULTICA_POSTGRES_PASSWORD"}
+    for compose_services_map in (local, prod):
+        for name, block in compose_services_map.items():
+            environment = block.get("environment") or {}
+            if not isinstance(environment, dict):
+                continue
+            if name in {"backend", "pipeline_executor"}:
+                assert environment["MULTICA_DEFAULT_PAT"] == (
+                    "${MULTICA_DEFAULT_PAT:-}"
+                )
+                # The stack's own JWT/DB secrets stay masked even for the
+                # two sanctioned PAT consumers. pipeline_executor maps all
+                # five MULTICA_DEFAULT_* values: executor-side consumers
+                # (autoloop dispatch, kernel activation) run the same
+                # all-or-nothing completeness predicate, and a consumer
+                # missing WEB_URL would treat the deployment default as
+                # unconfigured and soft-delete the materialized
+                # platform-default profile.
+                assert environment["MULTICA_JWT_SECRET"] == ""
+                assert environment["MULTICA_POSTGRES_PASSWORD"] == ""
+                if name == "pipeline_executor":
+                    assert environment["MULTICA_DEFAULT_WEB_URL"] == (
+                        "${MULTICA_DEFAULT_WEB_URL:-}"
+                    )
+            else:
+                # Any other service that carries these keys must keep the
+                # empty mask (only the multica stack containers consume the
+                # real stack secrets, and they use plain interpolated keys
+                # like JWT_SECRET/POSTGRES_PASSWORD instead).
+                for key in masked & set(environment):
+                    assert environment[key] == "", (name, key)
+
+    # The local stack starts multica by default through the repo .env
+    # template; the production toggle defaults to enabled as well.
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    assert "COMPOSE_PROFILES=multica" in env_example
+    assert "MULTICA_ENABLED=true" in env_example
+
+
 def test_deploy_merges_required_runtime_manifest(tmp_path):
     # Fold the WeKnora compose graph ordering assertions into this existing
     # test so the pytest-split duration table keeps the same test IDs.
     _assert_weknora_compose_graph()
+    _assert_multica_compose_graph()
     shutil.copy(ROOT / ".env.example", tmp_path / ".env.example")
     image_keys = (
         "POSTGRES_IMAGE", "REDIS_IMAGE", "NEO4J_IMAGE", "MINIO_IMAGE",
@@ -481,6 +599,7 @@ def test_deploy_merges_required_runtime_manifest(tmp_path):
     assert "applied" in result.stdout
     assert manifest["POSTGRES_PASSWORD"] not in result.stdout
     assert manifest["MINIO_SECRET_KEY"] not in result.stdout
+    assert manifest["MULTICA_DEFAULT_PAT"] not in result.stdout
 
 
 def test_dependency_probe_never_logs_driver_error_details(monkeypatch, capsys):
@@ -585,6 +704,158 @@ def test_startup_dependency_probe_fails_closed_for_n8n_in_production(monkeypatch
     with pytest.raises(RuntimeError) as exc_info:
         dependency_probe.probe_startup_dependencies()
     assert "n8n" in str(exc_info.value)
+
+
+def _multica_settings(monkeypatch, **overrides):
+    """Point the five deployment-default Multica settings at synthetic values."""
+    from app.shared.config import settings as shared_settings
+
+    values = {
+        "multica_default_base_url": "",
+        "multica_default_web_url": "",
+        "multica_default_workspace_id": "",
+        "multica_default_workspace_name": "",
+        "multica_default_pat": "",
+    }
+    values.update(overrides)
+    for key, value in values.items():
+        monkeypatch.setattr(shared_settings, key, value)
+    return values
+
+
+_MULTICA_COMPLETE = {
+    "multica_default_base_url": "http://multica:8080",
+    "multica_default_web_url": "https://multica.example.com",
+    "multica_default_workspace_id": "ws-default",
+    "multica_default_workspace_name": "平台默认工作区",
+    "multica_default_pat": "synthetic-multica-default-pat",
+}
+
+
+def test_multica_default_config_state_classifies_five_value_set(monkeypatch):
+    from app.shared import dependency_probe
+
+    _multica_settings(monkeypatch)
+    assert dependency_probe.multica_default_config_state() == "disabled"
+
+    _multica_settings(monkeypatch, **_MULTICA_COMPLETE)
+    assert dependency_probe.multica_default_config_state() == "complete"
+
+    # Any partial set is "partial": a deployment that intended a default but
+    # cannot deliver one must never read as unconfigured.
+    _multica_settings(
+        monkeypatch,
+        multica_default_base_url=_MULTICA_COMPLETE["multica_default_base_url"],
+    )
+    assert dependency_probe.multica_default_config_state() == "partial"
+
+    # Whitespace-only values count as unset, matching Settings consumers.
+    _multica_settings(
+        monkeypatch,
+        multica_default_base_url="   ",
+        multica_default_pat="\t",
+    )
+    assert dependency_probe.multica_default_config_state() == "disabled"
+
+
+def test_probe_multica_default_skips_incomplete_configuration(monkeypatch):
+    from app.super_assistant import multica_client
+    from app.shared import dependency_probe
+
+    def explode(*_args, **_kwargs):
+        raise AssertionError("an incomplete default must not be probed")
+
+    monkeypatch.setattr(multica_client, "fetch_me", explode)
+    monkeypatch.setattr(multica_client, "list_workspaces", explode)
+
+    _multica_settings(monkeypatch)
+    dependency_probe.probe_multica_default()
+
+    _multica_settings(monkeypatch, multica_default_pat="synthetic-pat")
+    dependency_probe.probe_multica_default()
+
+
+def test_probe_multica_default_verifies_workspace_membership(monkeypatch):
+    from app.super_assistant import multica_client
+    from app.shared import dependency_probe
+
+    calls = []
+
+    def fake_fetch_me(base_url, token):
+        calls.append(("me", base_url, token))
+
+    def fake_list_workspaces(base_url, token):
+        calls.append(("workspaces", base_url, token))
+        return [{"id": "other-workspace"}, {"id": "ws-default"}]
+
+    monkeypatch.setattr(multica_client, "fetch_me", fake_fetch_me)
+    monkeypatch.setattr(multica_client, "list_workspaces", fake_list_workspaces)
+    _multica_settings(monkeypatch, **_MULTICA_COMPLETE)
+
+    dependency_probe.probe_multica_default()
+
+    assert calls == [
+        ("me", "http://multica:8080", "synthetic-multica-default-pat"),
+        ("workspaces", "http://multica:8080", "synthetic-multica-default-pat"),
+    ]
+
+    _multica_settings(
+        monkeypatch,
+        **{**_MULTICA_COMPLETE, "multica_default_workspace_id": "missing"},
+    )
+    with pytest.raises(RuntimeError) as exc_info:
+        dependency_probe.probe_multica_default()
+    assert str(exc_info.value) == (
+        "Multica default workspace is not visible to the default PAT"
+    )
+
+
+def test_probe_multica_default_failure_never_leaks_details(monkeypatch):
+    from app.super_assistant import multica_client
+    from app.shared import dependency_probe
+
+    def leaky_fetch_me(*_args, **_kwargs):
+        raise RuntimeError(
+            "GET http://multica:8080/api/me failed: PAT "
+            "synthetic-multica-default-pat rejected (upstream body)"
+        )
+
+    monkeypatch.setattr(multica_client, "fetch_me", leaky_fetch_me)
+    _multica_settings(monkeypatch, **_MULTICA_COMPLETE)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        dependency_probe.probe_multica_default()
+
+    assert str(exc_info.value) == "Multica default service is unavailable"
+    assert exc_info.value.__cause__ is None
+
+
+def test_startup_dependency_probe_treats_multica_default_as_advisory(
+    monkeypatch, capsys,
+):
+    from app.shared import dependency_probe
+
+    def reject_multica():
+        raise RuntimeError("multica detail must not be rendered")
+
+    monkeypatch.setattr(
+        dependency_probe,
+        "PROBES",
+        (("Multica default", reject_multica),),
+    )
+    monkeypatch.setattr(dependency_probe, "probe_dbx", lambda: None)
+    monkeypatch.setattr(dependency_probe.settings, "environment", "production")
+
+    # Startup stays advisory in every environment: the bundled stack starts
+    # after the core deployment, so blocking process startup on it would
+    # deadlock the platform; production readiness still gates a configured
+    # default (covered by the readiness tests).
+    dependency_probe.probe_startup_dependencies()
+    assert dependency_probe.main() == 0
+    captured = capsys.readouterr()
+    assert "Multica default: unavailable (RuntimeError)" in captured.err
+    assert "advisory; API may start" in captured.err
+    assert "multica detail must not be rendered" not in captured.err
 
 
 def test_environment_minio_is_always_authoritative(monkeypatch):

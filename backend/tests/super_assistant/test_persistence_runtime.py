@@ -25,6 +25,8 @@ from app.super_assistant.models import (
     SuperAssistantMemory,
     SuperAssistantMemoryProfile,
     SuperAssistantMulticaConfig,
+    SuperAssistantMulticaProfile,
+    SuperAssistantMulticaProfileRevision,
     SuperAssistantMessage,
     SuperAssistantReflectionCandidate,
     SuperAssistantReflectionRun,
@@ -41,6 +43,7 @@ _TABLES = [
     SuperAssistantToolRun.__table__, SuperAssistantToolSetting.__table__,
     SuperAssistantMemory.__table__,
     SuperAssistantMemoryProfile.__table__, SuperAssistantMulticaConfig.__table__,
+    SuperAssistantMulticaProfile.__table__, SuperAssistantMulticaProfileRevision.__table__,
     SuperAssistantReflectionRun.__table__,
     SuperAssistantReflectionCandidate.__table__,
     # Hindsight 跨会话记忆主链：召回读 settings，逐轮入队写 sources

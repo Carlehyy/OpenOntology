@@ -1612,11 +1612,13 @@ export default function SuperAssistantPage() {
         onClose={() => { setTaskInstancesOpen(false); setTaskInstanceId(null) }}
       />
       {/* 能力拓展（条件挂载的常开弹层，不做 Dialog/DialogTrigger 包裹）：
-          入口已自头部图标行迁至聊天区域右键菜单；保存后刷新 multica 配置以同步命令可用性 */}
+          入口已自头部图标行迁至聊天区域右键菜单；保存后刷新 multica 配置以同步命令可用性。
+          直接透传 async 函数（内部自捕获不抛错）：面板 await onChanged() 才真正
+          等命令目录刷新完成，避免包一层箭头把 promise 丢弃成未等待的后台刷新 */}
       {integrationsOpen && (
         <IntegrationsDialog
           onClose={() => setIntegrationsOpen(false)}
-          onSaved={() => void refreshMulticaConfig()}
+          onSaved={refreshMulticaConfig}
         />
       )}
       <ScheduledTasksDialog

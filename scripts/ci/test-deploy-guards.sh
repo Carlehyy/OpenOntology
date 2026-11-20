@@ -779,6 +779,425 @@ if [ -z "$local_grafana_block" ] || [ -z "$local_grafana_bootstrap_block" ] \
   exit 1
 fi
 
+# Multica 默认服务（默认启用：本地经 .env.example 的 COMPOSE_PROFILES=multica
+# 随标准栈启动；生产 MULTICA_ENABLED 留空/true 均启用，仅显式 false 关闭）。
+# 官方 v0.11.0 栈契约已核验（digest ↔ 上游 release commit 的 OCI revision
+# 标签一致），compose 必须以已验证 digest 为默认值引用（禁 latest/浮动
+# tag），且不得用 :? 强制变量——inactive profile 的插值也不能阻断核心
+# compose。生产 API 容器不发布宿主端口；web 宿主端口默认只绑 loopback
+# （MULTICA_WEB_BIND_ADDR，登录/PAT 界面不得明文公网暴露）；三个 multica
+# 容器都只在 multica_internal 私网，API 绝不挂 default——确要调用的
+# backend 与 pipeline_executor 按既有钉扎网络清单另行加入该专网（与
+# WeKnora/Kaneo/Hindsight 同构）；multica_internal 保持普通 bridge（非
+# internal）：官方 backend 需要出站（RESEND 验证邮件、Multica 智能体调用
+# 管理员配置的模型服务），标 internal 只会破坏官方 web/agent 依赖而不增加
+# 真实隔离面。本地仅 loopback；PAT/JWT/DB 密钥由共享掩码锚点置空，仅
+# backend 与 pipeline_executor 显式取回 PAT 真值；内网允许清单独立于
+# MCP 清单；backend 用官方 /healthz 做容器健康检查；上传卷按官方契约挂
+# /app/data/uploads。
+prod_service_block() {
+  local service="$1"
+  awk -v service="$service" '
+    $0 == "  " service ":" { in_service = 1 }
+    in_service && NR > 1 && $0 ~ /^  [A-Za-z0-9_-]+:/ && $0 != "  " service ":" { exit }
+    in_service { print }
+  ' "$PROD_COMPOSE"
+}
+prod_service_networks() {
+  # A prod service's declared networks list from the source compose (YAML
+  # list form), one network per line, so membership can be asserted exactly.
+  # Comment lines inside the list are skipped.
+  awk '
+    /^    networks: *$/ { in_networks = 1; next }
+    in_networks && /^[[:space:]]*#/ { next }
+    in_networks && /^      - / { sub(/^      - /, ""); print; next }
+    in_networks { exit }
+  ' <<<"$1"
+}
+multica_block="$(prod_service_block multica)"
+multica_pg_block="$(prod_service_block multica-postgres)"
+multica_web_block="$(prod_service_block multica-web)"
+local_multica_block="$(local_compose_block multica)"
+local_multica_pg_block="$(local_compose_block multica-postgres)"
+local_multica_web_block="$(local_compose_block multica-web)"
+multica_executor_block="$(prod_service_block pipeline_executor)"
+multica_task_worker_block="$(prod_service_block task_worker)"
+local_backend_block="$(local_compose_block backend)"
+local_executor_block="$(local_compose_block pipeline_executor)"
+local_task_worker_block="$(local_compose_block task_worker)"
+# The multica_internal definition must stay a plain (non-internal) bridge:
+# the official backend needs outbound calls, and internal:true would break the
+# official web/agent dependencies without adding real isolation.
+multica_net_def="$(awk '
+  /^  multica_internal: *$/ { in_net = 1; next }
+  in_net && (/^  [A-Za-z0-9_-]+:/ || /^  #/) { exit }
+  in_net { print }
+' "$PROD_COMPOSE")"
+if [ -z "$multica_block" ] || [ -z "$multica_pg_block" ] \
+    || [ -z "$multica_web_block" ] || [ -z "$local_multica_block" ] \
+    || [ -z "$local_multica_pg_block" ] || [ -z "$local_multica_web_block" ] \
+    || [ -z "$local_backend_block" ] || [ -z "$local_executor_block" ] \
+    || [ -z "$local_task_worker_block" ] \
+    || ! grep -Fq \
+      'image: ${MULTICA_BACKEND_IMAGE:-ghcr.io/multica-ai/multica-backend@sha256:099fd0d1eea8fc4cf03254c6dff86f7de206662ff71db8dc9a78e66726dd65a4}' \
+      <<<"$multica_block" \
+    || ! grep -Fq \
+      'image: ${MULTICA_BACKEND_IMAGE:-ghcr.io/multica-ai/multica-backend@sha256:099fd0d1eea8fc4cf03254c6dff86f7de206662ff71db8dc9a78e66726dd65a4}' \
+      <<<"$local_multica_block" \
+    || ! grep -Fq \
+      'image: ${MULTICA_WEB_IMAGE:-ghcr.io/multica-ai/multica-web@sha256:ba8fd0fda94a9ec141e15d77e591db8ee4b246720a722d6f9dffd185ee48863b}' \
+      <<<"$multica_web_block" \
+    || ! grep -Fq \
+      'image: ${MULTICA_WEB_IMAGE:-ghcr.io/multica-ai/multica-web@sha256:ba8fd0fda94a9ec141e15d77e591db8ee4b246720a722d6f9dffd185ee48863b}' \
+      <<<"$local_multica_web_block" \
+    || ! grep -Fq \
+      'image: ${MULTICA_POSTGRES_IMAGE:-pgvector/pgvector:pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f}' \
+      <<<"$multica_pg_block" \
+    || ! grep -Fq \
+      'image: ${MULTICA_POSTGRES_IMAGE:-pgvector/pgvector:pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f}' \
+      <<<"$local_multica_pg_block" \
+    || ! grep -Fq 'profiles: [multica]' <<<"$multica_block" \
+    || ! grep -Fq 'profiles: [multica]' <<<"$multica_pg_block" \
+    || ! grep -Fq 'profiles: [multica]' <<<"$multica_web_block" \
+    || ! grep -Fq 'profiles: ["multica"]' <<<"$local_multica_block" \
+    || ! grep -Fq 'profiles: ["multica"]' <<<"$local_multica_pg_block" \
+    || ! grep -Fq 'profiles: ["multica"]' <<<"$local_multica_web_block" \
+    || grep -Eq 'MULTICA_[A-Z_]+:\?' "$PROD_COMPOSE" \
+    || grep -Eq 'MULTICA_[A-Z_]+:\?' "$LOCAL_COMPOSE" \
+    || grep -Eq 'multica-(backend|web):latest' "$PROD_COMPOSE" \
+    || grep -Eq 'multica-(backend|web):latest' "$LOCAL_COMPOSE" \
+    || grep -Fq 'MULTICA_APP_IMAGE' "$PROD_COMPOSE" \
+    || grep -Fq 'MULTICA_APP_IMAGE' "$LOCAL_COMPOSE" \
+    || grep -Fq 'MULTICA_APP_IMAGE' "$DEPLOY_SCRIPT" \
+    || grep -Fq 'MULTICA_APP_IMAGE' "$DEPLOY_WORKFLOW" \
+    || grep -Eq '^[[:space:]]+ports:' <<<"$multica_block" \
+    || grep -Eq '^[[:space:]]+ports:' <<<"$multica_pg_block" \
+    || ! grep -Fq 'expose:' <<<"$multica_block" \
+    || ! grep -Fq '"8080"' <<<"$multica_block" \
+    || ! grep -Fq \
+      '${MULTICA_WEB_BIND_ADDR:-127.0.0.1}:${MULTICA_WEB_PORT:-18100}:3000' \
+      <<<"$multica_web_block" \
+    || ! grep -Fq 'REMOTE_API_URL: http://multica:8080' <<<"$multica_web_block" \
+    || ! grep -Fq 'REMOTE_API_URL: http://multica:8080' \
+      <<<"$local_multica_web_block" \
+    || ! grep -Fq \
+      '127.0.0.1:${MULTICA_API_LOOPBACK_PORT:-18101}:8080' \
+      <<<"$local_multica_block" \
+    || ! grep -Fq \
+      '127.0.0.1:${MULTICA_WEB_LOOPBACK_PORT:-18100}:3000' \
+      <<<"$local_multica_web_block" \
+    || ! grep -Fq 'multica_uploads:/app/data/uploads' <<<"$multica_block" \
+    || ! grep -Fq 'multica_uploads:/app/data/uploads' \
+      <<<"$local_multica_block" \
+    || ! grep -Fq 'multica_pgdata:/var/lib/postgresql/data' \
+      <<<"$multica_pg_block" \
+    || ! grep -Fq 'multica_pgdata:/var/lib/postgresql/data' \
+      <<<"$local_multica_pg_block" \
+    || ! grep -Fq 'http://127.0.0.1:8080/healthz' <<<"$multica_block" \
+    || ! grep -Fq 'http://127.0.0.1:8080/healthz' <<<"$local_multica_block" \
+    || ! grep -Fq 'networks:' <<<"$multica_pg_block" \
+    || ! grep -Fq 'multica_internal' <<<"$multica_pg_block" \
+    || grep -Fq 'default' <<<"$multica_pg_block" \
+    || [ "$(prod_service_networks "$multica_block")" != 'multica_internal' ] \
+    || [ "$(prod_service_networks "$multica_web_block")" != 'multica_internal' ] \
+    || [ "$(prod_service_networks "$multica_pg_block")" != 'multica_internal' ] \
+    || ! prod_service_networks "$backend_block" | grep -Fxq 'multica_internal' \
+    || ! prod_service_networks "$multica_executor_block" | grep -Fxq 'multica_internal' \
+    || ! grep -Fq '  multica_internal:' "$PROD_COMPOSE" \
+    || [ "$multica_net_def" != '    driver: bridge' ] \
+    || grep -Fq '  multica_data:' "$PROD_COMPOSE" \
+    || grep -Fq '  multica_data:' "$LOCAL_COMPOSE" \
+    || ! grep -Fq '  multica_pgdata:' "$PROD_COMPOSE" \
+    || ! grep -Fq '  multica_uploads:' "$PROD_COMPOSE" \
+    || ! grep -Fq '  multica_pgdata:' "$LOCAL_COMPOSE" \
+    || ! grep -Fq '  multica_uploads:' "$LOCAL_COMPOSE" \
+    || ! grep -Fq 'MULTICA_DEFAULT_PAT: ""' "$PROD_COMPOSE" \
+    || ! grep -Fq 'MULTICA_DEFAULT_PAT: ""' "$LOCAL_COMPOSE" \
+    || ! grep -Fq 'MULTICA_JWT_SECRET: ""' "$PROD_COMPOSE" \
+    || ! grep -Fq 'MULTICA_JWT_SECRET: ""' "$LOCAL_COMPOSE" \
+    || ! grep -Fq 'MULTICA_POSTGRES_PASSWORD: ""' "$PROD_COMPOSE" \
+    || ! grep -Fq 'MULTICA_POSTGRES_PASSWORD: ""' "$LOCAL_COMPOSE" \
+    || ! grep -Fq 'MULTICA_DEFAULT_PAT: ${MULTICA_DEFAULT_PAT:-}' \
+      <<<"$backend_block" \
+    || ! grep -Fq 'MULTICA_DEFAULT_PAT: ${MULTICA_DEFAULT_PAT:-}' \
+      <<<"$multica_executor_block" \
+    || ! grep -Fq 'MULTICA_DEFAULT_BASE_URL: ${MULTICA_DEFAULT_BASE_URL:-}' \
+      <<<"$backend_block" \
+    || ! grep -Fq 'MULTICA_DEFAULT_WEB_URL: ${MULTICA_DEFAULT_WEB_URL:-}' \
+      <<<"$backend_block" \
+    || ! grep -Fq 'MULTICA_DEFAULT_WORKSPACE_ID: ${MULTICA_DEFAULT_WORKSPACE_ID:-}' \
+      <<<"$backend_block" \
+    || ! grep -Fq 'MULTICA_DEFAULT_WORKSPACE_NAME: ${MULTICA_DEFAULT_WORKSPACE_NAME:-}' \
+      <<<"$backend_block" \
+    || ! grep -Fq 'MULTICA_DEFAULT_WEB_URL: ${MULTICA_DEFAULT_WEB_URL:-}' \
+      <<<"$multica_executor_block" \
+    || ! grep -Fq 'MULTICA_DEFAULT_WORKSPACE_ID: ${MULTICA_DEFAULT_WORKSPACE_ID:-}' \
+      <<<"$multica_executor_block" \
+    || ! grep -Fq 'MULTICA_DEFAULT_WORKSPACE_NAME: ${MULTICA_DEFAULT_WORKSPACE_NAME:-}' \
+      <<<"$multica_executor_block" \
+    || ! grep -Fq \
+      'SUPER_ASSISTANT_MULTICA_INTERNAL_BASE_URLS: ${SUPER_ASSISTANT_MULTICA_INTERNAL_BASE_URLS:-}' \
+      <<<"$backend_block" \
+    || ! grep -Fq \
+      'SUPER_ASSISTANT_MULTICA_INTERNAL_BASE_URLS: ${SUPER_ASSISTANT_MULTICA_INTERNAL_BASE_URLS:-}' \
+      <<<"$multica_executor_block" \
+    || ! grep -Fq 'MULTICA_DEFAULT_BASE_URL: ${MULTICA_DEFAULT_BASE_URL:-}' \
+      <<<"$local_backend_block" \
+    || ! grep -Fq 'MULTICA_DEFAULT_WEB_URL: ${MULTICA_DEFAULT_WEB_URL:-}' \
+      <<<"$local_backend_block" \
+    || ! grep -Fq 'MULTICA_DEFAULT_WORKSPACE_ID: ${MULTICA_DEFAULT_WORKSPACE_ID:-}' \
+      <<<"$local_backend_block" \
+    || ! grep -Fq 'MULTICA_DEFAULT_WORKSPACE_NAME: ${MULTICA_DEFAULT_WORKSPACE_NAME:-}' \
+      <<<"$local_backend_block" \
+    || ! grep -Fq 'MULTICA_DEFAULT_PAT: ${MULTICA_DEFAULT_PAT:-}' \
+      <<<"$local_backend_block" \
+    || ! grep -Fq \
+      'SUPER_ASSISTANT_MULTICA_INTERNAL_BASE_URLS: ${SUPER_ASSISTANT_MULTICA_INTERNAL_BASE_URLS:-}' \
+      <<<"$local_backend_block" \
+    || ! grep -Fq 'MULTICA_DEFAULT_BASE_URL: ${MULTICA_DEFAULT_BASE_URL:-}' \
+      <<<"$local_executor_block" \
+    || ! grep -Fq 'MULTICA_DEFAULT_WEB_URL: ${MULTICA_DEFAULT_WEB_URL:-}' \
+      <<<"$local_executor_block" \
+    || ! grep -Fq 'MULTICA_DEFAULT_WORKSPACE_ID: ${MULTICA_DEFAULT_WORKSPACE_ID:-}' \
+      <<<"$local_executor_block" \
+    || ! grep -Fq 'MULTICA_DEFAULT_WORKSPACE_NAME: ${MULTICA_DEFAULT_WORKSPACE_NAME:-}' \
+      <<<"$local_executor_block" \
+    || ! grep -Fq 'MULTICA_DEFAULT_PAT: ${MULTICA_DEFAULT_PAT:-}' \
+      <<<"$local_executor_block" \
+    || ! grep -Fq \
+      'SUPER_ASSISTANT_MULTICA_INTERNAL_BASE_URLS: ${SUPER_ASSISTANT_MULTICA_INTERNAL_BASE_URLS:-}' \
+      <<<"$local_executor_block" \
+    || grep -Fq 'MULTICA_DEFAULT_PAT:' <<<"$multica_task_worker_block" \
+    || grep -Fq 'MULTICA_DEFAULT_PAT:' <<<"$local_task_worker_block" \
+    || grep -Fq 'MULTICA_JWT_SECRET: ${' <<<"$multica_task_worker_block" \
+    || ! grep -Fq 'MULTICA_ENABLED=true' "$REPO_ROOT/.env.example" \
+    || ! grep -Fq 'COMPOSE_PROFILES=multica' "$REPO_ROOT/.env.example" \
+    || ! grep -Fq 'MULTICA_WEB_BIND_ADDR=127.0.0.1' "$REPO_ROOT/.env.example" \
+    || ! grep -Fq 'MULTICA_DEFAULT_PAT=' "$REPO_ROOT/.env.example" \
+    || ! grep -Fq \
+      'MULTICA_BACKEND_IMAGE=ghcr.io/multica-ai/multica-backend@sha256:099fd0d1eea8fc4cf03254c6dff86f7de206662ff71db8dc9a78e66726dd65a4' \
+      "$REPO_ROOT/.env.example" \
+    || ! grep -Fq \
+      'MULTICA_WEB_IMAGE=ghcr.io/multica-ai/multica-web@sha256:ba8fd0fda94a9ec141e15d77e591db8ee4b246720a722d6f9dffd185ee48863b' \
+      "$REPO_ROOT/.env.example" \
+    || ! grep -Fq 'start_multica_default_stack() {' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq 'stop_disabled_multica_stack' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq 'configure_multica_env' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq 'validate_multica_config' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq 'multica_bind_addr_ok' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq 'check_image_digest MULTICA_BACKEND_IMAGE' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq 'check_image_digest MULTICA_WEB_IMAGE' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq 'check_image_digest MULTICA_POSTGRES_IMAGE' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq 'MULTICA_BACKEND_IMAGE_PIN=' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq 'MULTICA_WEB_IMAGE_PIN=' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq 'MULTICA_JWT_SECRET' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq 'MULTICA_DEFAULT_PAT' "$DEPLOY_SCRIPT" \
+    || ! grep -Fq 'COMPOSE_PROFILES= \' "$DEPLOY_SCRIPT" \
+    || grep -Fq ' -u COMPOSE_PROFILES' "$DEPLOY_SCRIPT" \
+    || grep -Fq 'profile_args+=(--profile multica)' "$DEPLOY_SCRIPT"; then
+  printf 'Multica must stay a default-enabled official-stack profile with isolation guarantees: verified digest-pinned image defaults (no floating tags, no blocking required vars), all three multica containers solely on the multica_internal private network (the API never joins default; only the calling backend and pipeline_executor join that network), a plain non-internal bridge (the official stack needs outbound), no host ports on the API container, a loopback-default web bind, official /healthz healthchecks, /app/data/uploads volumes, loopback-only local exposure, backend and pipeline_executor both mapping all five MULTICA_DEFAULT_* values explicitly (the all-or-nothing completeness predicate is process-local: a consumer missing any value treats the deployment default as unconfigured and soft-deletes the materialized platform profile; env_file inheritance must not be the only delivery), PAT/JWT/DB secrets masked everywhere except the sanctioned PAT consumers, an MCP-independent allowlist, and a script-owned COMPOSE_PROFILES authority\n' >&2
+  exit 1
+fi
+multica_optional_call_line="$(
+  grep -nF 'start_multica_default_stack || log' "$DEPLOY_SCRIPT" \
+    | head -n1 | cut -d: -f1
+)"
+multica_start_call_count="$(
+  grep -cF 'start_multica_default_stack || log' "$DEPLOY_SCRIPT"
+)"
+multica_core_up_def_line="$(
+  grep -nF 'if ! run_with_retry compose up -d --remove-orphans; then' \
+    "$DEPLOY_SCRIPT" | head -n1 | cut -d: -f1
+)"
+multica_readiness_wait_line="$(
+  grep -nF 'log "waiting for backend, pipeline executor, replica executor and frontend readiness' \
+    "$DEPLOY_SCRIPT" | head -n1 | cut -d: -f1
+)"
+if [ "$multica_start_call_count" -ne 1 ] \
+    || [ -z "$multica_optional_call_line" ] \
+    || [ -z "$multica_core_up_def_line" ] \
+    || [ -z "$multica_readiness_wait_line" ] \
+    || [ "$multica_optional_call_line" -le "$multica_core_up_def_line" ] \
+    || [ "$multica_optional_call_line" -ge "$multica_readiness_wait_line" ]; then
+  printf 'the Multica default stack must start exactly once, after the final core compose up and before the readiness gate wait (a configured multica_default readiness check would otherwise deadlock on a stack that is never started)\n' >&2
+  exit 1
+fi
+multica_manifest_secret_count="$(
+  grep -cF \
+    'PROD_MULTICA_DEFAULT_PAT: ${{ secrets.PROD_MULTICA_DEFAULT_PAT }}' \
+    "$DEPLOY_WORKFLOW"
+)"
+if [ "$multica_manifest_secret_count" -lt 2 ]; then
+  printf 'verification and deploy must both materialize the Multica manifest secret\n' >&2
+  exit 1
+fi
+multica_manifest_config_count="$(
+  grep -cF \
+    'PROD_MULTICA_DEFAULT_BASE_URL: ${{ vars.PROD_MULTICA_DEFAULT_BASE_URL }}' \
+    "$DEPLOY_WORKFLOW"
+)"
+multica_manifest_workspace_count="$(
+  grep -cF \
+    'PROD_MULTICA_DEFAULT_WORKSPACE_ID: ${{ vars.PROD_MULTICA_DEFAULT_WORKSPACE_ID }}' \
+    "$DEPLOY_WORKFLOW"
+)"
+multica_manifest_workspace_name_count="$(
+  grep -cF \
+    'PROD_MULTICA_DEFAULT_WORKSPACE_NAME: ${{ vars.PROD_MULTICA_DEFAULT_WORKSPACE_NAME }}' \
+    "$DEPLOY_WORKFLOW"
+)"
+if [ "$multica_manifest_config_count" -lt 2 ] \
+    || [ "$multica_manifest_workspace_count" -lt 2 ] \
+    || [ "$multica_manifest_workspace_name_count" -lt 2 ]; then
+  printf 'verification and deploy must both forward the full five-value Multica manifest surface (base URL, workspace id and name are controlled manifest config, not just the PAT)\n' >&2
+  exit 1
+fi
+multica_image_var_count="$(
+  grep -cF \
+    'PROD_MULTICA_BACKEND_IMAGE: ${{ vars.PROD_MULTICA_BACKEND_IMAGE }}' \
+    "$DEPLOY_WORKFLOW"
+)"
+if [ "$multica_image_var_count" -lt 2 ] \
+    || grep -Fq 'MULTICA_APP_IMAGE' "$DEPLOY_WORKFLOW"; then
+  printf 'verification and deploy must both forward the optional Multica image override, and no synthetic Multica image variable may remain (the compose digest defaults satisfy interpolation)\n' >&2
+  exit 1
+fi
+
+# Synthetic Compose render: prove both compose files interpolate and expose
+# the Multica stack exactly as the guards describe (default-on locally via
+# COMPOSE_PROFILES, isolated profile in prod, loopback web bind). Rendering
+# needs a real `docker compose`; environments without Docker skip this with a
+# loud note instead of failing, because every structural fact is already
+# asserted statically above.
+if command -v docker >/dev/null 2>&1 \
+    && docker compose version >/dev/null 2>&1; then
+  compose_render_tmp="$(mktemp -d)"
+  compose_required_env() {
+    # Synthetic values for every ${VAR:?} required interpolation so
+    # `docker compose config` renders deterministically without borrowing a
+    # developer's real .env (values are never pulled or started).
+    grep -oE '\$\{[A-Z0-9_]+:\?' "$1" | sed -E 's/^\$\{//; s/:.*$//' \
+      | sort -u | while IFS= read -r key; do
+        printf '%s=synthetic-%s\n' "$key" "$key"
+      done
+  }
+  compose_required_env "$PROD_COMPOSE" >"$compose_render_tmp/render.env"
+  compose_required_env "$LOCAL_COMPOSE" >>"$compose_render_tmp/render.env"
+  printf '%s\n' \
+    'MULTICA_WEB_BIND_ADDR=127.0.0.1' \
+    'MULTICA_WEB_PORT=18100' \
+    'MULTICA_POSTGRES_PASSWORD=synthetic-render-password' \
+    'MULTICA_JWT_SECRET=synthetic-render-jwt' \
+    >>"$compose_render_tmp/render.env"
+  printf '%s\n' 'COMPOSE_PROFILES=multica' >>"$compose_render_tmp/render.env"
+  cp "$compose_render_tmp/render.env" "$compose_render_tmp/disabled.env"
+  printf '%s\n' 'COMPOSE_PROFILES=' >>"$compose_render_tmp/disabled.env"
+  prod_profiled_services="$(
+    cd "$REPO_ROOT" && docker compose \
+      --env-file "$compose_render_tmp/render.env" \
+      -f docker-compose.prod.yml --profile multica config --services 2>/dev/null \
+      | sort
+  )"
+  prod_core_services="$(
+    cd "$REPO_ROOT" && docker compose \
+      --env-file "$compose_render_tmp/disabled.env" \
+      -f docker-compose.prod.yml config --services 2>/dev/null \
+      | sort
+  )"
+  local_default_services="$(
+    cd "$REPO_ROOT" && docker compose \
+      --env-file "$compose_render_tmp/render.env" \
+      -f docker-compose.local.yml config --services 2>/dev/null \
+      | sort
+  )"
+  local_disabled_services="$(
+    cd "$REPO_ROOT" && docker compose \
+      --env-file "$compose_render_tmp/disabled.env" \
+      -f docker-compose.local.yml config --services 2>/dev/null \
+      | sort
+  )"
+  for service in multica multica-web multica-postgres; do
+    if ! grep -Fxq "$service" <<<"$prod_profiled_services" \
+        || ! grep -Fxq "$service" <<<"$local_default_services"; then
+      printf 'synthetic Compose render: %s must render in prod (--profile multica) and in the default local stack (COMPOSE_PROFILES=multica)\n' "$service" >&2
+      rm -rf "$compose_render_tmp"
+      exit 1
+    fi
+    if grep -Fxq "$service" <<<"$prod_core_services" \
+        || grep -Fxq "$service" <<<"$local_disabled_services"; then
+      printf 'synthetic Compose render: %s must stay out of the prod core model and out of the local stack when COMPOSE_PROFILES is emptied\n' "$service" >&2
+      rm -rf "$compose_render_tmp"
+      exit 1
+    fi
+  done
+  cd "$REPO_ROOT" && docker compose \
+    --env-file "$compose_render_tmp/render.env" \
+    -f docker-compose.prod.yml --profile multica config \
+    >"$compose_render_tmp/prod-rendered.yml" 2>/dev/null
+  multica_web_rendered_block="$(
+    awk '
+      $0 == "  multica-web:" { in_service = 1 }
+      in_service && NR > 1 && $0 ~ /^  [A-Za-z0-9_-]+:/ && $0 != "  multica-web:" { exit }
+      in_service { print }
+    ' "$compose_render_tmp/prod-rendered.yml"
+  )"
+  multica_api_rendered_block="$(
+    awk '
+      $0 == "  multica:" { in_service = 1 }
+      in_service && NR > 1 && $0 ~ /^  [A-Za-z0-9_-]+:/ && $0 != "  multica:" { exit }
+      in_service { print }
+    ' "$compose_render_tmp/prod-rendered.yml"
+  )"
+  if ! grep -Eq 'host_ip: "127\.0\.0\.1"|host_ip: 127\.0\.0\.1' \
+      <<<"$multica_web_rendered_block" \
+      || ! grep -Fq 'published: "18100"' <<<"$multica_web_rendered_block" \
+      || grep -Fq 'host_ip: "0.0.0.0"' <<<"$multica_web_rendered_block" \
+      || grep -Fq 'published:' <<<"$multica_api_rendered_block"; then
+    printf 'synthetic Compose render: the Multica web UI must publish only on the loopback bind (default 127.0.0.1:18100) and the API container must not publish any host port\n' >&2
+    rm -rf "$compose_render_tmp"
+    exit 1
+  fi
+  # Rendered network topology: docker compose config keys each service's
+  # networks by the DECLARED network name (no project prefix), so the actual
+  # rendered model can be asserted exactly: the three multica containers stay
+  # solely on multica_internal (never the default network), and exactly the
+  # calling backend / pipeline_executor join the private network.
+  rendered_service_networks() {
+    local service="$1"
+    awk -v service="$service" '
+      $0 == "  " service ":" { in_service = 1 }
+      in_service && NR > 1 && $0 ~ /^  [A-Za-z0-9_-]+:/ && $0 != "  " service ":" { exit }
+      in_service && /^    networks:/ { in_networks = 1; next }
+      in_networks && /^      [^[:space:]#]/ {
+        line = $0
+        sub(/^ +/, "", line)
+        sub(/:.*$/, "", line)
+        print line
+        next
+      }
+      in_networks { exit }
+    ' "$compose_render_tmp/prod-rendered.yml"
+  }
+  for service in multica multica-web multica-postgres; do
+    if [ "$(rendered_service_networks "$service")" != 'multica_internal' ]; then
+      printf 'synthetic Compose render: %s must be attached solely to multica_internal, never to the default network\n' "$service" >&2
+      rm -rf "$compose_render_tmp"
+      exit 1
+    fi
+  done
+  for service in backend pipeline_executor; do
+    if ! rendered_service_networks "$service" | grep -Fxq 'multica_internal'; then
+      printf 'synthetic Compose render: %s must join multica_internal to reach the default Multica stack\n' "$service" >&2
+      rm -rf "$compose_render_tmp"
+      exit 1
+    fi
+  done
+  rm -rf "$compose_render_tmp"
+  printf 'ok compose-render-multica-defaults\n'
+else
+  printf 'skipped synthetic Compose render: docker compose is unavailable in this environment (structural facts remain statically guarded)\n'
+fi
+
 # The Docker build job only needs a public value to satisfy Compose interpolation.
 # Keep it step-local: a job/top-level secret would leak into unrelated steps or
 # imply that the build actually needs a production credential.
@@ -1570,7 +1989,10 @@ for grafana_key in \
   GRAFANA_IMAGE GRAFANA_BASE_URL GRAFANA_TIMEOUT_SECONDS GRAFANA_ADMIN_USER \
   GRAFANA_ADMIN_PASSWORD GRAFANA_FOLDER_UID GRAFANA_FOLDER_TITLE \
   GRAFANA_SESSION_TTL_SECONDS; do
-  sed -i "/^[[:space:]]*${grafana_key}=/d" "$test_dir/.env"
+  # .bak suffix keeps this portable across GNU and BSD/macOS sed (the other
+  # call sites in this script already use -i.bak).
+  sed -i.bak "/^[[:space:]]*${grafana_key}=/d" "$test_dir/.env"
+  rm -f "$test_dir/.env.bak"
 done
 set_test_env_value FIRST_ADMIN_USER platform-admin-name
 (
@@ -1961,8 +2383,20 @@ for key in \
   HINDSIGHT_IMAGE HINDSIGHT_POSTGRES_IMAGE HINDSIGHT_HF_OFFLINE PUBLIC_TLS_IP \
   GRAFANA_IMAGE GRAFANA_BASE_URL GRAFANA_TIMEOUT_SECONDS GRAFANA_ADMIN_USER \
   GRAFANA_ADMIN_PASSWORD GRAFANA_FOLDER_UID GRAFANA_FOLDER_TITLE \
-  GRAFANA_SESSION_TTL_SECONDS; do
-  if [ "${!key+x}" = "x" ]; then
+  GRAFANA_SESSION_TTL_SECONDS \
+  MULTICA_ENABLED MULTICA_BACKEND_IMAGE MULTICA_WEB_IMAGE \
+  MULTICA_POSTGRES_IMAGE MULTICA_POSTGRES_DB MULTICA_POSTGRES_USER \
+  MULTICA_POSTGRES_PASSWORD MULTICA_JWT_SECRET MULTICA_WEB_PORT \
+  MULTICA_WEB_BIND_ADDR \
+  MULTICA_APP_ENV MULTICA_FRONTEND_ORIGIN MULTICA_APP_URL \
+  MULTICA_ALLOW_SIGNUP MULTICA_DATABASE_STARTUP_TIMEOUT \
+  MULTICA_DEFAULT_BASE_URL MULTICA_DEFAULT_WEB_URL \
+  MULTICA_DEFAULT_WORKSPACE_ID MULTICA_DEFAULT_WORKSPACE_NAME \
+  MULTICA_DEFAULT_PAT SUPER_ASSISTANT_MULTICA_INTERNAL_BASE_URLS; do
+  # A present-but-empty value is not a leak: compose_environment pins
+  # COMPOSE_PROFILES to an explicit empty assignment so a server .env (or
+  # shell) can never smuggle profiles into the script-owned compose calls.
+  if [ "${!key+x}" = "x" ] && [ -n "${!key}" ]; then
     printf 'compose environment leaked authority key: %s\n' "$key" \
       >>"$FAKE_DOCKER_LOG"
     exit 88
@@ -2083,6 +2517,18 @@ if (
     KANEO_ADMIN_USER=shell_override \
     KANEO_ADMIN_EMAIL=shell-override@example.invalid \
     KANEO_ADMIN_PASSWORD=shell-override-password \
+    MULTICA_ENABLED=true \
+    MULTICA_BACKEND_IMAGE=example.invalid/unvalidated:latest \
+    MULTICA_WEB_IMAGE=example.invalid/unvalidated:latest \
+    MULTICA_POSTGRES_IMAGE=example.invalid/unvalidated:latest \
+    MULTICA_WEB_PORT=1 \
+    MULTICA_WEB_BIND_ADDR=10.9.8.7 \
+    MULTICA_DEFAULT_BASE_URL=https://shell-override.invalid \
+    MULTICA_DEFAULT_WEB_URL=https://shell-override.invalid \
+    MULTICA_DEFAULT_WORKSPACE_ID=shell_override \
+    MULTICA_DEFAULT_WORKSPACE_NAME=shell_override \
+    MULTICA_DEFAULT_PAT=shell-override-pat \
+    SUPER_ASSISTANT_MULTICA_INTERNAL_BASE_URLS=https://shell-override.invalid \
     POSTGRES_IMAGE=example.invalid/unvalidated:latest \
     REDIS_IMAGE=example.invalid/unvalidated:latest \
     NEO4J_IMAGE=example.invalid/unvalidated:latest \
@@ -2618,8 +3064,20 @@ for key in \
   HINDSIGHT_IMAGE HINDSIGHT_POSTGRES_IMAGE HINDSIGHT_HF_OFFLINE PUBLIC_TLS_IP \
   GRAFANA_IMAGE GRAFANA_BASE_URL GRAFANA_TIMEOUT_SECONDS GRAFANA_ADMIN_USER \
   GRAFANA_ADMIN_PASSWORD GRAFANA_FOLDER_UID GRAFANA_FOLDER_TITLE \
-  GRAFANA_SESSION_TTL_SECONDS; do
-  if [ "${!key+x}" = "x" ]; then
+  GRAFANA_SESSION_TTL_SECONDS \
+  MULTICA_ENABLED MULTICA_BACKEND_IMAGE MULTICA_WEB_IMAGE \
+  MULTICA_POSTGRES_IMAGE MULTICA_POSTGRES_DB MULTICA_POSTGRES_USER \
+  MULTICA_POSTGRES_PASSWORD MULTICA_JWT_SECRET MULTICA_WEB_PORT \
+  MULTICA_WEB_BIND_ADDR \
+  MULTICA_APP_ENV MULTICA_FRONTEND_ORIGIN MULTICA_APP_URL \
+  MULTICA_ALLOW_SIGNUP MULTICA_DATABASE_STARTUP_TIMEOUT \
+  MULTICA_DEFAULT_BASE_URL MULTICA_DEFAULT_WEB_URL \
+  MULTICA_DEFAULT_WORKSPACE_ID MULTICA_DEFAULT_WORKSPACE_NAME \
+  MULTICA_DEFAULT_PAT SUPER_ASSISTANT_MULTICA_INTERNAL_BASE_URLS; do
+  # A present-but-empty value is not a leak: compose_environment pins
+  # COMPOSE_PROFILES to an explicit empty assignment so a server .env (or
+  # shell) can never smuggle profiles into the script-owned compose calls.
+  if [ "${!key+x}" = "x" ] && [ -n "${!key}" ]; then
     printf 'compose environment leaked authority key: %s\n' "$key" \
       >>"$FAKE_DOCKER_LOG"
     exit 88
@@ -2727,6 +3185,12 @@ case "$*" in
       exit 18
     fi
     ;;
+  *'--profile multica'*'up -d multica'*)
+    if [ "${FAKE_MULTICA_UP_FAIL:-0}" = "1" ]; then
+      printf 'fake multica start failure (pull/start)\n' >&2
+      exit 18
+    fi
+    ;;
   *' ps -q pipeline_executor') printf '%s\n' "$(printf 'p%.0s' {1..64})" ;;
   *' ps -q integrated_replica_executor') printf '%s\n' "$(printf 'r%.0s' {1..64})" ;;
   *' ps -q backend') printf '%s\n' "$(printf 'c%.0s' {1..64})" ;;
@@ -2734,6 +3198,9 @@ case "$*" in
     if [ "${FAKE_HINDSIGHT_NEVER_HEALTHY:-0}" != "1" ]; then
       printf '%s\n' "$(printf 'h%.0s' {1..64})"
     fi
+    ;;
+  *' ps -q multica')
+    printf '%s\n' "$(printf 'm%.0s' {1..64})"
     ;;
   *' ps --services --filter status=running') : ;;
   *) : ;;
@@ -3094,5 +3561,310 @@ if grep -Fq 'migrated HINDSIGHT_ENABLED=true' "$hindsight_core_fail_log"; then
 fi
 printf 'ok deploy-hindsight-explicit-disable-respected\n'
 printf 'ok deploy-hindsight-core-final-isolation\n'
+
+# Multica default service: the bundled stack is default-enabled (empty/true
+# both enable, only an explicit false disables), the five-value default is
+# optional but all-or-nothing (partial sets refused in both states), floating
+# image references and non-IP bind addresses are refused, the isolated start
+# runs between the final core up and the readiness gate (no self-deadlock),
+# and its failure never rolls back the succeeded core.
+set_test_env_value MULTICA_ENABLED maybe
+if (
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT"
+) >"$test_dir/multica-bad-toggle.log" 2>&1; then
+  printf 'a non-boolean MULTICA_ENABLED must be rejected\n' >&2
+  exit 1
+fi
+grep -q 'MULTICA_ENABLED must be true or false' "$test_dir/multica-bad-toggle.log"
+
+# Default-on: an empty toggle enables the stack and validation succeeds with
+# an empty five-value set (the stack runs; account/PAT/workspace are honest
+# manual steps, not deployment prerequisites). configure writes the pins, the
+# loopback bind default, and generated stack secrets; nothing is derived.
+set_test_env_value MULTICA_ENABLED ""
+set_test_env_value MULTICA_WEB_BIND_ADDR ""
+if (
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT"
+) >"$test_dir/multica-default-on.log" 2>&1; then
+  printf 'ok deploy-multica-default-on-validate (stack enabled with an empty five-value set)\n'
+else
+  printf 'the default-enabled Multica stack must validate with an empty five-value set; log follows\n' >&2
+  cat "$test_dir/multica-default-on.log" >&2
+  exit 1
+fi
+grep -Fq 'Multica web UI is bound to loopback only' "$test_dir/multica-default-on.log"
+grep -Fxq 'MULTICA_ENABLED=true' "$test_dir/.env"
+grep -Fxq 'MULTICA_WEB_BIND_ADDR=127.0.0.1' "$test_dir/.env"
+grep -Fxq 'MULTICA_WEB_PORT=18100' "$test_dir/.env"
+grep -Fxq \
+  'MULTICA_BACKEND_IMAGE=ghcr.io/multica-ai/multica-backend@sha256:099fd0d1eea8fc4cf03254c6dff86f7de206662ff71db8dc9a78e66726dd65a4' \
+  "$test_dir/.env"
+grep -Fxq \
+  'MULTICA_WEB_IMAGE=ghcr.io/multica-ai/multica-web@sha256:ba8fd0fda94a9ec141e15d77e591db8ee4b246720a722d6f9dffd185ee48863b' \
+  "$test_dir/.env"
+grep -Fxq \
+  'MULTICA_POSTGRES_IMAGE=pgvector/pgvector:pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f' \
+  "$test_dir/.env"
+multica_jwt_secret="$(awk -F= '$1 == "MULTICA_JWT_SECRET" {print substr($0, index($0,"=")+1)}' "$test_dir/.env" | tail -n1)"
+if ! printf '%s' "$multica_jwt_secret" | grep -Eq '^[0-9a-f]{64}$'; then
+  printf 'generated Multica JWT secret must be exactly 64 hex characters\n' >&2
+  exit 1
+fi
+multica_db_password="$(awk -F= '$1 == "MULTICA_POSTGRES_PASSWORD" {print substr($0, index($0,"=")+1)}' "$test_dir/.env" | tail -n1)"
+if ! printf '%s' "$multica_db_password" | grep -Eq '^[0-9a-f]{48}$'; then
+  printf 'generated Multica DB password must be exactly 48 hex characters\n' >&2
+  exit 1
+fi
+if grep -q '^MULTICA_DEFAULT_' "$test_dir/.env" \
+    && grep -Eq '^MULTICA_DEFAULT_[A-Z_]+=.+' "$test_dir/.env"; then
+  printf 'an empty five-value set must stay empty (nothing is derived without the native-UI values)\n' >&2
+  exit 1
+fi
+
+# configure_multica_env writes the verified official digest pins itself; an
+# operator override that is not digest-pinned must still be rejected.
+set_test_env_value MULTICA_BACKEND_IMAGE example.invalid/unvalidated:latest
+if (
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT"
+) >"$test_dir/multica-floating-image.log" 2>&1; then
+  printf 'a floating Multica image override must be rejected even though the default pins exist\n' >&2
+  exit 1
+fi
+grep -q 'MULTICA_BACKEND_IMAGE must be pinned to an immutable @sha256 digest' \
+  "$test_dir/multica-floating-image.log"
+set_test_env_value MULTICA_BACKEND_IMAGE ""
+
+# The web bind address must be a plain IP literal: hostnames, host:port and
+# schemes would silently change the published-interface contract.
+set_test_env_value MULTICA_WEB_BIND_ADDR multica.example.invalid
+if (
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT"
+) >"$test_dir/multica-bad-bind-addr.log" 2>&1; then
+  printf 'a non-IP MULTICA_WEB_BIND_ADDR must be rejected\n' >&2
+  exit 1
+fi
+grep -q 'MULTICA_WEB_BIND_ADDR must be a plain IPv4 or IPv6 address' \
+  "$test_dir/multica-bad-bind-addr.log"
+set_test_env_value MULTICA_WEB_BIND_ADDR ""
+
+# The five-value default is all-or-nothing in BOTH states (enabled or
+# explicitly disabled): a partial set is a deployment error either way.
+set_test_env_value MULTICA_DEFAULT_PAT synthetic-multica-default-pat
+set_test_env_value MULTICA_DEFAULT_WORKSPACE_ID 00000000-0000-0000-0000-000000000001
+if (
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT"
+) >"$test_dir/multica-partial-enabled.log" 2>&1; then
+  printf 'a partial (enabled) Multica default set must be rejected\n' >&2
+  exit 1
+fi
+grep -q 'MULTICA_DEFAULT_\* must be all set or all empty' \
+  "$test_dir/multica-partial-enabled.log"
+# Four-of-five with WEB_URL missing: configure derives the internal base URL
+# and prints the explicit-WEB_URL hint, then validation still refuses the
+# incomplete set (the deployment never guesses a browser origin).
+set_test_env_value MULTICA_DEFAULT_WORKSPACE_NAME "OpenOntology 默认工作台"
+if (
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT"
+) >"$test_dir/multica-missing-web-url.log" 2>&1; then
+  printf 'a four-of-five Multica default set (WEB_URL missing) must be rejected\n' >&2
+  exit 1
+fi
+grep -Fq 'MULTICA_DEFAULT_WEB_URL is not set while the rest of the five-value default is present' \
+  "$test_dir/multica-missing-web-url.log"
+grep -Fq 'configured MULTICA_DEFAULT_BASE_URL from the bundled multica service' \
+  "$test_dir/multica-missing-web-url.log"
+grep -q 'MULTICA_DEFAULT_\* must be all set or all empty (found 4/5)' \
+  "$test_dir/multica-missing-web-url.log"
+set_test_env_value MULTICA_DEFAULT_WORKSPACE_NAME ""
+set_test_env_value MULTICA_DEFAULT_PAT ""
+set_test_env_value MULTICA_DEFAULT_WORKSPACE_ID ""
+grep -Fxq 'MULTICA_DEFAULT_BASE_URL=http://multica:8080' "$test_dir/.env" \
+  || {
+    printf 'configure must persist the derived internal base URL before validation rejects the four-of-five set\n' >&2
+    exit 1
+  }
+set_test_env_value MULTICA_DEFAULT_BASE_URL ""
+set_test_env_value MULTICA_ENABLED false
+# Re-establish the partial set for the disabled-state check: all-or-nothing
+# must hold with the stack disabled too (an external-Multica half
+# configuration is still a deployment error).
+set_test_env_value MULTICA_DEFAULT_PAT synthetic-multica-default-pat
+set_test_env_value MULTICA_DEFAULT_WORKSPACE_ID 00000000-0000-0000-0000-000000000001
+if (
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT"
+) >"$test_dir/multica-partial-disabled.log" 2>&1; then
+  printf 'a partial (disabled) Multica default set must be rejected\n' >&2
+  exit 1
+fi
+grep -q 'MULTICA_DEFAULT_\* must be all set or all empty' \
+  "$test_dir/multica-partial-disabled.log"
+set_test_env_value MULTICA_DEFAULT_PAT ""
+set_test_env_value MULTICA_DEFAULT_WORKSPACE_ID ""
+
+# An explicit false is the operator's opt-out: the deployment succeeds, the
+# canonical false is persisted, leftover multica containers are stopped, and
+# the profile start is never invoked.
+multica_disabled_log="$attestation_root/deploy-multica-disabled.log"
+if ! run_attestation_deploy "$multica_disabled_log" "$attestation_source" 5; then
+  printf 'mock deployment with the Multica stack explicitly disabled must succeed; log follows\n' >&2
+  cat "$multica_disabled_log" >&2
+  if [ -f "$multica_disabled_log.docker" ]; then
+    printf 'mock docker log follows\n' >&2
+    cat "$multica_disabled_log.docker" >&2
+  fi
+  exit 1
+fi
+grep -Fq 'deployment succeeded' "$multica_disabled_log"
+grep -Fq 'Multica default service profile is disabled' "$multica_disabled_log"
+grep -Fxq 'MULTICA_ENABLED=false' "$test_dir/.env"
+grep -q -- '--profile multica stop multica' "$multica_disabled_log.docker"
+if grep -q -- '--profile multica up' "$multica_disabled_log.docker"; then
+  printf 'an explicitly disabled Multica stack must never be started\n' >&2
+  exit 1
+fi
+printf 'ok deploy-multica-explicit-disable-respected\n'
+
+# Enabled with the complete five-value default: the stack starts between the
+# final core up and the readiness gate, the internal base URL and the
+# independent allowlist are derived, and the PAT never reaches the logs.
+set_test_env_value MULTICA_ENABLED true
+set_test_env_value MULTICA_DEFAULT_BASE_URL ""
+set_test_env_value MULTICA_DEFAULT_WEB_URL https://multica.example.invalid
+set_test_env_value MULTICA_DEFAULT_WORKSPACE_ID 00000000-0000-0000-0000-000000000001
+set_test_env_value MULTICA_DEFAULT_WORKSPACE_NAME "OpenOntology 默认工作台"
+set_test_env_value MULTICA_DEFAULT_PAT synthetic-multica-default-pat
+set_test_env_value SUPER_ASSISTANT_MULTICA_INTERNAL_BASE_URLS ""
+
+multica_success_log="$attestation_root/deploy-multica-success.log"
+if ! run_attestation_deploy "$multica_success_log" "$attestation_source" 5; then
+  printf 'mock deployment with the default-enabled Multica stack and a complete five-value default must succeed; log follows\n' >&2
+  cat "$multica_success_log" >&2
+  if [ -f "$multica_success_log.docker" ]; then
+    printf 'mock docker log follows\n' >&2
+    cat "$multica_success_log.docker" >&2
+  fi
+  exit 1
+fi
+grep -Fq 'deployment succeeded' "$multica_success_log"
+grep -Fq 'multica default stack started' "$multica_success_log"
+grep -Fq 'the official backend /healthz check is healthy' "$multica_success_log"
+multica_start_msg_line="$(
+  grep -nF 'starting the Multica default stack' "$multica_success_log" \
+    | head -n1 | cut -d: -f1
+)"
+multica_readiness_msg_line="$(
+  grep -nF 'waiting for backend, pipeline executor, replica executor and frontend readiness' \
+    "$multica_success_log" | head -n1 | cut -d: -f1
+)"
+if [ -z "$multica_start_msg_line" ] || [ -z "$multica_readiness_msg_line" ] \
+    || [ "$multica_start_msg_line" -ge "$multica_readiness_msg_line" ]; then
+  printf 'the Multica start message must precede the readiness gate wait (no self-deadlock)\n' >&2
+  exit 1
+fi
+# bundled 默认地址与独立允许清单按官方 8080 契约推导落 .env；digest pin、
+# loopback 绑定与自动生成的栈密钥一并持久化。
+grep -Fxq 'MULTICA_DEFAULT_BASE_URL=http://multica:8080' "$test_dir/.env"
+grep -Fxq \
+  'SUPER_ASSISTANT_MULTICA_INTERNAL_BASE_URLS=http://multica:8080' \
+  "$test_dir/.env"
+grep -Fxq 'MULTICA_DEFAULT_WEB_URL=https://multica.example.invalid' "$test_dir/.env"
+multica_core_up_line="$(
+  grep -nF 'up -d --remove-orphans' "$multica_success_log.docker" \
+    | tail -n1 | cut -d: -f1
+)"
+multica_optional_up_line="$(
+  grep -nF -- '--profile multica up -d multica' \
+    "$multica_success_log.docker" | tail -n1 | cut -d: -f1
+)"
+if [ -z "$multica_core_up_line" ] || [ -z "$multica_optional_up_line" ] \
+    || [ "$multica_optional_up_line" -le "$multica_core_up_line" ]; then
+  printf 'the Multica stack must start after the final core compose up\n' >&2
+  exit 1
+fi
+if sed -n "${multica_core_up_line}p" "$multica_success_log.docker" \
+    | grep -q -- '--profile multica'; then
+  printf 'the final core compose up must not carry the multica profile\n' >&2
+  exit 1
+fi
+if grep -Fq 'synthetic-multica-default-pat' "$multica_success_log"; then
+  printf 'the Multica default PAT leaked into deployment logs\n' >&2
+  exit 1
+fi
+printf 'ok deploy-multica-default-start-success\n'
+
+# With no five-value default configured (the honest fresh-install state), a
+# failed stack start only degrades the feature: the succeeded core deployment
+# is never rolled back. (With the five-value default configured, the real
+# readiness gate would report the deployment as failed — that is backend
+# behavior covered by the readiness tests, not reproducible through the fake
+# readiness curl here.)
+set_test_env_value MULTICA_DEFAULT_BASE_URL ""
+set_test_env_value MULTICA_DEFAULT_WEB_URL ""
+set_test_env_value MULTICA_DEFAULT_WORKSPACE_ID ""
+set_test_env_value MULTICA_DEFAULT_WORKSPACE_NAME ""
+set_test_env_value MULTICA_DEFAULT_PAT ""
+set_test_env_value SUPER_ASSISTANT_MULTICA_INTERNAL_BASE_URLS ""
+multica_start_fail_log="$attestation_root/deploy-multica-start-failure.log"
+if ! run_attestation_deploy "$multica_start_fail_log" "$attestation_source" 5 \
+    FAKE_MULTICA_UP_FAIL=1; then
+  printf 'deployment must still succeed when the unconfigured Multica start fails\n' >&2
+  exit 1
+fi
+grep -Fq 'deployment succeeded' "$multica_start_fail_log"
+grep -Fq 'the Multica default stack failed to start (exit 18' \
+  "$multica_start_fail_log"
+grep -q -- '--profile multica stop multica' "$multica_start_fail_log.docker"
+if grep -q -- 'stop --timeout 30 frontend pipeline_executor backend' \
+    "$multica_start_fail_log.docker"; then
+  printf 'a Multica start failure must never stop the core runtime\n' >&2
+  exit 1
+fi
+printf 'ok deploy-multica-start-failure-not-fatal\n'
+
+# Restore the shipped default so later readers of the fixture .env see the
+# honest state (enabled stack, empty five-value default).
+set_test_env_value MULTICA_ENABLED true
 
 printf 'deployment guard self-tests passed\n'

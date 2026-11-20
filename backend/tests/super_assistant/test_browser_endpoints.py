@@ -27,6 +27,8 @@ from app.super_assistant.models import (
     SuperAssistantConversation,
     SuperAssistantMessage,
     SuperAssistantMulticaConfig,
+    SuperAssistantMulticaProfile,
+    SuperAssistantMulticaProfileRevision,
     SuperAssistantReflectionCandidate,
     SuperAssistantReflectionRun,
     SuperAssistantRemoteAgent,
@@ -46,6 +48,7 @@ _CATALOG_TABLES = [
     RoleMenuPermission.__table__,
     SuperAssistantToolSetting.__table__,
     SuperAssistantMulticaConfig.__table__,
+    SuperAssistantMulticaProfile.__table__, SuperAssistantMulticaProfileRevision.__table__,
     SuperAssistantRemoteAgent.__table__,
 ]
 

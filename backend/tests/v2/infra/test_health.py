@@ -423,3 +423,301 @@ def test_production_readiness_reports_dbx_ok(monkeypatch):
     )
     response = client.get("/health/ready")
     assert response.json()["dbx"] == "ok"
+
+
+# ---------------------------------------------------------------------------
+# Multica deployment-default integration (optional, all-or-nothing)
+
+
+MULTICA_DEFAULT_COMPLETE = {
+    "multica_default_base_url": "http://127.0.0.1:18099",
+    "multica_default_web_url": "https://multica.example.com",
+    "multica_default_workspace_id": "ws-default",
+    "multica_default_workspace_name": "平台默认工作区",
+    "multica_default_pat": "synthetic_multica_pat_not_a_secret",
+}
+
+
+def _multica_settings(monkeypatch, **overrides):
+    """Point the five deployment-default settings at synthetic values."""
+    from app.shared.config import settings as shared_settings
+
+    values = {**MULTICA_DEFAULT_COMPLETE, **overrides}
+    for key, value in values.items():
+        monkeypatch.setattr(shared_settings, key, value)
+    return values
+
+
+def _multica_clear(monkeypatch):
+    """Reset every deployment-default Multica value to the empty default."""
+    return _multica_settings(
+        monkeypatch,
+        multica_default_base_url="",
+        multica_default_web_url="",
+        multica_default_workspace_id="",
+        multica_default_workspace_name="",
+        multica_default_pat="",
+    )
+
+
+def _multica_transport(monkeypatch, *, workspaces, me_status=200, seen=None):
+    """Stub multica_client's single HTTP seam; no real network is touched."""
+    import httpx
+
+    from app.super_assistant import multica_client
+
+    def fake_request(method, url, **kwargs):
+        if seen is not None:
+            seen.append((method, url, dict(kwargs.get("headers") or {})))
+        if url.endswith("/api/me"):
+            return httpx.Response(me_status, json={"id": "user-1"})
+        if url.endswith("/api/workspaces"):
+            return httpx.Response(200, json={"workspaces": workspaces})
+        raise AssertionError(f"unexpected multica probe call: {url}")
+
+    monkeypatch.setattr(multica_client, "_request", fake_request)
+
+
+def test_multica_default_readiness_reports_disabled_when_all_values_empty(
+    monkeypatch,
+):
+    _multica_clear(monkeypatch)
+
+    data = client.get("/health/ready").json()
+
+    assert data["multica_default"] == "disabled"
+    assert "multica_default" not in data["unavailable"]
+
+
+def test_multica_default_probe_verifies_pat_and_workspace_membership(
+    monkeypatch,
+):
+    seen: list = []
+    _multica_settings(monkeypatch)
+    _multica_transport(
+        monkeypatch,
+        workspaces=[
+            {"id": "ws-other", "name": "其他工作区"},
+            {"id": "ws-default", "name": "平台默认工作区"},
+        ],
+        seen=seen,
+    )
+
+    dependency_probe.probe_multica_default()
+
+    assert [url.rsplit("/", 1)[-1] for _method, url, _headers in seen] == [
+        "me",
+        "workspaces",
+    ]
+    assert all(
+        headers["Authorization"]
+        == f"Bearer {MULTICA_DEFAULT_COMPLETE['multica_default_pat']}"
+        for _method, _url, headers in seen
+    )
+
+
+@pytest.mark.parametrize(
+    "workspaces",
+    [
+        [{"id": "ws-other", "name": "其他工作区"}],
+        [{"name": "无 ID 工作区"}],
+        [],
+    ],
+    ids=["other-workspace", "missing-id", "empty-list"],
+)
+def test_multica_default_probe_fails_when_workspace_not_visible(
+    monkeypatch, workspaces,
+):
+    _multica_settings(monkeypatch)
+    _multica_transport(monkeypatch, workspaces=workspaces)
+
+    with pytest.raises(RuntimeError, match="workspace"):
+        dependency_probe.probe_multica_default()
+
+
+def test_multica_default_probe_failure_cuts_leaky_exception_chain(monkeypatch):
+    import httpx
+
+    from app.super_assistant import multica_client
+
+    leaked_url = MULTICA_DEFAULT_COMPLETE["multica_default_base_url"]
+    leaked_pat = MULTICA_DEFAULT_COMPLETE["multica_default_pat"]
+
+    def leaky_request(method, url, **kwargs):
+        # Transport errors embed the target URL; the probe must never let
+        # that (or the PAT) ride the exception chain into logs or readiness.
+        raise httpx.ConnectError(f"connect tcp {leaked_url} bearer {leaked_pat}")
+
+    _multica_settings(monkeypatch)
+    monkeypatch.setattr(multica_client, "_request", leaky_request)
+
+    with pytest.raises(RuntimeError, match="Multica default service") as info:
+        dependency_probe.probe_multica_default()
+
+    assert leaked_url not in str(info.value)
+    assert leaked_pat not in str(info.value)
+    assert info.value.__cause__ is None
+    assert info.value.__suppress_context__ is True
+
+
+def test_multica_default_probe_reports_http_rejection_without_leaking_status_body(
+    monkeypatch,
+):
+    _multica_settings(monkeypatch)
+    _multica_transport(monkeypatch, workspaces=[], me_status=401)
+
+    with pytest.raises(RuntimeError, match="Multica default service"):
+        dependency_probe.probe_multica_default()
+
+
+def test_multica_default_partial_readiness_is_unavailable_without_probing(
+    monkeypatch,
+):
+    from app.super_assistant import multica_client
+
+    def forbidden_request(method, url, **kwargs):
+        raise AssertionError("partial settings must not trigger a probe call")
+
+    monkeypatch.setattr(multica_client, "_request", forbidden_request)
+    _multica_settings(monkeypatch, multica_default_pat="")
+
+    # The masked-PAT shape (four values set, PAT empty) is the exact state
+    # env_file services legitimately see; classification stays explicit.
+    assert (
+        dependency_probe.multica_default_config_state() == "partial"
+    )
+    dependency_probe.probe_multica_default()  # returns without network
+
+    data = client.get("/health/ready").json()
+
+    assert data["multica_default"] == "unavailable"
+    # Non-production readiness stays advisory for the optional integration.
+    assert "multica_default" not in data["unavailable"]
+
+
+def test_multica_default_complete_readiness_reports_ok(monkeypatch):
+    _multica_settings(monkeypatch)
+    _multica_transport(
+        monkeypatch,
+        workspaces=[{"id": "ws-default", "name": "平台默认工作区"}],
+    )
+
+    data = client.get("/health/ready").json()
+
+    assert data["multica_default"] == "ok"
+    assert "multica_default" not in data["unavailable"]
+
+
+def test_multica_default_probe_failure_readiness_reports_unavailable(
+    monkeypatch,
+):
+    _multica_settings(monkeypatch)
+    _multica_transport(monkeypatch, workspaces=[], me_status=401)
+
+    data = client.get("/health/ready").json()
+
+    assert data["multica_default"] == "unavailable"
+    assert "multica_default" not in data["unavailable"]
+
+
+def _production_multica(monkeypatch, *, settings_overrides=None):
+    from app.bootstrap import health
+    from app.shared.config import settings as shared_settings
+
+    _multica_settings(monkeypatch, **(settings_overrides or {}))
+    # The internal-allowlist entry is exactly how a deployment declares an
+    # in-network Multica origin; it also lets the loopback stub pass the
+    # production HTTPS/non-global validation in tests.
+    monkeypatch.setattr(
+        shared_settings,
+        "super_assistant_multica_internal_base_urls",
+        MULTICA_DEFAULT_COMPLETE["multica_default_base_url"],
+    )
+    monkeypatch.setattr(health.settings, "environment", "production")
+
+
+def test_production_readiness_gates_multica_default_when_configured(
+    monkeypatch,
+):
+    _production_multica(monkeypatch)
+    _multica_transport(
+        monkeypatch,
+        workspaces=[{"id": "ws-default", "name": "平台默认工作区"}],
+    )
+
+    data = client.get("/health/ready").json()
+
+    assert data["multica_default"] == "ok"
+    assert "multica_default" not in data["unavailable"]
+
+
+def test_production_readiness_fails_when_configured_multica_default_is_down(
+    monkeypatch,
+):
+    _production_multica(monkeypatch)
+    _multica_transport(monkeypatch, workspaces=[], me_status=401)
+
+    response = client.get("/health/ready")
+    data = response.json()
+
+    assert response.status_code == 503
+    assert data["multica_default"] == "unavailable"
+    assert "multica_default" in data["unavailable"]
+
+
+def test_production_readiness_fails_on_partial_multica_default(monkeypatch):
+    _production_multica(
+        monkeypatch, settings_overrides={"multica_default_pat": ""}
+    )
+    _multica_transport(monkeypatch, workspaces=[{"id": "ws-default"}])
+
+    response = client.get("/health/ready")
+    data = response.json()
+
+    assert response.status_code == 503
+    assert data["multica_default"] == "unavailable"
+    assert "multica_default" in data["unavailable"]
+
+
+def test_production_readiness_ignores_unconfigured_multica_default(
+    monkeypatch,
+):
+    from app.bootstrap import health
+
+    _multica_clear(monkeypatch)
+    monkeypatch.setattr(health.settings, "environment", "production")
+
+    data = client.get("/health/ready").json()
+
+    assert data["multica_default"] == "disabled"
+    assert "multica_default" not in data["unavailable"]
+
+
+def test_multica_default_startup_probe_is_advisory_not_blocking(monkeypatch):
+    """Multica 默认服务运行期故障只降级 readiness，不阻断任何进程启动。"""
+
+    def unavailable():
+        raise RuntimeError("multica down at startup")
+
+    monkeypatch.setattr(
+        dependency_probe, "PROBES", (("Multica default", unavailable),)
+    )
+    # 不抛异常：其他服务继续运行。
+    dependency_probe.probe_startup_dependencies()
+
+
+def test_multica_default_startup_preflight_reports_advisory_without_failing(
+    monkeypatch, capsys,
+):
+    def unavailable():
+        raise RuntimeError("multica down")
+
+    monkeypatch.setattr(
+        dependency_probe, "PROBES", (("Multica default", unavailable),)
+    )
+    assert dependency_probe.main() == 0
+    captured = capsys.readouterr()
+    assert "Multica default: unavailable (RuntimeError) advisory" in (
+        captured.err
+    )
+    assert "multica down" not in captured.out + captured.err

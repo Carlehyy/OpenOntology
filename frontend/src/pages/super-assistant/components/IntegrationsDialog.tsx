@@ -1,24 +1,31 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  Bot, Copy, Download, Loader2,
-  MailPlus, PlugZap, Save, ShieldCheck, SlidersHorizontal, Trash2,
+  Bot, Copy, Download, ExternalLink, Loader2,
+  MailPlus, PlugZap, Plus, Save, ShieldCheck, SlidersHorizontal, Trash2,
 } from 'lucide-react'
 
 import {
   superAssistantApi,
-  type MulticaConfig,
+  type MulticaProfile,
+  type MulticaProfilesResult,
   type MulticaTestResult,
   type RemoteAgent,
   type RemoteAgentInvite,
 } from '@/api/superAssistant'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/Badge'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
 import { writeTextToClipboard } from '@/utils/clipboard'
 import { errorText, saveBlob } from './assistantPanelUtils'
+import { resolveNativeWebUrl } from '../webEntryUrl'
 import { DialogShell } from './AssistantConfiguration'
+import {
+  multicaProfileSavePayload, multicaTestStatusMeta, splitMulticaProfiles,
+  type MulticaProfileFormState,
+} from './multicaProfileModel'
 
 type IntegrationTab = 'multica' | 'remote-agents'
 
@@ -28,8 +35,8 @@ const INTEGRATION_TABS: Array<{ key: IntegrationTab; label: string }> = [
 ]
 
 /** 已保存工作区的兜底选项：优先显示回填名称，历史行无名称时回落 ID */
-function savedWorkspaceOption(config: MulticaConfig) {
-  return { id: config.workspace_id, name: config.workspace_name || config.workspace_id, slug: '' }
+function savedWorkspaceOption(workspaceId: string, workspaceName: string) {
+  return { id: workspaceId, name: workspaceName || workspaceId, slug: '' }
 }
 
 /** 直连模式回合契约（与后端 remote_agent_service 文档同源，手动配置参考）。 */
@@ -606,67 +613,98 @@ function RemoteAgentsPanel({ onError, onChanged }: {
   )
 }
 
-/** 能力拓展面板（外部平台集成）：左侧集成类型 tabs，multica 为首个落地集成，远程助手为
- *  声明式注册目录（后续新集成在此追加 tab）。
- *  DialogShell 为常开弹层，调用方以条件挂载控制显隐（同 McpDialog 用法）。
- */
-export default function IntegrationsDialog({ onClose, onSaved }: {
-  onClose: () => void
-  onSaved?: () => void | Promise<void>
+/** Multica 面板：多 profile 目录（platform_default 只读卡 + custom 增删改/激活）。
+ *  生效配置 = 后端按 active profile 投影的 effective（旧 MulticaConfig），
+ *  「停用回默认」= 激活默认 profile；旧命令提示仍由 effective 驱动，页面级
+ *  GET /multica/config 契约不变。token 加密存储、永不回显。 */
+function MulticaProfilesPanel({ onError, onChanged, addButtonRef }: {
+  onError: (message: string) => void
+  onChanged: () => void | Promise<void>
+  /** 弹窗入场焦点落点：父层 onOpenAutoFocus preventDefault 后手动聚焦（避免左栏 tab 选中态） */
+  addButtonRef?: React.RefObject<HTMLButtonElement | null>
 }) {
-  const [tab, setTab] = useState<IntegrationTab>('multica')
-  const [config, setConfig] = useState<MulticaConfig | null>(null)
-  const [baseUrl, setBaseUrl] = useState('')
-  const [token, setToken] = useState('')
-  const [workspaceId, setWorkspaceId] = useState('')
-  const [enabled, setEnabled] = useState(false)
+  const fallbackButtonRef = useRef<HTMLButtonElement>(null)
+  const addButtonRefResolved = addButtonRef ?? fallbackButtonRef
+  const [data, setData] = useState<MulticaProfilesResult | null>(null)
+  const [loaded, setLoaded] = useState(false)
+  const [form, setForm] = useState<MulticaProfileFormState | null>(null)
   const [workspaces, setWorkspaces] = useState<MulticaTestResult['workspaces']>([])
   const [testResult, setTestResult] = useState<MulticaTestResult | null>(null)
   const [testing, setTesting] = useState(false)
+  const [rowTestingId, setRowTestingId] = useState('')
   const [saving, setSaving] = useState(false)
+  const [activatingId, setActivatingId] = useState('')
+  const [deleting, setDeleting] = useState<MulticaProfile | null>(null)
+  const [removing, setRemoving] = useState(false)
   const [error, setError] = useState('')
-  const baseUrlInputRef = useRef<HTMLInputElement>(null)
 
-  useEffect(() => {
-    setError('')
-    setTestResult(null)
-    superAssistantApi.multicaConfig()
-      .then(data => {
-        setConfig(data)
-        setBaseUrl(data.base_url)
-        setWorkspaceId(data.workspace_id)
-        setEnabled(data.enabled)
-        setToken('')
-        // 已保存配置的兜底选项：优先显示回填的工作区名，历史行无名称时
-        // 回落显示 ID（下次测试连接/保存即补齐名称）
-        setWorkspaces(data.configured && data.workspace_id
-          ? [savedWorkspaceOption(data)]
-          : [])
-        // 已配置且已存凭据时打开即实时拉取全量工作区（工作区列表不持久化，
-        // 仅靠上面的单条兜底会掩盖其余可选工作区）；拉取失败静默回落兜底。
-        // 实时列表缺失已保存项时补一条，保证当前选中仍以名称展示。
-        if (data.configured && data.token_set && data.base_url) {
-          superAssistantApi.multicaWorkspaces()
-            .then(result => {
-              setWorkspaces(data.workspace_id && !result.workspaces.some(item => item.id === data.workspace_id)
-                ? [...result.workspaces, savedWorkspaceOption(data)]
-                : result.workspaces)
-            })
-            .catch(() => {})
-        }
+  const { defaultProfile, customProfiles } = splitMulticaProfiles(
+    data?.profiles ?? [], data?.default_profile_id ?? null,
+  )
+  const editingProfile = form?.id
+    ? data?.profiles.find(profile => profile.id === form.id) ?? null
+    : null
+  const effective = data?.effective ?? null
+  /** 原生入口仅部署侧显式下发（platform_default.web_url，custom 恒 null）：
+   *  http(s) 校验通过才渲染链接，绝不从 API base_url 推测 Web 地址。 */
+  const defaultWebEntry = resolveNativeWebUrl(defaultProfile?.web_url)
+
+  const reload = (silent = false) => {
+    superAssistantApi.multicaProfiles()
+      .then(result => { setData(result); setLoaded(true) })
+      .catch(err => {
+        setLoaded(true)
+        if (!silent) onError(errorText(err, 'Multica 配置加载失败'))
       })
-      .catch(err => setError(errorText(err, '配置加载失败')))
-  }, [])
+  }
 
+  useEffect(() => { reload() }, [])
+
+  const startAdd = () => {
+    setError(''); setTestResult(null); setWorkspaces([])
+    setForm(form ? null : { id: '', name: '', baseUrl: '', token: '', workspaceId: '', enabled: true })
+  }
+
+  const startEdit = (profile: MulticaProfile) => {
+    setError(''); setTestResult(null)
+    setForm({
+      id: profile.id,
+      name: profile.name,
+      baseUrl: profile.base_url,
+      token: '',
+      workspaceId: profile.workspace_id,
+      enabled: profile.enabled,
+    })
+    // 已保存工作区兜底 + 打开即实时拉取全量（工作区列表不持久化，单条兜底会
+    // 掩盖其余可选工作区）；实时列表缺失已保存项时补一条，选中仍以名称展示。
+    setWorkspaces(profile.workspace_id
+      ? [savedWorkspaceOption(profile.workspace_id, profile.workspace_name)]
+      : [])
+    superAssistantApi.multicaProfileWorkspaces(profile.id)
+      .then(result => {
+        setWorkspaces(profile.workspace_id && !result.workspaces.some(item => item.id === profile.workspace_id)
+          ? [...result.workspaces, savedWorkspaceOption(profile.workspace_id, profile.workspace_name)]
+          : result.workspaces)
+      })
+      .catch(() => {})
+  }
+
+  /** 表单内连接测试：已存 profile 走 /profiles/{id}/test（空 base_url/token 沿用
+   *  已存值），新建无 id 则走旧全局 /multica/test；成功即回填工作区列表。 */
   const testConnection = async () => {
-    if (testing) return
+    if (!form || testing) return
     setTesting(true)
     setError('')
     try {
-      const result = await superAssistantApi.testMultica({
-        base_url: baseUrl.trim() || null,
-        token: token.trim() || null,
-      })
+      const result = form.id
+        ? await superAssistantApi.testMulticaProfile(form.id, {
+            base_url: form.baseUrl.trim() || null,
+            token: form.token.trim() || null,
+          })
+        : await superAssistantApi.testMultica({
+            base_url: form.baseUrl.trim() || null,
+            token: form.token.trim() || null,
+          })
       setTestResult(result)
       if (result.ok) setWorkspaces(result.workspaces)
     } catch (err) {
@@ -677,38 +715,383 @@ export default function IntegrationsDialog({ onClose, onSaved }: {
   }
 
   const save = async () => {
-    if (saving) return
-    if (!baseUrl.trim() || !workspaceId) {
-      setError('请填写服务地址并选择工作区（可先执行连接测试获取工作区列表）')
-      return
-    }
-    if (enabled && !token.trim() && !config?.token_set) {
-      setError('启用集成前请先填写 API Token')
+    if (!form || saving) return
+    const selectedWorkspace = workspaces.find(workspace => workspace.id === form.workspaceId)
+    const { body, missing } = multicaProfileSavePayload(form, {
+      editing: !!form.id,
+      originalTokenSet: editingProfile?.token_set ?? false,
+      workspaceName: selectedWorkspace?.name ?? null,
+    })
+    if (!body) {
+      setError(missing ?? '请完善表单后保存')
       return
     }
     setSaving(true)
     setError('')
     try {
-      const selectedWorkspace = workspaces.find(workspace => workspace.id === workspaceId)
-      const saved = await superAssistantApi.updateMulticaConfig({
-        base_url: baseUrl.trim(),
-        token: token.trim() || null,
-        workspace_id: workspaceId,
-        workspace_name: selectedWorkspace?.name || config?.workspace_name || null,
-        enabled,
+      // 校验通过后 name/base_url/workspace_id 必有值，收窄为创建负载
+      const saved = form.id
+        ? await superAssistantApi.updateMulticaProfile(form.id, body)
+        : await superAssistantApi.createMulticaProfile(
+            body as typeof body & { name: string; base_url: string; workspace_id: string },
+          )
+      setForm(null)
+      reload(true)
+      await onChanged()
+      toast.success(form.id ? 'Multica 配置已保存' : 'Multica 配置已添加', {
+        description: `${saved.name}（${saved.workspace_name || saved.workspace_id || '未选工作区'}）${saved.enabled ? '已保存' : '已停用'}`,
       })
-      setConfig(saved)
-      await onSaved?.()
-      toast.success('Multica 配置已保存', {
-        description: saved.enabled ? '现在可以在输入框使用 /multica: 命令' : '集成已停用',
-      })
-      onClose()
     } catch (err) {
       setError(errorText(err, '保存失败'))
     } finally {
       setSaving(false)
     }
   }
+
+  /** 激活即切换生效 profile；激活默认 profile = 「停用自定义、回默认」。
+   *  effective 随后端切换变化，经 onChanged 通知页面刷新命令可用性。 */
+  const activate = async (profile: MulticaProfile) => {
+    if (activatingId) return
+    setActivatingId(profile.id)
+    setError('')
+    try {
+      await superAssistantApi.activateMulticaProfile(profile.id)
+      reload(true)
+      await onChanged()
+      toast.success(profile.id === defaultProfile?.id
+        ? '已停用自定义配置，回到平台默认'
+        : `已切换到「${profile.name}」`)
+    } catch (err) {
+      onError(errorText(err, '激活失败'))
+    } finally {
+      setActivatingId('')
+    }
+  }
+
+  /** 行内快捷测试（沿用已存 base_url/token），结果经 toast 反馈并刷新行状态 */
+  const testRow = async (profile: MulticaProfile) => {
+    if (rowTestingId) return
+    setRowTestingId(profile.id)
+    setError('')
+    try {
+      const result = await superAssistantApi.testMulticaProfile(profile.id, {})
+      if (result.ok) toast.success(`${profile.name}：${result.message || '连接成功'}`)
+      else toast.error(`${profile.name}：${result.message || '连接失败'}`)
+      reload(true)
+    } catch (err) {
+      onError(errorText(err, '连接测试失败'))
+    } finally {
+      setRowTestingId('')
+    }
+  }
+
+  const remove = async () => {
+    if (!deleting || removing) return
+    setRemoving(true)
+    try {
+      const removed = deleting
+      await superAssistantApi.deleteMulticaProfile(removed.id)
+      setDeleting(null)
+      if (form?.id === removed.id) setForm(null)
+      reload(true)
+      await onChanged()
+      toast.success(`已删除配置「${removed.name}」`)
+    } catch (err) {
+      onError(errorText(err, '删除失败'))
+    } finally {
+      setRemoving(false)
+    }
+  }
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-5 [scrollbar-gutter:stable] sm:p-6">
+        <section data-testid="multica-config-card" className="rounded-xl border border-[var(--color-border)] p-4">
+          <div className="flex items-start gap-2">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-sky-50 text-sky-700"><PlugZap size={16} /></div>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-1.5">
+                <p className="text-xs font-semibold text-[var(--color-text-primary)]">Multica</p>
+                <span className={`h-2 w-2 rounded-full ${effective?.last_test_status === 'success' ? 'bg-success' : effective?.last_test_status === 'error' ? 'bg-red-500' : 'bg-slate-300'}`} />
+                {effective?.enabled && <span className="rounded bg-brand-soft px-1.5 py-0.5 text-[9px] text-brand-ink">已启用</span>}
+              </div>
+              <p className="mt-1 text-[11px] leading-5 text-[var(--color-text-tertiary)]">
+                多智能体协作工作台：查看智能体、下发任务、查看任务清单。配置生效后输入 <code className="font-mono">/multica:</code> 使用命令。
+              </p>
+            </div>
+          </div>
+
+          {/* 平台默认配置：只读展示（后端维护），自定义配置停用后回落到这里 */}
+          {defaultProfile && (
+            <div data-testid="multica-default-card" className="mt-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 py-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <p className="truncate text-xs font-medium text-[var(--color-text-primary)]">{defaultProfile.name}</p>
+                  <Badge variant="secondary" className="shrink-0 px-1.5 py-0 text-[10px]">平台默认</Badge>
+                  {defaultProfile.is_active && (
+                    <Badge variant="default" className="shrink-0 px-1.5 py-0 text-[10px]">当前使用</Badge>
+                  )}
+                  {!defaultProfile.enabled && <span className="shrink-0 rounded bg-slate-100 px-1 py-0.5 text-[9px] text-slate-400">已停用</span>}
+                  {defaultProfile.token_set && <span className="shrink-0 text-[10px] text-[var(--color-text-tertiary)]">已配凭据</span>}
+                </div>
+                {defaultWebEntry && (
+                  <a
+                    href={defaultWebEntry}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    data-testid="multica-open-web"
+                    className="inline-flex min-h-9 shrink-0 items-center gap-1 rounded-lg px-2 text-xs text-brand-ink transition-colors hover:bg-brand-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    <ExternalLink size={12} /> 打开 Multica
+                  </a>
+                )}
+              </div>
+              <p className="mt-0.5 truncate font-mono text-[10px] text-[var(--color-text-tertiary)]">
+                {defaultProfile.base_url || '未配置服务地址'}
+                {defaultProfile.workspace_id && ` · ${defaultProfile.workspace_name || defaultProfile.workspace_id}`}
+              </p>
+            </div>
+          )}
+
+          {/* 自定义配置目录：非激活行可激活/编辑/删除；激活行可「停用回默认」 */}
+          <div className="mt-3 flex items-center justify-between gap-2">
+            <p className="text-[10px] font-medium text-[var(--color-text-secondary)]">自定义配置</p>
+            <button
+              type="button"
+              ref={addButtonRefResolved}
+              data-testid="multica-profile-add-button"
+              onClick={startAdd}
+              className="inline-flex min-h-9 items-center gap-1 rounded-lg border border-[var(--color-border)] bg-white px-2.5 text-xs text-brand-ink transition-colors hover:bg-brand-soft"
+            >
+              <Plus size={13} /> {form ? '收起表单' : '添加配置'}
+            </button>
+          </div>
+          <div className="mt-2 space-y-2" data-testid="multica-profile-list">
+            {loaded && customProfiles.length === 0 && !form && (
+              <p className="rounded-lg bg-[var(--color-bg-base)] px-3 py-2 text-[11px] text-[var(--color-text-tertiary)]">
+                还没有自定义配置。点「添加配置」接入一个 Multica 实例；多个实例可并存，激活哪个就生效哪个。
+              </p>
+            )}
+            {customProfiles.map(profile => {
+              const testMeta = multicaTestStatusMeta(profile.last_test_status)
+              return (
+                <div
+                  key={profile.id}
+                  data-testid="multica-profile-row"
+                  className={`flex items-center gap-2 rounded-lg border px-3 py-2 ${profile.is_active ? 'border-brand/30 bg-brand-soft/40' : 'border-[var(--color-border)]'}`}
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5">
+                      <p className="truncate text-xs font-medium text-[var(--color-text-primary)]">{profile.name}</p>
+                      {profile.is_active && <Badge variant="default" className="shrink-0 px-1.5 py-0 text-[10px]">当前使用</Badge>}
+                      {!profile.enabled && <span className="shrink-0 rounded bg-slate-100 px-1 py-0.5 text-[9px] text-slate-400">已停用</span>}
+                      {profile.token_set && <span className="shrink-0 text-[10px] text-[var(--color-text-tertiary)]">已配凭据</span>}
+                      <span className={`shrink-0 text-[10px] ${testMeta.ok === true ? 'text-[var(--color-success)]' : testMeta.ok === false ? 'text-[var(--color-danger)]' : 'text-[var(--color-text-tertiary)]'}`}>
+                        {testMeta.label}
+                      </span>
+                    </div>
+                    <p className="mt-0.5 truncate font-mono text-[10px] text-[var(--color-text-tertiary)]">
+                      {profile.base_url || '未配置服务地址'}
+                      {profile.workspace_id && ` · ${profile.workspace_name || profile.workspace_id}`}
+                    </p>
+                  </div>
+                  {profile.is_active ? (
+                    <button
+                      type="button"
+                      data-testid="multica-profile-deactivate"
+                      onClick={() => defaultProfile && void activate(defaultProfile)}
+                      disabled={!!activatingId || !defaultProfile}
+                      className="inline-flex min-h-9 items-center gap-1 rounded-lg px-2 text-xs text-brand-ink transition-colors hover:bg-brand-soft disabled:opacity-50"
+                    >
+                      {activatingId === defaultProfile?.id ? <Loader2 size={12} className="animate-spin" /> : null} 停用并回默认
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      data-testid="multica-profile-activate"
+                      onClick={() => void activate(profile)}
+                      disabled={!!activatingId}
+                      className="min-h-9 rounded-lg px-2 text-xs text-brand-ink transition-colors hover:bg-brand-soft disabled:opacity-50"
+                    >
+                      {activatingId === profile.id ? <Loader2 size={12} className="animate-spin" /> : null} 激活
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => void testRow(profile)}
+                    disabled={rowTestingId === profile.id}
+                    className="inline-flex min-h-9 items-center gap-1 rounded-lg px-2 text-xs text-brand-ink transition-colors hover:bg-brand-soft disabled:opacity-50"
+                  >
+                    {rowTestingId === profile.id ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />} 测试
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => startEdit(profile)}
+                    className="min-h-9 rounded-lg px-2 text-xs text-brand-ink transition-colors hover:bg-brand-soft"
+                  >
+                    编辑
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDeleting(profile)}
+                    aria-label={`删除 ${profile.name}`}
+                    data-testid="multica-profile-delete"
+                    className="min-h-9 rounded-lg px-2 text-xs text-red-600 transition-colors hover:bg-red-50"
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+              )
+            })}
+          </div>
+
+          {form && (
+            <div className="mt-3 space-y-3 rounded-lg bg-[var(--color-bg-base)] p-3" data-testid="multica-profile-form">
+              <p className="text-[11px] text-[var(--color-text-tertiary)]">
+                {form.id
+                  ? '编辑已存配置；服务地址或工作区变更后建议重新测试连接。'
+                  : '接入一个 Multica 实例（可并存多个）；保存后按需激活生效。'}
+              </p>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="block text-xs text-[var(--color-text-secondary)]">名称 <span className="text-red-500">*</span>
+                  <input
+                    data-testid="multica-profile-name"
+                    value={form.name}
+                    onChange={event => setForm({ ...form, name: event.target.value })}
+                    placeholder="例如：客户支持工作台"
+                    className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 text-sm outline-none focus:border-brand-deep focus-visible:ring-2 focus-visible:ring-ring"
+                  />
+                </label>
+                <label className="block text-xs text-[var(--color-text-secondary)]">服务地址 <span className="text-red-500">*</span>
+                  <input
+                    data-testid="multica-base-url"
+                    value={form.baseUrl}
+                    onChange={event => setForm({ ...form, baseUrl: event.target.value })}
+                    placeholder="http://127.0.0.1:8080"
+                    className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 font-mono text-sm outline-none focus:border-brand-deep focus-visible:ring-2 focus-visible:ring-ring"
+                  />
+                  <span className="mt-1 block text-[10px] leading-4 text-[var(--color-text-tertiary)]">
+                    自托管实例的 API 地址（默认端口 8080）；生产环境按 SSRF 策略拒绝内网地址。
+                  </span>
+                </label>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="block text-xs text-[var(--color-text-secondary)]">API Token
+                  <input
+                    data-testid="multica-token"
+                    type="password"
+                    value={form.token}
+                    onChange={event => setForm({ ...form, token: event.target.value })}
+                    placeholder={editingProfile?.token_set ? '已保存（留空保留）' : 'mul_…（在 Multica 网页 Settings → API Token 创建）'}
+                    className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 font-mono text-sm outline-none focus:border-brand-deep focus-visible:ring-2 focus-visible:ring-ring"
+                  />
+                  <span className="mt-1 block text-[10px] leading-4 text-[var(--color-text-tertiary)]">
+                    加密存储、永不回显；只用 PAT，不保存登录验证码。
+                  </span>
+                </label>
+                <label className="block text-xs text-[var(--color-text-secondary)]">工作区 <span className="text-red-500">*</span>
+                  <Select value={form.workspaceId} onValueChange={workspaceId => setForm({ ...form, workspaceId })}>
+                    <SelectTrigger aria-label="Multica 工作区" className="mt-1.5 min-h-11 text-sm">
+                      <SelectValue placeholder="连接测试后选择" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {workspaces.map(workspace => (
+                        <SelectItem key={workspace.id} value={workspace.id}>
+                          {workspace.name || workspace.slug || workspace.id}
+                        </SelectItem>
+                      ))}
+                      {!workspaces.some(workspace => workspace.id === form.workspaceId) && form.workspaceId && (
+                        <SelectItem value={form.workspaceId}>{form.workspaceId}</SelectItem>
+                      )}
+                    </SelectContent>
+                  </Select>
+                </label>
+              </div>
+              {/* 操作控件同行靠左，不做两端分置 */}
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  data-testid="multica-test-button"
+                  onClick={() => void testConnection()}
+                  disabled={testing || !form.baseUrl.trim()}
+                  className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-white px-3 text-xs text-brand-ink transition-colors hover:bg-brand-soft disabled:opacity-50"
+                >
+                  {testing ? <Loader2 size={13} className="animate-spin" /> : <ShieldCheck size={13} />} 测试连接
+                </button>
+                <label className="flex min-h-10 items-center gap-2 rounded-lg border border-[var(--color-border)] px-3 text-xs text-[var(--color-text-secondary)]">
+                  <input
+                    type="checkbox"
+                    checked={form.enabled}
+                    onChange={event => setForm({ ...form, enabled: event.target.checked })}
+                    className="h-4 w-4 accent-brand"
+                  />
+                  启用集成
+                </label>
+              </div>
+              {testResult && (
+                <p role="status" data-testid="multica-test-result" className={`rounded-lg px-3 py-2 text-[11px] leading-5 ${testResult.ok ? 'bg-brand-soft text-brand-ink' : 'bg-red-50 text-red-700'}`}>
+                  {testResult.message}
+                </p>
+              )}
+            </div>
+          )}
+          {error && <p role="alert" className="mt-4 text-xs text-red-600">{error}</p>}
+
+          {/* 可用命令：生效配置（effective）由后端按当前激活 profile 投影，仍走旧契约 */}
+          {effective?.enabled && effective.commands.length > 0 && (
+            <div data-testid="multica-effective-commands" className="mt-3 rounded-lg bg-[var(--color-bg-base)] p-3">
+              <p className="text-[10px] font-medium text-[var(--color-text-secondary)]">可用命令（当前生效配置）</p>
+              <ul className="mt-1 space-y-1">
+                {effective.commands.map(command => (
+                  <li key={command.command} className="flex items-baseline gap-2 text-[11px] leading-5">
+                    <code className="font-mono text-brand-ink">{command.usage.split(' ', 1)[0]}</code>
+                    <span className="text-[var(--color-text-secondary)]">{command.title}{command.write ? ' · 执行前需确认' : ''}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </section>
+      </div>
+      {/* 操作按钮归属表单：紧贴内容区不留隔离边距，弹窗高度固定后按钮位置稳定 */}
+      {form && (
+        <footer className="flex shrink-0 justify-center gap-3 px-5 pb-4">
+          <button onClick={() => setForm(null)} className="min-h-10 min-w-24 rounded-lg px-4 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">取消</button>
+          <button
+            onClick={() => void save()}
+            data-testid="multica-profile-save-button"
+            disabled={saving}
+            className="inline-flex min-h-10 min-w-24 items-center justify-center gap-2 rounded-lg bg-brand px-4 text-xs font-medium text-white transition-colors hover:bg-brand-deep focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+          >
+            {saving ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />} 保存
+          </button>
+        </footer>
+      )}
+      <ConfirmDialog
+        open={!!deleting}
+        onClose={() => setDeleting(null)}
+        onConfirm={() => void remove()}
+        variant="danger"
+        confirmText="删除"
+        loading={removing}
+        title={`删除配置「${deleting?.name ?? ''}」？`}
+        description="删除后该 Multica 实例不再出现在目录中；若它正在生效，平台会自动回落到默认配置。"
+      />
+    </div>
+  )
+}
+
+/** 能力拓展面板（外部平台集成）：左侧集成类型 tabs，multica 为首个落地集成
+ *  （多 profile 目录），远程助手为声明式注册目录（后续新集成在此追加 tab）。
+ *  DialogShell 为常开弹层，调用方以条件挂载控制显隐（同 McpDialog 用法）。
+ */
+export default function IntegrationsDialog({ onClose, onSaved }: {
+  onClose: () => void
+  onSaved?: () => void | Promise<void>
+}) {
+  const [tab, setTab] = useState<IntegrationTab>('multica')
+  const [error, setError] = useState('')
+  const addButtonRef = useRef<HTMLButtonElement | null>(null)
 
   return (
     <DialogShell
@@ -718,20 +1101,22 @@ export default function IntegrationsDialog({ onClose, onSaved }: {
       onClose={onClose}
       /* 固定宽高：切换 tab 不改变弹窗大小，垂直超出经内容区滚轮滚动 */
       contentClassName="h-[min(82dvh,44rem)]"
-      /* 焦点落服务地址输入框，避免左栏 tab/底部按钮被默认聚焦呈现选中态 */
+      /* 焦点落 Multica 主操作按钮，避免左栏 tab 被默认聚焦呈现选中态 */
       onOpenAutoFocus={event => {
         event.preventDefault()
-        baseUrlInputRef.current?.focus()
+        addButtonRef.current?.focus()
       }}
     >
       <div className="flex min-h-0 flex-1">
-        <nav aria-label="集成类型" className="flex w-40 shrink-0 flex-col gap-1 border-r border-[var(--color-border)] p-2">
+        <nav role="tablist" aria-label="集成类型" className="flex w-40 shrink-0 flex-col gap-1 border-r border-[var(--color-border)] p-2">
           {INTEGRATION_TABS.map(item => (
             <button
               key={item.key}
               type="button"
               role="tab"
+              id={`integrations-tab-${item.key}`}
               aria-selected={tab === item.key}
+              aria-controls={`integrations-panel-${item.key}`}
               data-integrations-tab={item.key}
               onClick={() => setTab(item.key)}
               className={`flex min-h-10 items-center gap-1.5 rounded-lg px-2.5 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${tab === item.key
@@ -744,127 +1129,25 @@ export default function IntegrationsDialog({ onClose, onSaved }: {
           ))}
         </nav>
         {tab === 'multica' ? (
-          <div className="flex min-h-0 flex-1 flex-col">
-            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-5 [scrollbar-gutter:stable] sm:p-6">
-              <section data-testid="multica-config-card" className="rounded-xl border border-[var(--color-border)] p-4">
-          <div className="flex items-start gap-2">
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-sky-50 text-sky-700"><PlugZap size={16} /></div>
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-1.5">
-                <p className="text-xs font-semibold text-[var(--color-text-primary)]">Multica</p>
-                <span className={`h-2 w-2 rounded-full ${config?.last_test_status === 'success' ? 'bg-success' : config?.last_test_status === 'error' ? 'bg-red-500' : 'bg-slate-300'}`} />
-                {config?.enabled && <span className="rounded bg-brand-soft px-1.5 py-0.5 text-[9px] text-brand-ink">已启用</span>}
-              </div>
-              <p className="mt-1 text-[11px] leading-5 text-[var(--color-text-tertiary)]">
-                多智能体协作工作台：查看智能体、下发任务、查看任务清单。配置后输入 <code className="font-mono">/multica:</code> 使用命令。
-              </p>
-            </div>
-          </div>
-
-          <div className="mt-3 space-y-3">
-            <label className="block text-xs text-[var(--color-text-secondary)]">服务地址 <span className="text-red-500">*</span>
-              <input
-                ref={baseUrlInputRef}
-                data-testid="multica-base-url"
-                value={baseUrl}
-                onChange={event => setBaseUrl(event.target.value)}
-                placeholder="http://127.0.0.1:8080"
-                className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 text-sm outline-none focus:border-brand-deep focus-visible:ring-2 focus-visible:ring-ring"
-              />
-              <span className="mt-1 block text-[10px] leading-4 text-[var(--color-text-tertiary)]">
-                自托管实例的 API 地址（默认端口 8080）；生产环境按 SSRF 策略拒绝内网地址。
-              </span>
-            </label>
-            <label className="block text-xs text-[var(--color-text-secondary)]">API Token
-              <input
-                data-testid="multica-token"
-                type="password"
-                value={token}
-                onChange={event => setToken(event.target.value)}
-                placeholder={config?.token_set ? '已保存（留空保留）' : 'mul_…（在 Multica 网页 Settings → API Token 创建）'}
-                className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 font-mono text-sm outline-none focus:border-brand-deep focus-visible:ring-2 focus-visible:ring-ring"
-              />
-              <span className="mt-1 block text-[10px] leading-4 text-[var(--color-text-tertiary)]">
-                加密存储、永不回显；只用 PAT，不保存登录验证码。
-              </span>
-            </label>
-            <label className="block text-xs text-[var(--color-text-secondary)]">工作区 <span className="text-red-500">*</span>
-              <Select value={workspaceId} onValueChange={setWorkspaceId}>
-                <SelectTrigger aria-label="Multica 工作区" className="mt-1.5 min-h-11 text-sm">
-                  <SelectValue placeholder="连接测试后选择" />
-                </SelectTrigger>
-                <SelectContent>
-                  {workspaces.map(workspace => (
-                    <SelectItem key={workspace.id} value={workspace.id}>
-                      {workspace.name || workspace.slug || workspace.id}
-                    </SelectItem>
-                  ))}
-                  {!workspaces.some(workspace => workspace.id === workspaceId) && workspaceId && (
-                    <SelectItem value={workspaceId}>{workspaceId}</SelectItem>
-                  )}
-                </SelectContent>
-              </Select>
-            </label>
-            {/* 操作控件同行靠左，不做两端分置 */}
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                data-testid="multica-test-button"
-                onClick={() => void testConnection()}
-                disabled={testing || !baseUrl.trim()}
-                className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-white px-3 text-xs text-brand-ink transition-colors hover:bg-brand-soft disabled:opacity-50"
-              >
-                {testing ? <Loader2 size={13} className="animate-spin" /> : <ShieldCheck size={13} />} 测试连接
-              </button>
-              <label className="flex min-h-10 items-center gap-2 rounded-lg border border-[var(--color-border)] px-3 text-xs text-[var(--color-text-secondary)]">
-                <input type="checkbox" checked={enabled} onChange={event => setEnabled(event.target.checked)} className="h-4 w-4 accent-brand" />
-                启用集成
-              </label>
-            </div>
-            {testResult && (
-              <p role="status" data-testid="multica-test-result" className={`rounded-lg px-3 py-2 text-[11px] leading-5 ${testResult.ok ? 'bg-brand-soft text-brand-ink' : 'bg-red-50 text-red-700'}`}>
-                {testResult.message}
-              </p>
-            )}
-            {config?.enabled && config.commands.length > 0 && (
-              <div className="rounded-lg bg-[var(--color-bg-base)] p-3">
-                <p className="text-[10px] font-medium text-[var(--color-text-secondary)]">可用命令</p>
-                <ul className="mt-1 space-y-1">
-                  {config.commands.map(command => (
-                    <li key={command.command} className="flex items-baseline gap-2 text-[11px] leading-5">
-                      <code className="font-mono text-brand-ink">{command.usage.split(' ', 1)[0]}</code>
-                      <span className="text-[var(--color-text-secondary)]">{command.title}{command.write ? ' · 执行前需确认' : ''}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-          </div>
-            </section>
-              {error && <p role="alert" className="mt-4 text-xs text-red-600">{error}</p>}
-            </div>
-            {/* 操作按钮归属各集成面板：每个集成独立保存，互不干扰。
-                紧贴内容区不留隔离边距，弹窗高度固定后按钮位置稳定 */}
-            <footer className="flex shrink-0 justify-center gap-3 px-5 pb-4">
-              <button onClick={onClose} className="min-h-10 min-w-24 rounded-lg px-4 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">取消</button>
-              <button
-                onClick={() => void save()}
-                data-testid="multica-save-button"
-                disabled={saving || !baseUrl.trim()}
-                className="inline-flex min-h-10 min-w-24 items-center justify-center gap-2 rounded-lg bg-brand px-4 text-xs font-medium text-white transition-colors hover:bg-brand-deep focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
-              >
-                {saving ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />} 保存
-              </button>
-            </footer>
+          <div role="tabpanel" id="integrations-panel-multica" aria-labelledby="integrations-tab-multica" className="flex min-h-0 flex-1">
+            <MulticaProfilesPanel
+              onError={message => setError(message)}
+              onChanged={() => onSaved?.()}
+              addButtonRef={addButtonRef}
+            />
           </div>
         ) : tab === 'remote-agents' ? (
-          <RemoteAgentsPanel
-            onError={message => setError(message)}
-            onChanged={() => void onSaved?.()}
-          />
+          <div role="tabpanel" id="integrations-panel-remote-agents" aria-labelledby="integrations-tab-remote-agents" className="flex min-h-0 flex-1">
+            <RemoteAgentsPanel
+              onError={message => setError(message)}
+              onChanged={() => onSaved?.()}
+            />
+          </div>
         ) : null}
       </div>
-      {tab === 'remote-agents' && error && (
+      {/* 面板级错误（加载/激活/删除/行内测试失败）在两个 tab 都要可见：
+          multica tab 曾被 tab 条件吞掉导致 API 失败静默（回归护栏见 E2E） */}
+      {error && (
         <p role="alert" className="px-5 pb-2 text-xs text-red-600">{error}</p>
       )}
     </DialogShell>

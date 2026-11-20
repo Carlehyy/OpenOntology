@@ -163,6 +163,19 @@ secrets 与 `PROD_HINDSIGHT_IMAGE`/`PROD_HINDSIGHT_POSTGRES_IMAGE` variables
 readiness 与部署成败判定，部署日志仅记录功能健康状态。详见
 [配置流程](./configuration.md#hindsight-长期记忆生产默认启用)。
 
+Multica 默认栈（官方 v0.11.0 三服务，生产默认启用）与 Hindsight 同构地由
+单独的有界 `--profile multica` 调用启动（`MULTICA_START_TIMEOUT`，默认
+300 秒——首次部署须在该调用内拉满三个 digest 钉扎镜像），但时机刻意不同：
+在最终核心 `up -d` 成功之后、readiness 门禁等待**之前**启动，因为五值默认
+集配置完整时生产 readiness 会门禁 `multica_default`，等就绪再启动会自我
+死锁。启动失败只停掉本次起了一半的容器（卷保留，下次部署重试），不回滚
+核心 up；五值默认集未配置时失败仅是特性级告警，已配置时由 readiness 如实
+判定部署失败。三个 multica 容器只在 `multica_internal` 私网（API 不挂
+default 网，仅 `backend`/`pipeline_executor` 加入该专网），API 容器不发布
+宿主端口，web 宿主端口默认只绑 loopback。启用并正常使用后的回滚以同恢复
+点卷备份恢复为准（`multica_pgdata` + `multica_uploads`）。详见
+[配置说明](./configuration.md#multica-默认服务默认启用可显式关闭)。
+
 ## 数据库迁移停机边界
 
 生产迁移是一次有意的短暂停机。依赖连接预检通过后，`deploy/deploy-prod.sh`

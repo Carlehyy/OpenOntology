@@ -70,7 +70,12 @@ x-weknora-app: &weknora-app-base
 # everywhere. The Grafana shared-admin password follows the same pattern:
 # `backend` re-declares the real value for the internal Grafana HTTP API
 # client and the one-shot grafana-bootstrap uses it to verify the folder; all
-# other runtime containers keep the empty mask.
+# other runtime containers keep the empty mask. The Multica stack secrets
+# follow the same rule: MULTICA_DEFAULT_PAT, MULTICA_JWT_SECRET and
+# MULTICA_POSTGRES_PASSWORD belong to the multica containers only; `backend`
+# and `pipeline_executor` re-declare the real PAT for the default multica
+# integration and the AutoLoop worker, while every other runtime container
+# (and every process for JWT/DB secrets) keeps the empty mask.
 x-platform-runtime-weknora-secret-blocks: &platform-runtime-weknora-secret-blocks
   WEKNORA_ADMIN_PASSWORD: ""
   WEKNORA_DB_PASSWORD: ""
@@ -84,6 +89,9 @@ x-platform-runtime-weknora-secret-blocks: &platform-runtime-weknora-secret-block
   HINDSIGHT_DB_PASSWORD: ""
   HINDSIGHT_CP_ACCESS_KEY: ""
   GRAFANA_ADMIN_PASSWORD: ""
+  MULTICA_DEFAULT_PAT: ""
+  MULTICA_JWT_SECRET: ""
+  MULTICA_POSTGRES_PASSWORD: ""
 
 
 services:
@@ -621,6 +629,131 @@ services:
     tmpfs:
       - /tmp:size=512m,nosuid,nodev
 
+  # Multica 默认服务（官方 v0.11.0 自托管栈，生产默认启用：MULTICA_ENABLED
+  # 留空/true 即启用，仅显式 false 关闭）。由 deploy-prod.sh 在最终核心
+  # up 成功后、readiness 门禁等待前，以 --profile multica 单独的有界调用
+  # 启动 multica multica-web——五项 MULTICA_DEFAULT_* 配置完整时生产
+  # readiness 会门禁 multica_default，先启动才能避免自我死锁。契约经上游
+  # v0.11.0 源码树核验（tarball cb190810 + GHCR OCI config 元数据，见
+  # docs/operations/configuration.md「Multica 默认服务」）：
+  # pgvector/pgvector:pg17 + backend（容器内 8080，/healthz=ready
+  # /health=live，入口自动 ./migrate up，附件卷 /app/data/uploads）+ web
+  # （容器内 3000，REMOTE_API_URL 服务端代理 API，浏览器只需 web origin）。
+  # GHCR 只发布 latest tag，镜像用与 v0.11.0 revision（cb190810…）核验
+  # 一致的多架构 digest 钉扎，deploy-prod.sh 校验 @sha256。密钥无生产兜底：
+  # MULTICA_JWT_SECRET / MULTICA_POSTGRES_PASSWORD 由 deploy-prod.sh 在
+  # 启用时生成并落服务器 .env——所有 multica 变量都用空/钉扎默认值插值，
+  # profile 未激活时 `docker compose config` 与核心 up 永不被阻断。平台
+  # 绝不宣称空卷已初始化账号/PAT/workspace：这三者必须由管理员在 Multica
+  # 原生界面/官方 CLI 创建后回填 MULTICA_DEFAULT_*（详见文档）。
+  multica-postgres:
+    image: ${MULTICA_POSTGRES_IMAGE:-pgvector/pgvector:pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f}
+    profiles: [multica]
+    environment:
+      POSTGRES_DB: ${MULTICA_POSTGRES_DB:-multica}
+      POSTGRES_USER: ${MULTICA_POSTGRES_USER:-multica}
+      # 无生产兜底：启用时由 deploy-prod.sh 生成强随机值（空值会让官方
+      # postgres 镜像拒绝启动，但不影响未启用 profile 的核心部署）。
+      POSTGRES_PASSWORD: ${MULTICA_POSTGRES_PASSWORD:-}
+    volumes:
+      - multica_pgdata:/var/lib/postgresql/data
+    networks:
+      - multica_internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-multica} -d $${POSTGRES_DB:-multica}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  multica:
+    # 官方 API 服务（上游服务名 backend；保留 multica 以维持平台
+    # http://multica:8080 内网契约）。API 与 DB/web 一样只留在
+    # multica_internal 专网、不挂 default：确要调用的 backend 与
+    # pipeline_executor 按既有钉扎网络清单另行加入该专网（与
+    # WeKnora/Kaneo/Hindsight 的隔离栈同一形态），default 网上的其余
+    # 服务一律不可达 Multica。
+    image: ${MULTICA_BACKEND_IMAGE:-ghcr.io/multica-ai/multica-backend@sha256:099fd0d1eea8fc4cf03254c6dff86f7de206662ff71db8dc9a78e66726dd65a4}
+    profiles: [multica]
+    depends_on:
+      multica-postgres:
+        condition: service_healthy
+    expose:
+      - "8080"
+    volumes:
+      # 官方 compose 契约：附件上传持久化卷挂 /app/data/uploads。
+      - multica_uploads:/app/data/uploads
+    networks:
+      - multica_internal
+    environment:
+      DATABASE_URL: postgres://${MULTICA_POSTGRES_USER:-multica}:${MULTICA_POSTGRES_PASSWORD:-}@multica-postgres:5432/${MULTICA_POSTGRES_DB:-multica}?sslmode=disable
+      PORT: "8080"
+      # 无生产兜底（deploy-prod.sh 启用时生成强随机值）；刻意不用 :? 强制
+      # 变量——inactive profile 插值也会阻断核心 compose。
+      JWT_SECRET: ${MULTICA_JWT_SECRET:-}
+      APP_ENV: ${MULTICA_APP_ENV:-production}
+      # 浏览器入口 = MULTICA_DEFAULT_WEB_URL 对应的公开 origin（管理员显式
+      # 配置，通常是指向 web 容器宿主端口的 TLS 反代地址；部署脚本不做推导）。
+      FRONTEND_ORIGIN: ${MULTICA_FRONTEND_ORIGIN:-}
+      MULTICA_APP_URL: ${MULTICA_APP_URL:-}
+      ALLOW_SIGNUP: ${MULTICA_ALLOW_SIGNUP:-true}
+      MULTICA_DATABASE_STARTUP_TIMEOUT: ${MULTICA_DATABASE_STARTUP_TIMEOUT:-3m}
+    healthcheck:
+      # 官方健康契约：GET /healthz（ready，迁移完成后 200）。镜像基 alpine
+      # 自带 busybox wget。
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      # 空库首启先跑 ./migrate up，start_period 覆盖上游 3m DB 启动预算。
+      start_period: 300s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  multica-web:
+    # 官方 web（Next.js standalone，容器内 3000）。浏览器只需本服务 origin：
+    # API/WS 由 Next 服务端按 REMOTE_API_URL 代理，multica API 容器不发布
+    # 任何宿主端口。web 自带账号体系（邮箱验证码登录/PAT 铸造），登录页
+    # 不得明文暴露公网：宿主端口默认只绑 loopback，管理员经 SSH 隧道访问
+    # （ssh -L 18100:127.0.0.1:18100），或由同宿主 TLS 反代（默认
+    # 127.0.0.1 + MULTICA_WEB_PORT）转发后再对外提供 HTTPS origin——需要
+    # 反代跨机到达时才用 MULTICA_WEB_BIND_ADDR 显式放开绑定地址。
+    image: ${MULTICA_WEB_IMAGE:-ghcr.io/multica-ai/multica-web@sha256:ba8fd0fda94a9ec141e15d77e591db8ee4b246720a722d6f9dffd185ee48863b}
+    profiles: [multica]
+    depends_on:
+      - multica
+    ports:
+      - "${MULTICA_WEB_BIND_ADDR:-127.0.0.1}:${MULTICA_WEB_PORT:-18100}:3000"
+    networks:
+      - multica_internal
+    environment:
+      HOSTNAME: "0.0.0.0"
+      REMOTE_API_URL: http://multica:8080
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.status<500?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
   # Python 脚本流水线的执行网关（Jupyter Kernel Gateway）。用户脚本在其内核
   # 中执行，因此刻意不挂 env_file、不注入任何平台凭据环境变量，也不暴露
   # 宿主机端口——仅 backend 经 compose 内网访问。
@@ -731,6 +864,22 @@ services:
       # 空串，与 KANEO_ADMIN_PASSWORD 同构）。
       HINDSIGHT_CP_BASE_URL: http://hindsight:9999
       HINDSIGHT_CP_ACCESS_KEY: ${HINDSIGHT_CP_ACCESS_KEY:-}
+      # Multica 默认服务（profile `multica`，MULTICA_ENABLED 默认启用）。五项
+      # 默认值完整时才启用部署级默认集成（deploy-prod.sh all-or-nothing
+      # 校验，完整时生产 readiness 门禁 multica_default）；未配置时超级助手
+      # 按每用户自配 multica 独立工作。
+      MULTICA_DEFAULT_BASE_URL: ${MULTICA_DEFAULT_BASE_URL:-}
+      MULTICA_DEFAULT_WEB_URL: ${MULTICA_DEFAULT_WEB_URL:-}
+      MULTICA_DEFAULT_WORKSPACE_ID: ${MULTICA_DEFAULT_WORKSPACE_ID:-}
+      MULTICA_DEFAULT_WORKSPACE_NAME: ${MULTICA_DEFAULT_WORKSPACE_NAME:-}
+      # 部署级 PAT：掩码锚点把它对 env_file 服务置空，这里显式取回真值
+      # （sanctioned exception，与 KANEO_ADMIN_PASSWORD 同构）；仅 backend
+      # 与 pipeline_executor 拿到真值，task_worker 保持空掩码。凭据不进
+      # 日志/接口/前端。
+      MULTICA_DEFAULT_PAT: ${MULTICA_DEFAULT_PAT:-}
+      # Multica 内网地址允许清单，独立于 MCP 的清单，不共用信任面；仅
+      # 部署声明内网 Multica 时由 deploy-prod.sh 写入。
+      SUPER_ASSISTANT_MULTICA_INTERNAL_BASE_URLS: ${SUPER_ASSISTANT_MULTICA_INTERNAL_BASE_URLS:-}
       UPLOADS_DIR: ${UPLOADS_DIR:-/uploads}
       API_HUB_DATA_DIR: /api-hub-data
       STEWARD_WORKSPACE_ROOT: /uploads/steward-sessions
@@ -807,6 +956,10 @@ services:
       - kaneo_internal
       - hindsight_internal
       - grafana_internal
+      # 确要调用默认 Multica 栈（http://multica:8080 内网契约 + 五值默认
+      # 集探测/AutoLoop）的服务方加入专网，与 WeKnora/Kaneo/Hindsight 同构；
+      # multica API 容器本身不挂 default。
+      - multica_internal
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     # Container hardening is defense in depth; user plugins still require the
     # dedicated rootless runner described in the commercial release gate.
@@ -956,6 +1109,17 @@ services:
       HINDSIGHT_TIMEOUT_SECONDS: ${HINDSIGHT_TIMEOUT_SECONDS:-2}
       HINDSIGHT_NAMESPACE: ${HINDSIGHT_NAMESPACE:-openontology}
       HINDSIGHT_SERVICE_TOKEN: ${HINDSIGHT_SERVICE_TOKEN:-}
+      # AutoLoop 派发消费与内核执行链路在 executor 进程内调用 Multica：
+      # 与 backend 共享同一可选默认集成。五项默认值共用同一 all-or-nothing
+      # 完整性谓词（缺任一项（含 WEB_URL）即视为未配置，且会把 web 进程
+      # 已物化的平台默认 profile 软删除），因此五项全部显式映射；
+      # PAT 显式取回真值（同 backend 例外）。
+      MULTICA_DEFAULT_BASE_URL: ${MULTICA_DEFAULT_BASE_URL:-}
+      MULTICA_DEFAULT_WEB_URL: ${MULTICA_DEFAULT_WEB_URL:-}
+      MULTICA_DEFAULT_WORKSPACE_ID: ${MULTICA_DEFAULT_WORKSPACE_ID:-}
+      MULTICA_DEFAULT_WORKSPACE_NAME: ${MULTICA_DEFAULT_WORKSPACE_NAME:-}
+      MULTICA_DEFAULT_PAT: ${MULTICA_DEFAULT_PAT:-}
+      SUPER_ASSISTANT_MULTICA_INTERNAL_BASE_URLS: ${SUPER_ASSISTANT_MULTICA_INTERNAL_BASE_URLS:-}
       UPLOADS_DIR: ${UPLOADS_DIR:-/uploads}
       API_HUB_DATA_DIR: /api-hub-data
       STEWARD_WORKSPACE_ROOT: /uploads/steward-sessions
@@ -1000,6 +1164,9 @@ services:
       - weknora_internal
       - kaneo_internal
       - hindsight_internal
+      # AutoLoop 派发消费与内核执行链路在本 executor 进程内调用默认
+      # Multica：与 backend 一致由调用方加入专网，multica API 容器不挂 default。
+      - multica_internal
     command: python -m app.data_channel.pipeline_tasks.nats_executor
     security_opt:
       - no-new-privileges:true
@@ -1243,6 +1410,10 @@ volumes:
   # (embedding model downloads once, then survives redeploys).
   hindsight_postgres_data:
   hindsight_model_cache:
+  # Multica 官方自托管栈数据卷：PostgreSQL 数据 + backend 附件上传
+  # （/app/data/uploads，官方 compose 契约）。两者与平台 PG 成对备份。
+  multica_pgdata:
+  multica_uploads:
   # Grafana 原生数据（SQLite/数据源/看板/用户）。看板数据权威存储；必须与平台
   # PostgreSQL（operations_dashboards 卡片元数据）成对备份/恢复。
   grafana_data:
@@ -1264,6 +1435,20 @@ networks:
   # embedding model from HuggingFace and the service calls back into backend);
   # no service on it publishes any host port.
   hindsight_internal:
+    driver: bridge
+  # Isolated default-enabled Multica stack (official v0.11.0 selfhost layout).
+  # postgres and the API live solely inside this network; only the web container
+  # publishes a host port (MULTICA_WEB_PORT, native account auth). The callers
+  # that actually need http://multica:8080 — backend and pipeline_executor —
+  # join this network with their pinned network lists (same shape as
+  # weknora/kaneo/hindsight); the API container never joins `default`, so no
+  # other default-network service can reach it. The bridge is deliberately
+  # not marked `internal`: the official backend needs outbound access (RESEND
+  # verification email when configured, Multica agents calling administrator-
+  # configured model providers), and an internal bridge would break those
+  # official web/agent dependencies without adding isolation that the absent
+  # host ports and the loopback web bind do not already provide.
+  multica_internal:
     driver: bridge
   # Grafana 私网。成员限定为 grafana、grafana-bootstrap、backend、frontend
   # （nginx）：网内任意进程都可构造 X-WEBAUTH-USER，禁止把其他服务加入。

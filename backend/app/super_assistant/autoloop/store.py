@@ -394,8 +394,16 @@ def create_or_update_decision(db: Session, *, owner_id: str, workspace_id: str |
 def submit_decision(db: Session, *, owner_id: str, decision_id: str,
     actor_id: str, expected_content_version: int, idempotency_key: str,
     option_id: str | None = None, free_text: str | None = None,
-    connector_base_url: str | None = None,
+    source_resolver=None,
 ) -> tuple[AutoLoopDecision, AutoLoopDecisionRequest, bool]:
+    """Accept an answer; the writeback step freezes the card's immutable source.
+
+    The idempotent replay check runs before ``source_resolver`` is invoked:
+    replaying an accepted answer stays successful even when the source it was
+    submitted under has since become unusable. Resolution happens only for a
+    genuinely new submission, after state/value validation, still under the
+    card's scope lock.
+    """
     row = _decision(db, owner_id, decision_id)
     text_value = (free_text or "").strip()
     previous = _replay(db, row, "decide", idempotency_key, actor_id=actor_id,
@@ -411,6 +419,7 @@ def submit_decision(db: Session, *, owner_id: str, decision_id: str,
         raise StoreConflict("invalid_decision_value", http_status=422)
     if row.source == "watchdog" and not row.issue_key:
         raise StoreConflict("watchdog_issue_required", http_status=422)
+    config, revision_id = source_resolver(db, row) if source_resolver else (None, None)
     value = {"optionId": option_id, "freeText": text_value or None,
              "answer": text_value or chosen["label"]}
     _cas_decision(db, row, status="pending_dispatch", submitted_value=value,
@@ -422,11 +431,17 @@ def submit_decision(db: Session, *, owner_id: str, decision_id: str,
     if row.issue_key:
         kinds.append("issue.comment")
     for ordinal, kind in enumerate(kinds):
+        # The writeback step freezes the source the card was submitted under;
+        # the worker binds execution and reconciliation to that revision.
+        payload = {
+            "decisionItemId": row.id,
+            "workspaceId": config.workspace_id if config else row.workspace_id,
+            "baseUrl": str(getattr(config, "base_url", "") or ""),
+            "issueRef": row.issue_key, "answer": value["answer"], "value": value}
+        if revision_id:
+            payload["profileRevisionId"] = str(revision_id)
         db.add(AutoLoopActionStep(id=new_id(), action_id=action.id, ordinal=ordinal,
-            kind=kind, state="queued", remote_request_id=new_id(), request_payload={
-                "decisionItemId": row.id, "workspaceId": row.workspace_id,
-                "baseUrl": connector_base_url,
-                "issueRef": row.issue_key, "answer": value["answer"], "value": value}))
+            kind=kind, state="queued", remote_request_id=new_id(), request_payload=payload))
     db.flush()
     _action_fact(db, action, row, "action.created")
     request = AutoLoopDecisionRequest(decision_item_id=row.id, owner_id=owner_id,

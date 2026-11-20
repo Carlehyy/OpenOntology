@@ -37,6 +37,24 @@ Hindsight 记忆 profile 是可选特性：回滚包含它的新版本时，把�
 的 `HINDSIGHT_ENABLED` 置回 false 并重跑部署即可停用（卷保留）；回滚目标
 版本不含该 profile 时无需任何额外步骤，平台其余回滚流程不变。
 
+Multica 默认栈不参与平台 Alembic 迁移，官方入口只在容器启动时执行
+`./migrate up`（上游没有经核验的 downgrade 路径）。已验证的回滚边界：
+栈一旦启用并正常使用（账号/workspace/PAT/任务数据已写入
+`multica_pgdata`，附件已写入 `multica_uploads`），回滚或降级没有
+schema 层面的安全路径——以恢复同恢复点的卷备份为准（`multica_pgdata` +
+`multica_uploads`，与服务器 `.env` 同恢复点，见
+[备份与恢复](./backup-restore.md)）；仅在卷仍为空（从未注册使用）时，
+才可直接把镜像 digest 回退到上一钉扎值重启。显式停用 bundled 栈
+（`MULTICA_ENABLED=false`）只停容器不删卷，回滚平台版本不要求清空
+multica 数据卷；如需取消部署默认绑定，清空五项并重跑部署，readiness
+不再门禁 `multica_default`。这不会撤销历史任务的 PAT；需要撤销时应在
+Multica 原生管理界面吊销凭据。
+
+平台数据库迁移 `0154_multica_profiles` 与上述上游卷独立。旧版本只能表示
+每用户一条配置；存在平台默认、多 profile、多 revision 或仍绑定来源的
+未决调用时，降级会拒绝而非丢弃数据。已正常使用新配置后，回退到迁移前版本
+应恢复升级前的平台 PostgreSQL 与对应加密密钥，并核对上游任务和 PAT 状态。
+
 Grafana 是平台 fail-closed 强依赖（随平台 Compose 启动，无独立公网入口）：
 回滚目标是本接入版本时，部署会先确认 Grafana 在本次部署前是否已运行
 （`compose ps --status running -q grafana`；查询失败即部署非零退出，不把

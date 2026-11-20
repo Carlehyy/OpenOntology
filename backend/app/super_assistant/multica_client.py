@@ -55,11 +55,33 @@ def _request(method: str, url: str, **kwargs: Any) -> httpx.Response:
     return httpx.request(method, url, **kwargs)
 
 
-def normalize_base_url(base_url: str) -> str:
+def clean_base_url(base_url: str) -> str:
+    """Parse a deployment URL without DNS or network access."""
     value = (base_url or "").strip().rstrip("/")
     try:
-        return validate_mcp_url(value, require_https=True)
-    except McpClientError as exc:
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("必须是 HTTP/HTTPS 绝对地址")
+        if (parsed.username is not None or parsed.password is not None
+                or parsed.query or parsed.fragment or any(char.isspace() for char in value)):
+            raise ValueError("地址不能包含凭据、查询串、片段或空白")
+        if parsed.port == 0:
+            raise ValueError("端口无效")
+    except ValueError as exc:
+        raise MulticaClientError(f"multica 服务地址无效：{exc}") from exc
+    return value
+
+
+def normalize_base_url(base_url: str) -> str:
+    from app.shared.config import settings
+
+    value = clean_base_url(base_url)
+    try:
+        return validate_mcp_url(
+            value, require_https=True,
+            internal_base_urls=settings.super_assistant_multica_internal_base_urls,
+        )
+    except ValueError as exc:
         raise MulticaClientError(f"multica 服务地址无效：{exc}") from exc
 
 
@@ -336,19 +358,31 @@ def get_active_task(
     workspace_id: str | None,
     issue_ref: str,
 ) -> dict[str, Any]:
-    """Read the Issue-authorized active task response.
-
-    The pinned API returns ``{tasks: [...]}``; the existing direct-task seam
-    remains observable for current callers. Steering selects an explicit run
-    from this response and never chooses the first of several active runs.
-    """
+    """Read the Issue-authorized ``{tasks: [...]}`` response without selecting a run."""
     data = _call(
         "GET", base_url, token, f"{_issue_path(issue_ref)}/active-task",
         workspace_id=workspace_id,
     )
-    if isinstance(data, dict) and isinstance(data.get("task"), dict):
-        return dict(data["task"])
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict) or _stable_items(data, key="tasks") is None:
+        raise MulticaClientError("multica 活动执行响应缺少稳定任务身份")
+    return data
+
+
+def list_task_runs(
+    base_url: str,
+    token: str,
+    workspace_id: str,
+    issue_ref: str,
+) -> list[dict[str, Any]]:
+    """Read this issue's full execution history, including completed original runs."""
+    data = _call(
+        "GET", base_url, token, f"{_issue_path(issue_ref)}/task-runs",
+        workspace_id=workspace_id, params={"scope": "issue"},
+    )
+    items = _stable_items(data)
+    if items is None or len({str(item["id"]) for item in items}) != len(items):
+        raise MulticaClientError("multica 执行历史缺少唯一任务身份")
+    return items
 
 
 def _stable_items(data: Any, *, key: str | None = None) -> list[dict[str, Any]] | None:
@@ -452,8 +486,8 @@ def create_comment(
         except (ValueError, TypeError, AttributeError) as exc:
             raise MulticaClientError("multica steer task 必须是 UUID") from exc
         active = get_active_task(base_url, token, workspace_id, issue_ref)
-        runs = active.get("tasks") if isinstance(active.get("tasks"), list) else [active]
-        if not any(isinstance(run, dict) and str(run.get("id") or run.get("task_id")) == steer_task_id
+        runs = active["tasks"]
+        if not any(str(run["id"]) == steer_task_id
                    and run.get("status") == "running" for run in runs):
             raise MulticaClientError("multica steer 目标已非当前有效运行")
         payload["steer_task_ids"] = [steer_task_id]

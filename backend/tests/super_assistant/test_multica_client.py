@@ -116,7 +116,8 @@ def test_external_task_observation_and_cancel_use_issue_task_routes(monkeypatch)
     calls: list = []
     responses = iter([
         _FakeResponse(payload={"identifier": "MYW-9", "status": "in_progress"}),
-        _FakeResponse(payload={"id": "task-1", "status": "running"}),
+        _FakeResponse(payload={"tasks": [{"id": "task-1", "status": "running"}]}),
+        _FakeResponse(payload=[{"id": "task-1", "status": "completed"}]),
         _FakeResponse(payload={"status": "cancelled"}),
     ])
 
@@ -126,15 +127,19 @@ def test_external_task_observation_and_cancel_use_issue_task_routes(monkeypatch)
 
     monkeypatch.setattr(multica_client, "_request", fake_request)
     issue = multica_client.get_issue("http://127.0.0.1:8080", "t", "ws", "MYW-9")
-    task = multica_client.get_active_task("http://127.0.0.1:8080", "t", "ws", "MYW-9")
+    active = multica_client.get_active_task("http://127.0.0.1:8080", "t", "ws", "MYW-9")
+    runs = multica_client.list_task_runs("http://127.0.0.1:8080", "t", "ws", "MYW-9")
     result = multica_client.cancel_task("http://127.0.0.1:8080", "t", "ws", "MYW-9", "task-1")
     assert issue["identifier"] == "MYW-9"
-    assert task["id"] == "task-1"
+    assert active["tasks"] == [{"id": "task-1", "status": "running"}]
+    assert runs == [{"id": "task-1", "status": "completed"}]
     assert result["status"] == "cancelled"
     assert calls[0]["url"].endswith("/api/issues/MYW-9")
     assert calls[1]["url"].endswith("/api/issues/MYW-9/active-task")
-    assert calls[2]["method"] == "POST"
-    assert calls[2]["url"].endswith("/api/issues/MYW-9/tasks/task-1/cancel")
+    assert calls[2]["url"].endswith("/api/issues/MYW-9/task-runs")
+    assert calls[2]["params"] == {"scope": "issue"}
+    assert calls[3]["method"] == "POST"
+    assert calls[3]["url"].endswith("/api/issues/MYW-9/tasks/task-1/cancel")
 
 
 def test_match_agent_exact_then_unique_substring():
@@ -166,3 +171,75 @@ def test_base_url_rejects_private_targets_in_production(monkeypatch):
     with pytest.raises(MulticaClientError, match="multica 服务地址无效"):
         multica_client.fetch_me("http://127.0.0.1:8080", "t")
     assert calls == []  # SSRF 拒绝发生在发请求之前
+
+
+def test_multica_internal_allowlist_is_independent_of_mcp_trust(monkeypatch):
+    monkeypatch.setattr(settings, "environment", "production")
+    monkeypatch.setattr(settings, "super_assistant_mcp_internal_base_urls", "http://127.0.0.1:8080")
+    monkeypatch.setattr(settings, "super_assistant_multica_internal_base_urls", "")
+    calls = []
+    _patch_request(monkeypatch, _FakeResponse(payload={"id": "me"}), calls)
+    with pytest.raises(MulticaClientError):
+        multica_client.fetch_me("http://127.0.0.1:8080", "synthetic-pat")
+    assert calls == []
+    monkeypatch.setattr(settings, "super_assistant_multica_internal_base_urls", "http://127.0.0.1:8080")
+    assert multica_client.fetch_me("http://127.0.0.1:8080", "synthetic-pat") == {"id": "me"}
+    assert len(calls) == 1
+    assert calls[0]["follow_redirects"] is False
+
+
+@pytest.mark.parametrize("url", [
+    "http://169.254.169.254", "http://169.254.1.2", "http://0.0.0.0", "http://224.0.0.1",
+])
+def test_multica_allowlist_cannot_authorize_metadata_or_special_targets(monkeypatch, url):
+    monkeypatch.setattr(settings, "environment", "production")
+    monkeypatch.setattr(settings, "super_assistant_multica_internal_base_urls", url)
+    calls = []
+    _patch_request(monkeypatch, _FakeResponse(payload={}), calls)
+    with pytest.raises(MulticaClientError):
+        multica_client.fetch_me(url, "synthetic-pat")
+    assert calls == []
+
+
+@pytest.mark.parametrize("suffix", [
+    "/../admin", "/%2e%2e/admin", "/%252e%252e/admin", "/%2fadmin", "/%255cadmin",
+    "?access_token=synthetic-pat", "#synthetic-pat",
+])
+def test_multica_internal_url_rejects_ambiguous_paths_and_embedded_secrets(monkeypatch, suffix):
+    monkeypatch.setattr(settings, "environment", "production")
+    monkeypatch.setattr(settings, "super_assistant_multica_internal_base_urls", "http://127.0.0.1:8080")
+    calls = []
+    _patch_request(monkeypatch, _FakeResponse(payload={}), calls)
+    with pytest.raises(MulticaClientError) as raised:
+        multica_client.fetch_me("http://127.0.0.1:8080" + suffix, "synthetic-pat")
+    assert "synthetic-pat" not in str(raised.value)
+    assert calls == []
+
+
+def test_redirect_refuses_to_forward_pat_or_echo_upstream_body(monkeypatch):
+    calls = []
+    response = _FakeResponse(307, payload={"error": "synthetic-pat https://foreign.example"})
+    response.headers = {"Location": "https://foreign.example/api/me"}
+    _patch_request(monkeypatch, response, calls)
+    with pytest.raises(MulticaClientError) as raised:
+        multica_client.fetch_me("http://127.0.0.1:8080", "synthetic-pat")
+    assert "307" in str(raised.value)
+    assert "synthetic-pat" not in str(raised.value)
+    assert "foreign.example" not in str(raised.value)
+    assert len(calls) == 1 and calls[0]["follow_redirects"] is False
+
+
+@pytest.mark.parametrize("payload", [{"task": {"id": "task-1"}}, {"tasks": [{}]}, {}, []])
+def test_active_task_response_requires_pinned_plural_identity_contract(monkeypatch, payload):
+    _patch_request(monkeypatch, _FakeResponse(payload=payload))
+    with pytest.raises(MulticaClientError, match="任务身份"):
+        multica_client.get_active_task("http://127.0.0.1:8080", "t", "ws", "MYW-9")
+
+
+@pytest.mark.parametrize("payload", [
+    {"tasks": [{"id": "task-1"}]}, [{}], [{"id": "task-1"}, {"id": "task-1"}],
+])
+def test_task_history_rejects_missing_or_duplicate_identity(monkeypatch, payload):
+    _patch_request(monkeypatch, _FakeResponse(payload=payload))
+    with pytest.raises(MulticaClientError, match="任务身份"):
+        multica_client.list_task_runs("http://127.0.0.1:8080", "t", "ws", "MYW-9")

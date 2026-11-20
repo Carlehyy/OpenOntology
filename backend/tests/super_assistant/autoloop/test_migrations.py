@@ -20,6 +20,7 @@ from tests.migrations.latest_head import LATEST_HEAD
 
 BACKEND = Path(__file__).resolve().parents[3]
 REVISION = "0147_autoloop"
+MERGE = "0151_autoloop_merge"
 HEAD = LATEST_HEAD
 PARENT = "0146_integrated_cdc"
 NAMES = {table.name for table in AUTOLOOP_TABLES}
@@ -71,7 +72,7 @@ def test_published_branches_upgrade_to_single_head(migration_db, start_revision)
     engine, cfg = migration_db
     scripts = ScriptDirectory.from_config(cfg)
     assert scripts.get_heads() == [HEAD]
-    merge_revision = scripts.get_revision("0151_autoloop_merge")
+    merge_revision = scripts.get_revision(MERGE)
     assert set(merge_revision.down_revision) == {"0150_operations_dashboards", REVISION}
     assert merge_revision.revision in {
         revision.revision for revision in scripts.iterate_revisions(HEAD, PARENT)

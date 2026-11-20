@@ -30,6 +30,8 @@ from app.super_assistant.models import (
     SuperAssistantMessage,
     SuperAssistantMcpServer,
     SuperAssistantMulticaConfig,
+    SuperAssistantMulticaProfile,
+    SuperAssistantMulticaProfileRevision,
     SuperAssistantReflectionCandidate,
     SuperAssistantReflectionRun,
     SuperAssistantRemoteAgent,
@@ -37,6 +39,7 @@ from app.super_assistant.models import (
     SuperAssistantToolRun,
     SuperAssistantToolSetting,
 )
+from app.super_assistant.schemas import MulticaConfigUpdate
 from app.super_assistant.tools import router as tools_router
 
 _CATALOG_TABLES = [
@@ -44,6 +47,7 @@ _CATALOG_TABLES = [
     RoleMenuPermission.__table__,  # delegation_tools 的菜单权限查询
     SuperAssistantToolSetting.__table__,
     SuperAssistantMulticaConfig.__table__,
+    SuperAssistantMulticaProfile.__table__, SuperAssistantMulticaProfileRevision.__table__,
     SuperAssistantRemoteAgent.__table__,
 ]
 
@@ -53,6 +57,7 @@ _RUNTIME_TABLES = [
     SuperAssistantMcpServer.__table__, SuperAssistantMessage.__table__,
     SuperAssistantToolRun.__table__, SuperAssistantToolSetting.__table__,
     SuperAssistantMemory.__table__, SuperAssistantMulticaConfig.__table__,
+    SuperAssistantMulticaProfile.__table__, SuperAssistantMulticaProfileRevision.__table__,
     SuperAssistantMemoryProfile.__table__, SuperAssistantRemoteAgent.__table__,
     SuperAssistantMemorySource.__table__, SuperAssistantMemorySetting.__table__,
     SuperAssistantReflectionRun.__table__, SuperAssistantReflectionCandidate.__table__,
@@ -86,15 +91,14 @@ def _make_client(tmp_path, *, multica_active: bool = False) -> TestClient:
             id="user-1", username="owner", email="owner@example.com",
             password_hash="unused", role="editor",
         ))
-        if multica_active:
-            db.add(SuperAssistantMulticaConfig(
-                owner_id="user-1",
-                base_url="http://127.0.0.1:8080",
-                workspace_id="ws-1",
-                token_encrypted=multica_service.encrypt("mul-token"),
-                enabled=True,
-            ))
         db.commit()
+        if multica_active:
+            # 服务层已 profile-only：经 save_config 落 custom profile/revision，
+            # 返回已提交的生效投影（直接插旧表行不再构成可用门控）
+            multica_service.save_config(db, "user-1", MulticaConfigUpdate(
+                base_url="http://127.0.0.1:8080", token="mul-token",
+                workspace_id="ws-1", enabled=True,
+            ))
     return TestClient(app)
 
 
@@ -235,15 +239,14 @@ def _prepare_runtime(tmp_path, monkeypatch, *, message: str, disabled_tools: lis
             db.add(SuperAssistantToolSetting(
                 owner_id="user-1", disabled_tools=disabled_tools,
             ))
-        if configured:
-            db.add(SuperAssistantMulticaConfig(
-                owner_id="user-1",
-                base_url="http://127.0.0.1:8080",
-                workspace_id="ws-1",
-                token_encrypted=multica_service.encrypt("mul-token"),
-                enabled=True,
-            ))
         db.commit()
+        if configured:
+            # 服务层已 profile-only：经 save_config 落 custom profile/revision，
+            # 返回已提交的生效投影（直接插旧表行不再构成可用门控）
+            multica_service.save_config(db, "user-1", MulticaConfigUpdate(
+                base_url="http://127.0.0.1:8080", token="mul-token",
+                workspace_id="ws-1", enabled=True,
+            ))
 
     def _fake(_call_kwargs, _messages, tools, on_delta=None):
         if seen is not None:
@@ -453,6 +456,7 @@ def test_set_tool_enabled_retries_on_first_write_conflict(tmp_path):
     Base.metadata.create_all(bind=engine, tables=[
         User.__table__, RoleMenuPermission.__table__,
         SuperAssistantToolSetting.__table__, SuperAssistantMulticaConfig.__table__,
+        SuperAssistantMulticaProfile.__table__, SuperAssistantMulticaProfileRevision.__table__,
         SuperAssistantRemoteAgent.__table__,
     ])
     TestingSession = sessionmaker(bind=engine, autocommit=False, autoflush=False)

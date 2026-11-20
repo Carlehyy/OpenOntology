@@ -11,7 +11,11 @@ from app.deps import get_current_user, get_db
 from app.shared.database import Base
 from app.super_assistant import multica as multica_router
 from app.super_assistant import multica_client
-from app.super_assistant.models import SuperAssistantMulticaConfig
+from app.super_assistant.models import (
+    SuperAssistantMulticaConfig,
+    SuperAssistantMulticaProfile,
+    SuperAssistantMulticaProfileRevision,
+)
 
 
 def _client(tmp_path):
@@ -21,6 +25,7 @@ def _client(tmp_path):
     )
     Base.metadata.create_all(bind=engine, tables=[
         User.__table__, SuperAssistantMulticaConfig.__table__,
+        SuperAssistantMulticaProfile.__table__, SuperAssistantMulticaProfileRevision.__table__,
     ])
     TestingSession = sessionmaker(bind=engine, autocommit=False, autoflush=False)
     with TestingSession() as db:

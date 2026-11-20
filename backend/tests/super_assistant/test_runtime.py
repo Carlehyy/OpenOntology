@@ -18,6 +18,8 @@ from app.super_assistant.models import (
     SuperAssistantMemoryProfile,
     SuperAssistantMessage,
     SuperAssistantMulticaConfig,
+    SuperAssistantMulticaProfile,
+    SuperAssistantMulticaProfileRevision,
     SuperAssistantReflectionCandidate,
     SuperAssistantReflectionRun,
     SuperAssistantSkill,
@@ -40,6 +42,7 @@ _RUNTIME_TABLES = [
     SuperAssistantMcpServer.__table__, SuperAssistantMessage.__table__,
     SuperAssistantToolRun.__table__, SuperAssistantToolSetting.__table__, SuperAssistantMemory.__table__,
     SuperAssistantMulticaConfig.__table__,
+    SuperAssistantMulticaProfile.__table__, SuperAssistantMulticaProfileRevision.__table__,
     SuperAssistantMemoryProfile.__table__, SuperAssistantReflectionRun.__table__,
     SuperAssistantReflectionCandidate.__table__,
     CapabilityRevision.__table__,  # 审批后 MCP 实时复核读授权位

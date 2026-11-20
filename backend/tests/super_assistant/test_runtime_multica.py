@@ -19,12 +19,15 @@ from app.super_assistant.models import (
     SuperAssistantMemorySource,
     SuperAssistantMessage,
     SuperAssistantMulticaConfig,
+    SuperAssistantMulticaProfile,
+    SuperAssistantMulticaProfileRevision,
     SuperAssistantReflectionCandidate,
     SuperAssistantReflectionRun,
     SuperAssistantSkill,
     SuperAssistantToolRun,
     SuperAssistantToolSetting,
 )
+from app.super_assistant.schemas import MulticaConfigUpdate
 
 _RUNTIME_TABLES = [
     User.__table__, ModelConfig.__table__,
@@ -35,6 +38,7 @@ _RUNTIME_TABLES = [
     SuperAssistantMemoryProfile.__table__,
     SuperAssistantMemorySetting.__table__, SuperAssistantMemorySource.__table__, SuperAssistantReflectionRun.__table__,
     SuperAssistantReflectionCandidate.__table__, SuperAssistantMulticaConfig.__table__,
+    SuperAssistantMulticaProfile.__table__, SuperAssistantMulticaProfileRevision.__table__,
 ]
 
 
@@ -84,15 +88,14 @@ def _prepare(tmp_path, monkeypatch, *, message: str, configured: bool, responses
             id="assistant-message-1", conversation_id="conversation-1",
             role="assistant", content="", status="streaming",
         ))
-        if configured:
-            db.add(SuperAssistantMulticaConfig(
-                owner_id="user-1",
-                base_url="http://127.0.0.1:8080",
-                workspace_id="ws-1",
-                token_encrypted=multica_service.encrypt("mul-token"),
-                enabled=True,
-            ))
         db.commit()
+        if configured:
+            # 服务层已 profile-only：经 save_config 落 custom profile/revision，
+            # 返回已提交的生效投影（直接插旧表行不再构成可用门控）
+            multica_service.save_config(db, "user-1", MulticaConfigUpdate(
+                base_url="http://127.0.0.1:8080", token="mul-token",
+                workspace_id="ws-1", enabled=True,
+            ))
 
     monkeypatch.setattr(runtime.provider, "chat_stream", _fake_chat_stream(responses, seen))
     return TestingSession
@@ -173,6 +176,30 @@ def test_read_command_without_tail_executes_directly(tmp_path, monkeypatch):
         assert tool_run.tool_name == "multica_list_agents"
         assert tool_run.status == "success"
         assert tool_run.requires_confirmation is False
+
+
+def test_first_chat_materializes_and_commits_default_before_multica_call(tmp_path, monkeypatch):
+    sessions = _prepare(tmp_path, monkeypatch, message="/multica:list_agents", configured=False,
+        responses=iter([{"content": "当前没有智能体。", "tool_calls": [], "usage": {}}]))
+    deployment = {
+        "base_url": "http://127.0.0.1:9090", "web_url": "http://127.0.0.1:9091",
+        "workspace_id": "default-workspace", "workspace_name": "Default", "token": "synthetic-pat",
+    }
+    monkeypatch.setattr(multica_service, "_platform_default_settings", lambda: deployment)
+    seen = []
+
+    def list_agents(base_url, token, workspace_id):
+        with sessions() as db:
+            config = multica_service.active_config(db, "user-1")
+            assert config is not None and config.source_kind == "platform_default"
+            assert config.profile_revision_id
+        seen.append((base_url, token, workspace_id))
+        return []
+
+    monkeypatch.setattr(multica_client, "list_agents", list_agents)
+    events = "".join(_stream())
+    assert seen == [(deployment["base_url"], deployment["token"], deployment["workspace_id"])]
+    assert '"status": "success"' in events
 
 
 def test_read_command_with_tail_routes_through_forced_llm_round(tmp_path, monkeypatch):
