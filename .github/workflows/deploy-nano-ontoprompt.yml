@@ -653,11 +653,10 @@ jobs:
       && (needs.changes.outputs.run_docker != 'true'
           || needs.verify-docker-build.result == 'success')
     runs-on: ubuntu-latest
-    # 服务器侧 docker compose build 在低配盘上「exporting to image」极慢：
-    # run 38102815363 在 apt 修复后约 5 分钟完成构建，随后四镜像并行导出
-    # 超过 20 分钟仍未完成，撞上步骤 25 分钟超时。把 job/步骤预算抬到
-    # 与 verify-backend 同级，给导出留足墙钟。
-    timeout-minutes: 55
+    # 服务器低配盘的冷构建实测约 28 分钟，服务初始化、迁移与重启另需约
+    # 15 分钟；run 44684037622 在 Multica 首次启动时撞上 SSH 45 分钟上限。
+    # SSH 预算为 60 分钟，job 另留 15 分钟供归档上传、校验和清理使用。
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
 
@@ -828,7 +827,7 @@ jobs:
           REMOTE_SOURCE_SWAP
 
       - name: Deploy over SSH
-        timeout-minutes: 45
+        timeout-minutes: 60
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER || 'root' }}
