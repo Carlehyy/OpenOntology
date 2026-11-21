@@ -1,30 +1,33 @@
-import { useEffect, useEffectEvent, useId, useRef, useState, type ReactNode } from 'react'
-import { ArrowLeft, ArrowDown, ArrowUp, Plus, RefreshCw, Route, Trash2 } from 'lucide-react'
+import { useEffect, useEffectEvent, useId, useRef, useState } from 'react'
+import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { BarChart3, Brain, Route, ScrollText } from 'lucide-react'
 import { toast } from 'sonner'
-import { autoloopApi, type AutoLoopPreview, type AutoLoopRule, type AutoLoopRuleCreate } from '@/api/autoloop'
+import { autoloopApi, type AutoLoopPreview, type AutoLoopRoutingStats, type AutoLoopRule, type AutoLoopRuleCreate } from '@/api/autoloop'
 import { Alert } from '@/components/ui/Alert'
-import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
-import { Input } from '@/components/ui/Input'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { DialogShell } from './AssistantConfiguration'
 import { errorText } from './assistantPanelUtils'
-import { newRule, parseRuleDraft, PRIORITY_LABEL } from './autoloopLogic'
-import { parsePreviewSample, validateRuleForm, type RuleFormErrors, type RuleFormField } from './ruleRoutingForm'
-import { textAreaClass, UntrustedOriginal } from './AutoLoopDetails'
-import AutoLoopEventHistory from './AutoLoopEventHistory'
+import { newRule, parseRuleDraft } from './autoloopLogic'
+import { DEFAULT_SAMPLE, draftFromTrace, parsePreviewSample, sampleFromTrace, validateRuleFormRows, type RuleFieldEqualsRow, type RuleFormErrors, type RuleFormField } from './ruleRoutingForm'
+import { textAreaClass } from './AutoLoopDetails'
+import AutoLoopEventHistory, { type TraceDrilldown } from './AutoLoopEventHistory'
+import AutoLoopAssistantRouting from './AutoLoopAssistantRouting'
+// 组件默认导入与 api 层的 AutoLoopRoutingStats 数据类型重名，视图组件取 Panel 后缀。
+import AutoLoopRoutingStatsPanel from './AutoLoopRoutingStats'
+import RuleRoutingEditor from './RuleRoutingEditor'
+import RulesList from './RulesList'
 
-function Field({ label, htmlFor, children }: { label: string; htmlFor: string; children: ReactNode }) {
-  return <div className="min-w-0 space-y-1.5 text-xs font-medium"><label htmlFor={htmlFor}>{label}</label>{children}</div>
-}
-const matchFields = [['ingestKeyId', '来源 Key 标识（已验证）'], ['sourceSystem', '来源系统（弱过滤）'], ['channel', '渠道'], ['titleContains', '标题包含'], ['bodyContains', '正文包含']] as const
-const matchLabels: Record<string, string> = { sourceKind: '来源类型', ...Object.fromEntries(matchFields), fieldEquals: '字段等值' }
-function matchSummary(match: AutoLoopRuleCreate['match']) {
-  return Object.entries(match).filter(([, value]) => value && (!Array.isArray(value) || value.length))
-    .map(([key, value]) => `${matchLabels[key] ?? key}：${Array.isArray(value) ? value.map(item => `${item.field} = ${item.value}`).join('、') : value}`).join(' · ') || '全部路由事件（前序启用规则优先命中）'
-}
-const previewBoundary = '仅渲染模板与关联提取，不校验匹配条件与规则顺序，也不校验 Issue 权限，不创建任务。'
+type Tab = 'events' | 'rules' | 'assistant' | 'stats'
+
+/** 消息通知式左栏分区：事件流水（默认）→ 规则模板 → 助手路由 → 事件统计。 */
+const NAV_ITEMS: { key: Tab; label: string; icon: typeof Route }[] = [
+  { key: 'events', label: '事件流水', icon: ScrollText },
+  { key: 'rules', label: '规则模板', icon: Route },
+  { key: 'assistant', label: '助手路由', icon: Brain },
+  { key: 'stats', label: '事件统计', icon: BarChart3 },
+]
+const TAB_KEYS = NAV_ITEMS.map(item => item.key)
 
 export default function RuleRoutingDialog({ initialDraft, initialEventId, scheduledTaskId, scheduledRunId, onClose, onOpenDecision }: {
   initialDraft?: AutoLoopRuleCreate | null
@@ -35,7 +38,9 @@ export default function RuleRoutingDialog({ initialDraft, initialEventId, schedu
   onOpenDecision: (id: string) => void
 }) {
   const id = useId()
-  const [tab, setTab] = useState<'rules' | 'events'>(initialEventId || scheduledTaskId || scheduledRunId ? 'events' : 'rules')
+  // 默认事件流水；聊天草稿直进规则编辑；已有事件/日程深链优先于草稿。
+  const deepLinked = !!(initialEventId || scheduledTaskId || scheduledRunId)
+  const [tab, setTab] = useState<Tab>(initialDraft && !deepLinked ? 'rules' : 'events')
   const [rules, setRules] = useState<AutoLoopRule[]>([])
   const [loading, setLoading] = useState(true)
   const [listLoadError, setListLoadError] = useState('')
@@ -47,9 +52,11 @@ export default function RuleRoutingDialog({ initialDraft, initialEventId, schedu
   const [editing, setEditing] = useState<AutoLoopRule | 'new' | null>(initialDraft ? 'new' : null)
   const [form, setForm] = useState<AutoLoopRuleCreate>(initialDraft ?? newRule())
   const [position, setPosition] = useState(String(initialDraft?.position ?? 0))
+  const [fieldEquals, setFieldEquals] = useState<RuleFieldEqualsRow[]>(initialDraft?.match.fieldEquals ?? [])
   const [baseline, setBaseline] = useState('')
-  const [fieldEquals, setFieldEquals] = useState(JSON.stringify(initialDraft?.match.fieldEquals ?? [], null, 2))
-  const [sample, setSample] = useState('{"title":"示例标题","body":"示例正文"}')
+  const [sample, setSample] = useState(DEFAULT_SAMPLE)
+  const [sampleFromEvent, setSampleFromEvent] = useState(false)
+  const [sampleOpen, setSampleOpen] = useState(false)
   const [draftText, setDraftText] = useState('')
   const [showImport, setShowImport] = useState(false)
   const [preview, setPreview] = useState<AutoLoopPreview | null>(null)
@@ -58,20 +65,29 @@ export default function RuleRoutingDialog({ initialDraft, initialEventId, schedu
   const [sorting, setSorting] = useState(false)
   const [mutating, setMutating] = useState(false)
   const [deleting, setDeleting] = useState<AutoLoopRule | null>(null)
-  const [exit, setExit] = useState<{ run: () => void } | null>(null)
+  const [exit, setExit] = useState<{ run: () => void; destination?: Tab } | null>(null)
+  // 流水列表与助手研判共用选中事件，切换分区时保留流水筛选和分页。
+  const [selectedEventId, setSelectedEventId] = useState<string | null>(initialEventId ?? null)
+  const [drilldown, setDrilldown] = useState<TraceDrilldown | null>(null)
+  // 统计由本弹窗统一持有：规则列表与事件统计共用同一份窗口摘要，失败不当作 0。
+  const [days, setDays] = useState<7 | 30>(7)
+  const [summary, setSummary] = useState<AutoLoopRoutingStats | null>(null)
+  const [statisticsLoading, setStatisticsLoading] = useState(true)
+  const [statisticsError, setStatisticsError] = useState('')
   const request = useRef(0)
   const previewRequest = useRef(0)
+  const statsRequest = useRef(0)
   const previousDraft = useRef(initialDraft)
   const editorRef = useRef<HTMLDivElement>(null)
   const previewHeading = useRef<HTMLHeadingElement>(null)
-  const rulesTab = useRef<HTMLButtonElement>(null)
-  const eventsTab = useRef<HTMLButtonElement>(null)
+  const navRefs = useRef<(HTMLButtonElement | null)[]>([])
+  const confirmedDestination = useRef<Tab | undefined>(undefined)
   const snapshot = JSON.stringify({ form, fieldEquals, position })
   const currentDraft = useRef(snapshot)
   useEffect(() => { currentDraft.current = snapshot }, [snapshot])
   const dirty = !!editing && baseline !== snapshot
   const busy = saving || previewing || sorting || mutating
-  const emptyMatch = !Object.entries(form.match).some(([key, value]) => key !== 'fieldEquals' && !!value) && /^\s*\[\s*\]\s*$/.test(fieldEquals)
+  const statsReady = !!summary && !statisticsError
 
   async function load() {
     const generation = ++request.current
@@ -84,12 +100,37 @@ export default function RuleRoutingDialog({ initialDraft, initialEventId, schedu
     finally { if (generation === request.current) setLoading(false) }
   }
   useEffect(() => { void load(); return () => { request.current++; previewRequest.current++ } }, [])
+
+  async function loadStatistics() {
+    const generation = ++statsRequest.current
+    setStatisticsLoading(true); setStatisticsError('')
+    try {
+      const result = await autoloopApi.routingStats(days)
+      if (generation === statsRequest.current) setSummary(result)
+    } catch (err) {
+      // 失败清空摘要：列表与统计区呈现错误/未知，而不是把失败渲染成 0。
+      if (generation === statsRequest.current) { setSummary(null); setStatisticsError(errorText(err, '统计加载失败')) }
+    } finally { if (generation === statsRequest.current) setStatisticsLoading(false) }
+  }
+  useEffect(() => { void loadStatistics(); return () => { statsRequest.current++ } }, [days])
+
   useEffect(() => {
     if (preview) { previewHeading.current?.scrollIntoView({ block: 'start' }); previewHeading.current?.focus({ preventScroll: true }) }
   }, [preview])
-  const openLinkedEvent = useEffectEvent(() => { guarded(() => setTab('events')) })
-  useEffect(() => { if (initialEventId || scheduledTaskId || scheduledRunId) openLinkedEvent() }, [initialEventId, scheduledTaskId, scheduledRunId])
-  const fillIncomingDraft = useEffectEvent((draft: AutoLoopRuleCreate) => { guarded(() => { start(undefined, draft); setTab('rules') }) })
+
+  const syncLinkedEvent = useEffectEvent(() => {
+    // 已在事件流水（含首次打开的深链）时不再打扰；仅在其它分区时带守卫跳回。
+    if (tab === 'events') return
+    guarded(() => { setTab('events') }, 'events')
+  })
+  useEffect(() => {
+    if (initialEventId) setSelectedEventId(initialEventId)
+    // 仅在存在事件/日程深链时才跳转；挂载时（如聊天草稿直进规则编辑）不得打扰。
+    if (!initialEventId && !scheduledTaskId && !scheduledRunId) return
+    syncLinkedEvent()
+  }, [initialEventId, scheduledTaskId, scheduledRunId])
+
+  const fillIncomingDraft = useEffectEvent((draft: AutoLoopRuleCreate) => { guarded(() => { start(undefined, draft); setTab('rules') }, 'rules') })
   useEffect(() => {
     if (initialDraft && initialDraft !== previousDraft.current) fillIncomingDraft(initialDraft)
     previousDraft.current = initialDraft
@@ -97,20 +138,64 @@ export default function RuleRoutingDialog({ initialDraft, initialEventId, schedu
 
   function clearFormFeedback() { setSaveError(''); setPreviewError(''); setFieldErrors({}); setPreview(null); previewRequest.current++ }
   function discard() {
-    setEditing(null); setBaseline(''); setShowImport(false); setDraftText(''); setImportError(''); clearFormFeedback()
+    setEditing(null); setBaseline(''); setShowImport(false); setDraftText(''); setImportError('')
+    setSampleFromEvent(false); setSampleOpen(false)
+    clearFormFeedback()
   }
-  function guarded(action: () => void) {
+  function focusTab(key: Tab) {
+    requestAnimationFrame(() => navRefs.current[TAB_KEYS.indexOf(key)]?.focus())
+  }
+  function guarded(action: () => void, destination?: Tab) {
     if (busy) return
-    if (dirty || (showImport && draftText.trim())) setExit({ run: () => { discard(); action() } })
-    else action()
+    if (dirty || (showImport && draftText.trim())) {
+      setExit({ run: () => { discard(); action() }, destination })
+      return
+    }
+    action()
+    if (destination) focusTab(destination)
   }
-  function selectTab(key: 'rules' | 'events') {
+  function confirmExit() {
+    if (!exit) return
+    confirmedDestination.current = exit.destination
+    setExit(null)
+    exit.run()
+  }
+  function restoreExitFocus(event: Event) {
+    const destination = confirmedDestination.current
+    confirmedDestination.current = undefined
+    if (!destination) return
+    // 确认层开始恢复焦点后再聚焦目标标签，避免被尚未释放的焦点陷阱拦截。
+    event.preventDefault()
+    focusTab(destination)
+  }
+  function selectTab(key: Tab) {
     if (key === tab) return
+    guarded(() => { discard(); setTab(key) }, key)
+  }
+  function showEvents(next: TraceDrilldown) {
     guarded(() => {
-      discard(); setTab(key)
-      // 等确认弹窗卸载并完成焦点恢复后，再聚焦目标 Tab。
-      requestAnimationFrame(() => (key === 'rules' ? rulesTab : eventsTab).current?.focus())
-    })
+      setSelectedEventId(null)
+      setDrilldown({ ...next })
+      setTab('events')
+    }, 'events')
+  }
+  function openEvent(eventId: string) {
+    guarded(() => { setSelectedEventId(eventId); setDrilldown(null); setTab('events') }, 'events')
+  }
+  function createFromTrace(trace?: {
+    title?: string | null
+    source?: { kind?: string | null; system?: string | null; ref?: string | null } | null
+    untrustedOriginal?: unknown
+  }) {
+    guarded(() => {
+      const next = Math.max(-1, ...rules.map(item => item.position)) + 1
+      if (trace) {
+        // 事件预填：白名单字段进条件、原始载荷进样例；默认停用、不自动保存。
+        start(undefined, draftFromTrace(trace, next))
+        setSample(sampleFromTrace(trace)); setSampleFromEvent(true); setSampleOpen(true)
+      } else start()
+      setTab('rules')
+    }, 'rules')
   }
   function start(rule?: AutoLoopRule, imported?: AutoLoopRuleCreate) {
     const value = imported ?? (rule ? {
@@ -118,21 +203,26 @@ export default function RuleRoutingDialog({ initialDraft, initialEventId, schedu
       titleTemplate: rule.titleTemplate, descriptionTemplate: rule.descriptionTemplate,
       priority: rule.priority, assignee: rule.assignee, binding: rule.binding,
     } : newRule(Math.max(-1, ...rules.map(item => item.position)) + 1))
-    const fields = JSON.stringify(value.match.fieldEquals ?? [], null, 2)
-    setForm(value); setPosition(String(value.position)); setFieldEquals(fields)
-    setBaseline(imported ? '' : JSON.stringify({ form: value, fieldEquals: fields, position: String(value.position) }))
-    setEditing(rule ?? 'new'); setShowImport(false); setDraftText(''); setImportError(''); clearFormFeedback()
+    const rows = value.match.fieldEquals ?? []
+    setForm(value); setPosition(String(value.position)); setFieldEquals(rows)
+    setBaseline(imported ? '' : JSON.stringify({ form: value, fieldEquals: rows, position: String(value.position) }))
+    setEditing(rule ?? 'new'); setShowImport(false); setDraftText(''); setImportError('')
+    setSampleFromEvent(false); setSampleOpen(false)
+    clearFormFeedback()
   }
   function invalidatePreview() { setPreview(null); setPreviewError(''); previewRequest.current++ }
   function clearField(field?: RuleFormField) { if (field) setFieldErrors(previous => ({ ...previous, [field]: undefined })) }
   function change(next: AutoLoopRuleCreate, field?: RuleFormField) { setForm(next); invalidatePreview(); clearField(field) }
+  function changeFieldEquals(rows: RuleFieldEqualsRow[]) { setFieldEquals(rows); invalidatePreview(); clearField('fieldEquals') }
+  function changePosition(value: string) { setPosition(value); change({ ...form, position: Number(value) }, 'position') }
+  function changeSample(text: string) { setSample(text); setSampleFromEvent(false); invalidatePreview(); clearField('sample') }
   function focusInvalid(errors: RuleFormErrors) {
     setFieldErrors(errors)
     // 等待内联错误挂载后，按 DOM 顺序聚焦并滚动到首个错误字段。
     requestAnimationFrame(() => editorRef.current?.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus())
   }
   function validated() {
-    const result = validateRuleForm(form, fieldEquals, position, !!editing && editing !== 'new')
+    const result = validateRuleFormRows(form, fieldEquals, position, !!editing && editing !== 'new')
     if (!result.value) focusInvalid(result.errors)
     else setFieldErrors({})
     return result.value
@@ -195,106 +285,134 @@ export default function RuleRoutingDialog({ initialDraft, initialEventId, schedu
     } catch (err) { setListActionError(`部分顺序已更新，请检查后重试：${errorText(err, '排序未全部保存')}`) }
     finally { await load(); setSorting(false) }
   }
-  function textareaProps(field: RuleFormField) { return { id: `${id}-${field}`, 'aria-invalid': !!fieldErrors[field], 'aria-describedby': fieldErrors[field] ? `${id}-${field}-error` : undefined } }
-  function fieldError(field: RuleFormField) { return fieldErrors[field] && <p id={`${id}-${field}-error`} aria-live="polite" className="text-xs text-[var(--color-danger)]">{fieldErrors[field]}</p> }
+  function handleNavKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>, index: number) {
+    let next: Tab | null = null
+    if (event.key === 'ArrowDown' || event.key === 'ArrowRight') next = TAB_KEYS[(index + 1) % TAB_KEYS.length]
+    else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') next = TAB_KEYS[(index - 1 + TAB_KEYS.length) % TAB_KEYS.length]
+    else if (event.key === 'Home') next = TAB_KEYS[0]
+    else if (event.key === 'End') next = TAB_KEYS[TAB_KEYS.length - 1]
+    if (!next) return
+    event.preventDefault()
+    selectTab(next)
+  }
+
+  // 命中数：统计成功后缺失条目按 0 计（真 0）；统计失败/未就绪返回 null 显示「—」。
+  function hitFor(ruleId: string): number | null {
+    if (!statsReady || !summary) return null
+    return summary.rules.find(item => item.ruleId === ruleId)?.hits ?? 0
+  }
+  const hitsLabel = statsReady && summary ? `近 ${summary.days} 天命中` : null
+  const hitsRange = summary ? `${summary.since} ~ ${summary.until}` : undefined
 
   return <>
     <DialogShell title="规则路由" description="我的规则：处理发送给当前用户的后续事件。按匹配顺序首条命中，未命中交由助手研判。" size="xwide" icon={<Route size={18} />} onClose={() => guarded(onClose)} onInteractOutside={event => event.preventDefault()} contentClassName="h-[88dvh]">
-      <div className="flex shrink-0 gap-1 border-b border-border px-4 py-2" role="tablist" aria-label="规则路由分区">
-        {(['rules', 'events'] as const).map(key => <Button key={key} ref={key === 'rules' ? rulesTab : eventsTab} id={`${id}-${key}-tab`} role="tab" aria-selected={tab === key} aria-controls={`${id}-${key}-panel`} tabIndex={tab === key ? 0 : -1} variant={tab === key ? 'default' : 'ghost'} size="sm" onClick={() => selectTab(key)} onKeyDown={event => {
-          if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
-          event.preventDefault()
-          selectTab(event.key === 'Home' ? 'rules' : event.key === 'End' ? 'events' : key === 'rules' ? 'events' : 'rules')
-        }}>{key === 'rules' ? '规则与模板' : '事件流水'}</Button>)}
-      </div>
-      <div id={`${id}-events-panel`} role="tabpanel" aria-labelledby={`${id}-events-tab`} hidden={tab !== 'events'} className={tab === 'events' ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
-        {tab === 'events' && <AutoLoopEventHistory initialEventId={initialEventId} scheduledTaskId={scheduledTaskId} scheduledRunId={scheduledRunId} rules={rules} onOpenDecision={onOpenDecision} />}
-      </div>
-      <div id={`${id}-rules-panel`} role="tabpanel" aria-labelledby={`${id}-rules-tab`} hidden={tab !== 'rules'} className={tab === 'rules' ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
-        <div ref={editorRef} className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-5">
-          {!editing && !showImport && <>
-            <div className="mb-4 flex flex-wrap items-center gap-2">
-              <Button size="sm" disabled={busy} onClick={() => start()}><Plus size={14} />新建规则</Button>
-              <Button size="sm" variant="outline" disabled={busy} onClick={() => { setShowImport(true); setImportError('') }}>导入助手草稿</Button>
-              <Button size="sm" variant="ghost" onClick={() => { setListActionError(''); void load() }} disabled={busy || loading}><RefreshCw size={14} />刷新</Button>
-            </div>
-            {listLoadError && <Alert variant="danger" role="alert" className="mb-3">{listLoadError}</Alert>}
-            {listActionError && <Alert variant="danger" role="alert" className="mb-3">{listActionError}</Alert>}
-            {sorting && <p role="status" className="mb-3 text-sm text-muted-foreground">正在保存规则顺序…</p>}
-            {loading ? <p role="status" className="text-sm text-muted-foreground">加载规则…</p> : rules.length === 0 ? <p className="py-12 text-center text-sm text-muted-foreground">尚无规则。未命中事件交由助手研判。</p> :
-              <div className="space-y-3">{rules.map((rule, index) => <article key={rule.id} className="rounded-xl border border-border p-4">
-                <div className="flex flex-wrap items-center gap-2"><span className="text-xs text-muted-foreground">第 {index + 1} 条</span><h3 className="min-w-0 break-words text-sm font-medium">{rule.name}</h3><Badge variant={rule.enabled ? 'success' : 'secondary'}>{rule.enabled ? '已启用' : '已停用'}</Badge><span className="text-xs text-muted-foreground">顺序 {rule.position} · v{rule.version}</span></div>
-                <p className="mt-2 break-words text-xs text-muted-foreground">{matchSummary(rule.match)}</p>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <Button size="sm" variant="outline" disabled={busy} onClick={() => start(rule)}>编辑 {rule.name}</Button>
-                  <Button size="sm" variant="ghost" disabled={busy} onClick={() => void mutate(rule, { enabled: !rule.enabled })}>{rule.enabled ? '停用' : '启用'}</Button>
-                  <Button size="icon-sm" variant="ghost" aria-label={`上移 ${rule.name}`} disabled={busy || index === 0} onClick={() => void move(index, -1)}><ArrowUp size={14} /></Button>
-                  <Button size="icon-sm" variant="ghost" aria-label={`下移 ${rule.name}`} disabled={busy || index === rules.length - 1} onClick={() => void move(index, 1)}><ArrowDown size={14} /></Button>
-                  <Button size="icon-sm" variant="ghost" aria-label={`删除 ${rule.name}`} disabled={busy} onClick={() => setDeleting(rule)}><Trash2 size={14} /></Button>
-                </div>
-              </article>)}</div>}
-          </>}
-          {showImport && <div className="space-y-4">
-            <Alert>粘贴助手在会话中给出的规则 JSON。导入仅填入表单，审阅后点击“确认创建规则”才会生效。</Alert>
-            <Field label="助手规则草稿 JSON" htmlFor={`${id}-import`}><textarea id={`${id}-import`} aria-invalid={!!importError} aria-describedby={importError ? `${id}-import-error` : undefined} value={draftText} onChange={event => { setDraftText(event.target.value); setImportError('') }} className={textAreaClass} rows={10} /></Field>
-            {importError && <Alert id={`${id}-import-error`} variant="danger" role="alert">{importError}</Alert>}
-            <div className="flex flex-wrap gap-2"><Button onClick={() => { try { start(undefined, parseRuleDraft(draftText)) } catch (err) { setImportError(errorText(err, '草稿校验失败')); document.getElementById(`${id}-import`)?.focus() } }}>导入并审阅</Button><Button variant="ghost" onClick={() => guarded(discard)}>取消</Button></div>
-          </div>}
-          {editing && <div className="space-y-6">
-            <div className="flex flex-wrap items-center gap-2"><Button size="sm" variant="ghost" onClick={() => guarded(discard)}><ArrowLeft size={14} />返回规则列表</Button>{dirty && <Badge variant="secondary">未保存草稿</Badge>}</div>
-            <section aria-labelledby={`${id}-basic`} className="space-y-3">
-              <h3 id={`${id}-basic`} className="text-sm font-semibold">基本设置</h3>
-              <Input label="规则名称" value={form.name} error={fieldErrors.name} aria-invalid={!!fieldErrors.name} onChange={event => change({ ...form, name: event.target.value }, 'name')} />
-              <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.enabled} onChange={event => change({ ...form, enabled: event.target.checked })} />保存后启用</label>
-              {form.enabled && emptyMatch && <Alert variant="warning">空条件会匹配当前用户的全部路由事件；前序启用规则优先命中。</Alert>}
-            </section>
-            <section aria-labelledby={`${id}-match`} className="space-y-3">
-              <h3 id={`${id}-match`} className="text-sm font-semibold">事件匹配</h3>
-              <p className="text-xs leading-5 text-muted-foreground">已填写条件须同时满足。匹配顺序的小值优先，仅启用规则参与匹配。</p>
-              <div className="grid gap-4 sm:grid-cols-2">
-                <Input label="匹配顺序" type="number" min="0" step="1" value={position} error={fieldErrors.position} aria-invalid={!!fieldErrors.position} onChange={event => { setPosition(event.target.value); change({ ...form, position: Number(event.target.value) }, 'position') }} />
-                <div className="space-y-1.5"><span className="text-xs font-medium">来源类型</span><Select value={form.match.sourceKind || 'all'} onValueChange={value => change({ ...form, match: { ...form.match, sourceKind: value === 'all' ? undefined : value } }, 'sourceKind')}><SelectTrigger aria-label="规则来源类型" {...textareaProps('sourceKind')}><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部来源</SelectItem><SelectItem value="notification">外部通知 (notification)</SelectItem><SelectItem value="schedule">日程 (schedule)</SelectItem>{form.match.sourceKind && !['notification', 'schedule'].includes(form.match.sourceKind) && <SelectItem value={form.match.sourceKind}>{form.match.sourceKind}（历史值）</SelectItem>}</SelectContent></Select>{fieldError('sourceKind')}</div>
-                {matchFields.map(([key, label]) => <Input key={key} label={label} value={form.match[key] ?? ''} error={fieldErrors[key]} aria-invalid={!!fieldErrors[key]} onChange={event => change({ ...form, match: { ...form.match, [key]: event.target.value || undefined } }, key)} />)}
-              </div>
-              <p className="text-xs leading-5 text-muted-foreground">来源 Key 来自已验证的接入身份；来源系统只是事件内容的弱过滤，不代表可信身份。包含条件区分大小写。</p>
-              <Field label="字段等值 JSON" htmlFor={`${id}-fieldEquals`}><textarea {...textareaProps('fieldEquals')} className={textAreaClass} rows={3} value={fieldEquals} onChange={event => { setFieldEquals(event.target.value); invalidatePreview(); clearField('fieldEquals') }} />{fieldError('fieldEquals')}</Field>
-              <p className="text-xs text-muted-foreground">例如 [{'{"field":"severity","value":"high"}'}]；field 可用点路径，value 必须是字符串。</p>
-            </section>
-            <section aria-labelledby={`${id}-task`} className="space-y-3">
-              <h3 id={`${id}-task`} className="text-sm font-semibold">任务内容与关联</h3>
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div className="space-y-1.5"><span className="text-xs font-medium">任务优先级</span><Select value={form.priority || 'default'} onValueChange={value => change({ ...form, priority: value === 'default' ? null : value as 'low' | 'medium' | 'high' })}><SelectTrigger aria-label="任务优先级"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="default">默认</SelectItem>{Object.entries(PRIORITY_LABEL).map(([key, value]) => <SelectItem key={key} value={key}>{value}</SelectItem>)}</SelectContent></Select></div>
-                <Input label="指派对象" value={form.assignee ?? ''} error={fieldErrors.assignee} aria-invalid={!!fieldErrors.assignee} onChange={event => change({ ...form, assignee: event.target.value }, 'assignee')} />
-              </div>
-              <p className="text-xs text-muted-foreground">任务优先级决定命中后新建任务的优先级，不影响规则匹配顺序。指派对象留空表示不指定。</p>
-              <Field label="标题模板" htmlFor={`${id}-titleTemplate`}><textarea {...textareaProps('titleTemplate')} className={textAreaClass} rows={2} value={form.titleTemplate} onChange={event => change({ ...form, titleTemplate: event.target.value }, 'titleTemplate')} />{fieldError('titleTemplate')}</Field>
-              <Field label="描述模板" htmlFor={`${id}-descriptionTemplate`}><textarea {...textareaProps('descriptionTemplate')} className={textAreaClass} rows={3} value={form.descriptionTemplate} onChange={event => change({ ...form, descriptionTemplate: event.target.value }, 'descriptionTemplate')} />{fieldError('descriptionTemplate')}</Field>
-              <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={!!form.binding} onChange={event => change({ ...form, binding: event.target.checked ? { mode: 'extract' } : null })} />显式关联提取</label>
-              {form.binding && <div className="space-y-3 rounded-lg border border-border p-3"><div className="grid gap-4 sm:grid-cols-2"><Input label="关联提取模式（可选）" value={form.binding.pattern ?? ''} error={fieldErrors.pattern} aria-invalid={!!fieldErrors.pattern} onChange={event => change({ ...form, binding: { ...form.binding!, pattern: event.target.value } }, 'pattern')} /><Input label="关联目标 Issue（可选）" value={form.binding.targetIssue ?? ''} error={fieldErrors.targetIssue} aria-invalid={!!fieldErrors.targetIssue} onChange={event => change({ ...form, binding: { ...form.binding!, targetIssue: event.target.value } }, 'targetIssue')} /></div><p className="text-xs text-muted-foreground">关联提取可使用有界模式，例如 INC-[0-9]{'{1,8}'}。不支持无界重复、分支、引用或环视；填写目标 Issue 仍须在执行时校验权限。</p></div>}
-            </section>
-            <section aria-labelledby={`${id}-preview`} className="space-y-3">
-              <h3 id={`${id}-preview`} className="text-sm font-semibold">预览</h3>
-              <p className="text-xs leading-5 text-muted-foreground">{previewBoundary}样例事件 JSON 仅供本次试渲染使用。</p>
-              <Field label="样例事件 JSON" htmlFor={`${id}-sample`}><textarea {...textareaProps('sample')} className={textAreaClass} rows={4} value={sample} onChange={event => { setSample(event.target.value); invalidatePreview(); clearField('sample') }} />{fieldError('sample')}</Field>
-              {previewError && <Alert variant="danger" role="alert">{previewError}</Alert>}
-              {preview && <section className="space-y-3 rounded-xl border border-border p-4" aria-label="模板预览结果">
-                <h4 ref={previewHeading} tabIndex={-1} className="text-sm font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring">{preview.ruleVersion === 0 ? '模板预览结果（未保存草稿）' : `模板预览结果（已存规则 v${preview.ruleVersion}）`}</h4>
-                <p className="text-xs leading-5 text-muted-foreground">{previewBoundary}</p>
-                <p className="whitespace-pre-wrap break-words font-medium">{preview.renderedTitle}</p><pre className="whitespace-pre-wrap break-words text-sm">{preview.renderedDescription}</pre>
-                <p className="text-xs text-muted-foreground">任务优先级：{preview.priority ? PRIORITY_LABEL[preview.priority] : '默认'} · 指派：{preview.assignee || '未指定'} · 绑定：{preview.bindingTarget || '未绑定'}</p>
-                {preview.warnings.map((warning, index) => <Alert key={index} variant="warning">{warning}</Alert>)}
-                <UntrustedOriginal value={preview.untrustedOriginal} />
-              </section>}
-            </section>
+      <div className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[auto_minmax(0,1fr)] md:grid-cols-[9.5rem_minmax(0,1fr)] md:grid-rows-[minmax(0,1fr)]">
+        {/* 窄屏导航保持单行的自然高度，剩余空间留给可滚动的面板。 */}
+        <nav role="tablist" aria-label="规则路由分区" className="scrollbar-none flex min-h-0 shrink-0 flex-row gap-1 overflow-x-auto border-b border-[var(--color-border)] p-2 md:flex-col md:overflow-x-visible md:border-b-0 md:border-r">
+          {NAV_ITEMS.map(({ key, label, icon: Icon }, index) => (
+            <button
+              key={key}
+              type="button"
+              role="tab"
+              id={`${id}-tab-${key}`}
+              aria-selected={tab === key}
+              aria-controls={`${id}-panel-${key}`}
+              tabIndex={tab === key ? 0 : -1}
+              onClick={() => selectTab(key)}
+              onKeyDown={event => handleNavKeyDown(event, index)}
+              ref={element => { navRefs.current[index] = element }}
+              data-rule-routing-nav={key}
+              className={`flex min-h-10 shrink-0 items-center gap-1.5 rounded-lg px-1.5 text-left text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:px-2.5 ${
+                tab === key
+                  ? 'bg-brand-soft font-medium text-brand-ink'
+                  : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)]'
+              }`}
+            >
+              <Icon size={15} className="shrink-0" aria-hidden="true" />
+              <span className="min-w-0 flex-1 whitespace-nowrap md:truncate">{label}</span>
+            </button>
+          ))}
+        </nav>
+        {/* 事件流水与规则模板常挂载（hidden 时不产生 grid item）：切换分区保留流水筛选、
+            选中事件与编辑器滚动位置；深链/显式打开才通过 props 重定位。 */}
+        <div id={`${id}-panel-events`} role="tabpanel" aria-labelledby={`${id}-tab-events`} hidden={tab !== 'events'} className={tab === 'events' ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
+          <AutoLoopEventHistory
+            active={tab === 'events'}
+            selectedId={selectedEventId}
+            onSelectEvent={setSelectedEventId}
+            scheduledTaskId={scheduledTaskId}
+            scheduledRunId={scheduledRunId}
+            rules={rules}
+            drilldown={drilldown}
+            onCreateRule={trace => createFromTrace(trace)}
+            onOpenDecision={identity => guarded(() => onOpenDecision(identity))}
+          />
+        </div>
+        <div id={`${id}-panel-rules`} role="tabpanel" aria-labelledby={`${id}-tab-rules`} hidden={tab !== 'rules'} className={tab === 'rules' ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
+          {editing ? <RuleRoutingEditor
+            idPrefix={id}
+            editorRef={editorRef}
+            previewHeadingRef={previewHeading}
+            form={form}
+            fieldEquals={fieldEquals}
+            position={position}
+            sample={sample}
+            sampleFromEvent={sampleFromEvent}
+            sampleOpen={sampleOpen}
+            onSampleOpenChange={setSampleOpen}
+            editing={editing}
+            dirty={dirty}
+            busy={busy}
+            saving={saving}
+            previewing={previewing}
+            fieldErrors={fieldErrors}
+            saveError={saveError}
+            previewError={previewError}
+            preview={preview}
+            onBack={() => guarded(discard)}
+            onFieldChange={change}
+            onPositionChange={changePosition}
+            onFieldEqualsChange={changeFieldEquals}
+            onSampleChange={changeSample}
+            onSave={() => void save()}
+            onPreview={() => void renderPreview()}
+          /> : <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-5">
+            {showImport ? <div className="space-y-4">
+              <Alert>粘贴助手在会话中给出的规则 JSON。导入会填入编辑表单，可先修改和试渲染。规则保存并启用后才参与匹配。</Alert>
+              <div className="min-w-0 space-y-1.5 text-xs font-medium"><label htmlFor={`${id}-import`}>助手规则草稿 JSON</label><textarea id={`${id}-import`} data-rule-routing-import-text aria-invalid={!!importError} aria-describedby={importError ? `${id}-import-error` : undefined} value={draftText} onChange={event => { setDraftText(event.target.value); setImportError('') }} className={textAreaClass} rows={10} /></div>
+              {importError && <Alert id={`${id}-import-error`} variant="danger" role="alert">{importError}</Alert>}
+              <div className="flex flex-wrap gap-2"><Button onClick={() => { try { start(undefined, parseRuleDraft(draftText)) } catch (err) { setImportError(errorText(err, '草稿校验失败')); document.getElementById(`${id}-import`)?.focus() } }} data-rule-routing-import-confirm>导入并审阅</Button><Button variant="ghost" onClick={() => guarded(discard)} data-rule-routing-import-cancel>取消</Button></div>
+            </div> : <RulesList
+              rules={rules}
+              loading={loading}
+              busy={busy}
+              sorting={sorting}
+              listLoadError={listLoadError}
+              listActionError={listActionError}
+              hitsLabel={hitsLabel}
+              hitsRange={hitsRange}
+              hitFor={hitFor}
+              onCreate={() => start()}
+              onImport={() => { setShowImport(true); setImportError('') }}
+              onRefresh={() => { setListActionError(''); void load() }}
+              onEdit={rule => start(rule)}
+              onToggle={rule => void mutate(rule, { enabled: !rule.enabled })}
+              onMove={(index, direction) => void move(index, direction)}
+              onDelete={setDeleting}
+              onViewHits={rule => { if (summary) showEvents({ ruleId: rule.id, since: summary.since, until: summary.until, ruleName: rule.name }) }}
+            />}
           </div>}
         </div>
-        {editing && <div className="shrink-0 space-y-2 border-t border-border bg-background px-4 py-3 sm:px-5">
-          {saveError && <Alert variant="danger" role="alert">{saveError}</Alert>}
-          <div className="flex flex-wrap items-center justify-end gap-2" aria-label="规则操作"><span className="sr-only" role="status">{previewing ? '正在试渲染模板…' : preview ? '模板预览已更新' : saving ? '正在保存规则…' : ''}</span><Button variant="outline" loading={previewing} disabled={busy} onClick={() => void renderPreview()}>试渲染模板（不创建任务）</Button><Button loading={saving} disabled={busy} onClick={() => void save()}>{editing === 'new' ? '确认创建规则' : '保存规则'}</Button></div>
+        {/* 助手路由/事件统计为自带头部与滚动的 flex section，面板容器仅做透传定位。 */}
+        {tab === 'assistant' && <div id={`${id}-panel-assistant`} role="tabpanel" aria-labelledby={`${id}-tab-assistant`} className="flex min-h-0 flex-1 flex-col">
+          <AutoLoopAssistantRouting onOpenEvent={openEvent} onOpenDecision={identity => guarded(() => onOpenDecision(identity))} onViewAll={() => showEvents({ route: 'assistant' })} />
+        </div>}
+        {tab === 'stats' && <div id={`${id}-panel-stats`} role="tabpanel" aria-labelledby={`${id}-tab-stats`} className="flex min-h-0 flex-1 flex-col">
+          <AutoLoopRoutingStatsPanel summary={summary} loading={statisticsLoading} error={statisticsError} days={days} onDaysChange={setDays} onRefresh={() => void loadStatistics()} onDrilldown={showEvents} />
         </div>}
       </div>
     </DialogShell>
     <ConfirmDialog open={!!deleting} onClose={() => setDeleting(null)} onConfirm={() => deleting && void mutate(deleting)} loading={mutating} title="删除规则？" description={`删除“${deleting?.name ?? ''}”后，仅后续事件停止匹配，在途事件保留原版本。`} confirmText="删除" variant="danger" />
-    <ConfirmDialog open={!!exit} onClose={() => setExit(null)} onConfirm={() => { const action = exit; setExit(null); action?.run() }} title="放弃未保存的规则草稿？" description="表单中的修改尚未保存。" confirmText="放弃草稿" cancelText="继续编辑" variant="warning" />
+    <ConfirmDialog open={!!exit} onClose={() => setExit(null)} onConfirm={confirmExit} onCloseAutoFocus={restoreExitFocus} title="放弃未保存的规则草稿？" description="表单中的修改尚未保存。" confirmText="放弃草稿" cancelText="继续编辑" variant="warning" />
   </>
 }

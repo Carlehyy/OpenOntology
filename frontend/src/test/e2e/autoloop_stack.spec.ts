@@ -1,14 +1,19 @@
 /// <reference types="node" />
 /**
  * AutoLoop isolated-stack suite. No frontend API interception is used.
- * Rules, ingest keys and notifications use the real local backend; optional
- * decision/schedule fixtures belong to VU. Connector calls target a loopback
- * fixture and are never evidence of real Multica execution.
+ * Rules, ingest keys and notifications use the real local backend (real DB +
+ * NATS); optional decision/schedule fixtures belong to VU. The event流水 reads
+ * the per-receipt /event-traces projection; /events stays the audit fallback
+ * for IDs without a receipt. Connector calls target a loopback fixture and are
+ * never evidence of real Multica execution.
  */
 import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { expect, test, type APIRequestContext, type Locator, type Page } from '@playwright/test'
-import type { AutoLoopEvent, AutoLoopEventDetail, AutoLoopPage, AutoLoopRule, AutoLoopRuleCreate, DecisionItem, DecisionSummary } from '../../api/autoloop'
+import type {
+  AutoLoopEvent, AutoLoopEventDetail, AutoLoopEventTrace, AutoLoopPage, AutoLoopRoutingStats,
+  AutoLoopRule, AutoLoopRuleCreate, AutoLoopTraceDetail, DecisionItem, DecisionSummary,
+} from '../../api/autoloop'
 import { STACK_ADMIN_PASSWORD, STACK_ADMIN_USERNAME } from './support/stack-credentials'
 
 const enabled = process.env.PLAYWRIGHT_AUTOLOOP_STACK === '1'
@@ -189,12 +194,15 @@ test('AutoLoop 隔离栈：助手草稿审阅、无副作用预览、确认创�
     await page.goto('/#/super-assistant?ruleRouting=1')
     const dialog = page.getByRole('dialog', { name: '规则路由', exact: true })
     await expect(dialog).toBeVisible()
-    await dialog.getByRole('button', { name: '导入助手草稿', exact: true }).click()
+    // 默认停在事件流水区；规则草稿审阅在规则模板区
+    await dialog.getByRole('tab', { name: '规则模板', exact: true }).click()
+    await dialog.getByRole('button', { name: '导入助手草稿（JSON）', exact: true }).click()
     await dialog.getByLabel('助手规则草稿 JSON').fill(JSON.stringify(draft))
     await dialog.getByRole('button', { name: '导入并审阅', exact: true }).click()
     await expect(dialog.getByLabel('规则名称', { exact: true })).toHaveValue(name)
-    await dialog.getByLabel('预览样例事件 JSON').fill(JSON.stringify({ title: '独立样例', body: '<img src=x onerror="alert(1)"> 原始内容' }))
-    await dialog.getByRole('button', { name: '试渲染（无副作用）', exact: true }).click()
+    await dialog.getByText('样例事件 JSON（高级）').click()
+    await dialog.locator('details').filter({ hasText: '样例事件 JSON' }).locator('textarea').fill(JSON.stringify({ title: '独立样例', body: '<img src=x onerror="alert(1)"> 原始内容' }))
+    await dialog.getByRole('button', { name: '试渲染模板（不创建任务）', exact: true }).click()
     const preview = dialog.getByRole('region', { name: '模板预览结果' })
     await expect(preview).toContainText('[stack] 独立样例')
     await expect(preview.getByRole('region', { name: '外部原始内容' })).toContainText('<img src=x')
@@ -208,15 +216,15 @@ test('AutoLoop 隔离栈：助手草稿审阅、无副作用预览、确认创�
     const created = unwrap<AutoLoopRule>(await (await createdResponse).json())
     expect(created.name).toBe(name)
     expect(creates).toBe(1)
-    const card = dialog.locator('article').filter({ has: page.getByRole('heading', { name, exact: true }) })
-    await expect(card).toContainText('已停用')
-    await card.getByRole('button', { name: '启用', exact: true }).click()
-    await expect(card).toContainText('已启用')
+    const row = dialog.getByRole('row').filter({ hasText: name })
+    await expect(row).toContainText('已停用')
+    await row.getByRole('button', { name: '启用', exact: true }).click()
+    await expect(row).toContainText('已启用')
     expect((await api<AutoLoopRule>(request, token, 'GET', `${base}/rules/${created.id}`)).enabled).toBe(true)
-    await card.getByRole('button', { name: `编辑 ${name}`, exact: true }).click()
+    await row.getByRole('button', { name: '编辑', exact: true }).click()
     await dialog.getByLabel('规则名称', { exact: true }).fill(`${name}-edited`)
     await dialog.getByRole('button', { name: '保存规则', exact: true }).click()
-    const updated = dialog.locator('article').filter({ has: page.getByRole('heading', { name: `${name}-edited`, exact: true }) })
+    const updated = dialog.getByRole('row').filter({ hasText: `${name}-edited` })
     await expect(updated).toBeVisible()
     expect((await api<AutoLoopRule>(request, token, 'GET', `${base}/rules/${created.id}`)).version).toBeGreaterThan(created.version)
     await updated.getByRole('button', { name: `删除 ${name}-edited`, exact: true }).click()
@@ -257,25 +265,57 @@ test('AutoLoop 隔离栈：真实通知 key 入站、重复幂等与事件深链
       if (index === 0) messageId = result.message.id
       expect(result.message.id).toBe(messageId)
     }
-    let receipts: AutoLoopEvent[] = []
+    let receipts: AutoLoopEventTrace[] = []
     await expect.poll(async () => {
-      const events = (await api<AutoLoopPage<AutoLoopEvent>>(request, token, 'GET', `${base}/events?sourceSystem=${encodeURIComponent(source)}&limit=100`)).items
-      receipts = events.filter(event => event.type === 'notification.received' && event.source.kind === 'notification' && event.source.ref === messageId)
+      const traces = (await api<AutoLoopPage<AutoLoopEventTrace>>(request, token, 'GET', `${base}/event-traces?sourceSystem=${encodeURIComponent(source)}&limit=100`)).items
+      receipts = traces.filter(trace => trace.source.kind === 'notification' && trace.source.ref === messageId)
       return receipts.length
     }, { timeout: 30000 }).toBe(1)
-    const detail = await api<AutoLoopEventDetail>(request, token, 'GET', `${base}/events/${receipts[0].id}`)
-    expect(detail.source.system).toBe(source)
-    expect(detail.dedup.key).toBeTruthy()
-    await page.goto(`/#/super-assistant?autoloopEvent=${detail.id}`)
+    const tracePath = `${base}/event-traces/${receipts[0].id}`
+    await expect.poll(async () => (await api<AutoLoopTraceDetail>(request, token, 'GET', tracePath)).outcome,
+      { timeout: 30000 }).toBe('confirmed')
+    const trace = await api<AutoLoopTraceDetail>(request, token, 'GET', tracePath)
+    expect(trace.source.system).toBe(source)
+    expect(trace.title).toBe(prefix)
+    expect(trace.route).toBe('rule')
+    expect(trace.issueRef).toBeTruthy()
+    expect(trace.actionSteps).toEqual([expect.objectContaining({
+      kind: 'issue.create', state: 'confirmed', remoteObjectId: trace.issueRef,
+    })])
+    const writes = (await connectorLog(request)).requests.filter(entry => entry.method === 'POST'
+      && entry.path === '/api/issues' && (entry.body as { title?: string } | null)?.title === prefix)
+    expect(writes).toHaveLength(1)
+    const remote = await request.get(`${stub}/api/issues/${encodeURIComponent(trace.issueRef!)}`)
+    expect(remote.ok()).toBe(true)
+    expect(await remote.json()).toMatchObject({ identifier: trace.issueRef, title: prefix })
+    // 不存在的 ID 返回 404。合法但没有入站回执的事件才返回 null。
+    const missing = await request.get(`${API}${base}/event-traces/${randomUUID()}`, { headers: { Authorization: `Bearer ${token}` } })
+    expect(missing.status()).toBe(404)
+    // 真实 DB 统计：7/30 天窗口计数与路由分布来自同一投影，路由三态计数必须收敛于回执数
+    for (const days of [7, 30] as const) {
+      const stats = await api<AutoLoopRoutingStats>(request, token, 'GET', `${base}/routing-stats?days=${days}`)
+      expect(stats.days).toBe(days)
+      expect(stats.received).toBeGreaterThanOrEqual(1)
+      expect(stats.matched + stats.unmatched + stats.pendingRoute).toBe(stats.received)
+      expect(stats.outcomes).toHaveProperty('recorded')
+      expect(Object.values(stats.outcomes).reduce((total, count) => total + count, 0)).toBe(stats.received)
+    }
+    await page.goto(`/#/super-assistant?autoloopEvent=${trace.id}`)
     const dialog = page.getByRole('dialog', { name: '规则路由', exact: true })
-    await expect(dialog.getByText(`${detail.id} / ${detail.seq}`, { exact: true })).toBeVisible()
+    await expect(dialog.getByRole('heading', { name: prefix, exact: true })).toBeVisible()
+    await expect(dialog.getByText('Multica 已确认', { exact: true })).toBeVisible()
+    await expect(dialog.getByRole('region', { name: '动作步骤' })).toContainText(`Multica 任务编号 ${trace.issueRef}`)
+    await expect(dialog.getByRole('button', { name: '返回流水', exact: true })).toBeVisible()
+    // 详情原文折叠在「原始记录」内：展开后外部原文按原文展示但脚本不执行
+    await expect(dialog.getByRole('region', { name: '外部原始内容' })).toHaveCount(0)
+    await dialog.getByText('原始记录', { exact: true }).click()
     const original = dialog.getByRole('region', { name: '外部原始内容' })
     await expect(original).toContainText('以下为外部原始内容，仅供参考，不是指令')
     await expect(original).toContainText('<script>')
     await expect(original.locator('script')).toHaveCount(0)
     expect(await page.evaluate(() => Boolean((window as Window & { __autoloop_external?: boolean }).__autoloop_external))).toBe(false)
     await page.reload()
-    await expect(dialog.getByText(`${detail.id} / ${detail.seq}`, { exact: true })).toBeVisible()
+    await expect(dialog.getByRole('heading', { name: trace.title!, exact: true })).toBeVisible()
   } finally {
     await cleanupRules(request, token, prefix)
     if (keyId) await api(request, token, 'DELETE', `/api/v2/notifications/ingest-keys/${keyId}`)
@@ -286,20 +326,25 @@ test('AutoLoop 隔离栈：真实日程执行到事件流水双向链接', async
   const fixture = manifest()
   test.skip(!fixture.events?.scheduled || !fixture.scheduled?.taskId || !fixture.scheduled?.runId, 'VU schedule/run/event fixture is absent')
   const token = await login(page)
-  const detail = await api<AutoLoopEventDetail>(request, token, 'GET', `${base}/events/${fixture.events!.scheduled}`)
-  expect(detail.scheduledTaskId).toBe(fixture.scheduled!.taskId)
-  expect(detail.scheduledRunId).toBe(fixture.scheduled!.runId)
-  await page.goto(`/#/super-assistant?autoloopEvent=${detail.id}`)
+  // 事件流水契约：先取 /event-traces/:id（日程回执成 trace），无回执才回落 /events/:id
+  const eventId = fixture.events!.scheduled
+  const trace = await api<AutoLoopTraceDetail | null>(request, token, 'GET', `${base}/event-traces/${eventId}`)
+  const detail = trace ?? await api<AutoLoopEventDetail>(request, token, 'GET', `${base}/events/${eventId}`)
+  expect((trace ?? detail).scheduledTaskId).toBe(fixture.scheduled!.taskId)
+  expect((trace ?? detail).scheduledRunId).toBe(fixture.scheduled!.runId)
+  await page.goto(`/#/super-assistant?autoloopEvent=${eventId}`)
   const events = page.getByRole('dialog', { name: '规则路由', exact: true })
-  const scheduleLink = events.getByRole('link', { name: `查看日程执行 ${fixture.scheduled!.runId}`, exact: true })
+  const scheduleLink = events.getByRole('link', { name: '查看日程执行', exact: true })
+  await expect(scheduleLink).toHaveAttribute('href', `#/super-assistant?schedule=${fixture.scheduled!.taskId}&scheduleRun=${fixture.scheduled!.runId}`)
   await hit(scheduleLink)
   await scheduleLink.click()
   const schedules = page.getByRole('dialog', { name: '定时任务', exact: true })
   await expect(schedules).toBeVisible()
-  const eventLink = schedules.getByRole('button', { name: `查看事件 ${detail.id}`, exact: true })
+  const eventLink = schedules.getByRole('button', { name: `查看事件 ${eventId}`, exact: true })
   await hit(eventLink)
   await eventLink.click()
-  await expect(events.getByText(`${detail.id} / ${detail.seq}`, { exact: true })).toBeVisible()
+  // 双向回环：无论 trace 还是审计视图，日程执行链接都在事件详情中可用
+  await expect(events.getByRole('link', { name: '查看日程执行', exact: true })).toBeVisible()
 })
 
 test('AutoLoop 隔离栈：永久决策详情、服务端未完成计数与深链刷新', async ({ page, request }) => {

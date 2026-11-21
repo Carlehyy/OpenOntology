@@ -152,7 +152,19 @@ export default function DecisionItemsDialog({ initialId, summary, session, onSel
       const merged = merge(value)
       session.requests.delete(request.id)
       if (!active.current) return
-      if (selectedRef.current === request.id) { setDetail(merged); setUncertain(null); setOptionId(''); setFreeText(''); setNotice(value.alreadyProcessed ? '该请求已处理，已显示已有结果。' : kind === 'handled' ? '已人工处理。' : isUnfinished(merged.status) ? '决定已受理，正在等待写回结果。' : '决定已完成。') }
+      if (selectedRef.current === request.id) {
+        setDetail(merged)
+        setUncertain(null)
+        setOptionId('')
+        setFreeText('')
+        if (value.alreadyProcessed) setNotice('该请求已处理，已显示已有结果。')
+        else if (request.kind === 'handled') setNotice('已人工处理。')
+        else if (!isUnfinished(merged.status)) setNotice('决定已完成。')
+        else if (merged.status === 'writeback_failed' || merged.status === 'writeback_unknown') setNotice('决定已受理，处理结果见下方步骤。')
+        else if (merged.source === 'watchdog') setNotice('决定已受理，等待写回 Multica 评论。')
+        else if (merged.issueRef) setNotice('决定已受理，等待重新匹配规则和写回 Multica 评论。')
+        else setNotice('决定已受理，等待重新匹配规则。')
+      }
       setRevision(value => value + 1)
       void onRefreshSummary()
     } catch (err) {
@@ -217,8 +229,14 @@ export default function DecisionItemsDialog({ initialId, summary, session, onSel
           {detail.eventIds.length > 0 && <section aria-label="关联事件" className="flex flex-wrap items-center gap-2 text-xs"><span>关联事件</span>{detail.eventIds.map(id => <Button key={id} variant="link" size="sm" onClick={() => onOpenEvent(id)}>查看事件 {id}</Button>)}</section>}
           {detail.untrustedOriginal != null && <UntrustedOriginal value={detail.untrustedOriginal} />}
           {detail.issueRef && <p className="text-xs">关联 Issue：<IssueReference issueRef={detail.issueRef} issueUrl={detail.issueUrl} /></p>}
-          {detail.source === 'watchdog' && <p className="text-xs leading-6 text-muted-foreground">提交决定将通过连接器写回评论，由远端执行层继续；“已人工处理”仅关闭本地事项。</p>}
-          {detail.source !== 'watchdog' && <p className="text-xs leading-6 text-muted-foreground">提交决定由助手或内核继续处理；“已人工处理”仅关闭本地事项。</p>}
+          {actionable && <p className="text-xs leading-6 text-muted-foreground">
+            {detail.source === 'watchdog'
+              ? '提交后会把决定作为评论写回 Multica。'
+              : detail.issueRef
+                ? '提交后会记录决定、重新匹配已启用的规则，并将决定作为评论写回已关联的 Multica 任务。'
+                : '提交后会记录决定、重新匹配已启用的规则。命中规则后才会派发给 Multica。'}
+            “已人工处理”仅关闭本地事项。
+          </p>}
           {actionable && <fieldset disabled={!!busy || !!uncertain || detailLoading} className="space-y-3">
             <legend className="mb-2 text-sm font-medium">选择决定</legend>
             {detail.options.map(option => <label key={option.id} className={`flex cursor-pointer items-start gap-2 rounded-lg border p-3 text-sm ${optionId === option.id ? 'border-brand bg-brand-soft' : 'border-border'}`}><input type="radio" name={`decision-${detail.id}`} value={option.id} checked={optionId === option.id} onChange={() => setOptionId(option.id)} className="mt-1" /><span className="min-w-0 whitespace-pre-wrap break-words">{option.label}{detail.recommendedOptionId === option.id && <Badge variant="info" className="ml-2">推荐</Badge>}</span></label>)}

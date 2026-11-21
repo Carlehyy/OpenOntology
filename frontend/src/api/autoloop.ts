@@ -100,15 +100,62 @@ export interface DecisionSummary {
   unfinishedTotal: number
 }
 export interface DecisionMutation { expectedContentVersion: number; idempotencyKey: string }
-export interface AutoLoopEventFilters {
+export type AutoLoopRoute = 'pending' | 'rule' | 'assistant'
+export type AutoLoopOutcome = 'pending' | 'queued' | 'sending' | 'review' | 'confirmed' | 'recorded' | 'failed' | 'unknown' | 'ignored' | 'handled' | 'cancelled'
+
+export interface AutoLoopEventTrace {
+  id: string
+  receivedAt: string
+  title: string | null
+  source: AutoLoopEvent['source']
+  route: AutoLoopRoute
+  outcome: AutoLoopOutcome
+  rule?: { id: string; name: string | null; version: number | null } | null
+  action?: string | null
+  decisionItemId?: string | null
+  issueRef?: string | null
+  scheduledTaskId?: string | null
+  scheduledRunId?: string | null
+  reason?: string | null
+}
+
+export interface AutoLoopTraceStep extends AutoLoopStep {
+  remoteObjectId?: string | null
+}
+
+export interface AutoLoopTraceDetail extends AutoLoopEventTrace {
+  untrustedOriginal: unknown
+  error?: string | null
+  issueUrl?: string | null
+  actionSteps: AutoLoopTraceStep[]
+  auditEvents: Pick<AutoLoopEvent, 'id' | 'type' | 'happenedAt' | 'action' | 'error'>[]
+}
+
+export interface AutoLoopTraceFilters {
   source?: string
   sourceSystem?: string
+  route?: AutoLoopRoute
   action?: string
+  outcome?: AutoLoopOutcome
   ruleId?: string
-  status?: string
+  since?: string
+  until?: string
   scheduledTaskId?: string
   scheduledRunId?: string
 }
+
+export interface AutoLoopRoutingStats {
+  days: 7 | 30
+  since: string
+  until: string
+  received: number
+  matched: number
+  unmatched: number
+  pendingRoute: number
+  outcomes: Partial<Record<AutoLoopOutcome, number>>
+  rules: { ruleId: string; ruleName: string | null; hits: number }[]
+}
+
 const base = '/super-assistant/autoloop'
 const itemPath = (id: string) => `${base}/decision-items/${encodeURIComponent(id)}`
 
@@ -120,7 +167,10 @@ export const autoloopApi = {
   deleteRule: (id: string) => apiClientV2.delete<void>(`${base}/rules/${encodeURIComponent(id)}`),
   previewRule: (rule: AutoLoopRuleCreate, sampleEvent: unknown) => apiClientV2.post<AutoLoopPreview>(`${base}/rules/preview`, { rule, sampleEvent }),
   previewStoredRule: (id: string, sampleEvent: unknown) => apiClientV2.post<AutoLoopPreview>(`${base}/rules/${encodeURIComponent(id)}/preview`, { sampleEvent }),
-  listEvents: (filters: AutoLoopEventFilters, cursor?: string | null) => apiClientV2.get<AutoLoopPage<AutoLoopEvent>>(`${base}/events`, { params: { ...filters, cursor: cursor || undefined, limit: 20 } }),
+  listEventTraces: (filters: AutoLoopTraceFilters, cursor?: string | null, limit = 20) =>
+    apiClientV2.get<AutoLoopPage<AutoLoopEventTrace>>(`${base}/event-traces`, { params: { ...filters, cursor: cursor ?? undefined, limit } }),
+  getEventTrace: (id: string) => apiClientV2.get<AutoLoopTraceDetail | null>(`${base}/event-traces/${encodeURIComponent(id)}`),
+  routingStats: (days: 7 | 30) => apiClientV2.get<AutoLoopRoutingStats>(`${base}/routing-stats`, { params: { days } }),
   getEvent: (id: string) => apiClientV2.get<AutoLoopEventDetail>(`${base}/events/${encodeURIComponent(id)}`),
   listDecisions: (status: string, cursor?: string | null) => apiClientV2.get<AutoLoopPage<DecisionItem>>(`${base}/decision-items`, { params: { status, cursor: cursor || undefined, limit: 20 } }),
   decisionSummary: () => apiClientV2.get<DecisionSummary>(`${base}/decision-items/summary`),

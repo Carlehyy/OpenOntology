@@ -44,6 +44,9 @@ from collections.abc import Awaitable, Callable
 logger = logging.getLogger(__name__)
 
 HEARTBEAT_PATH = "/tmp/nats_executor.heartbeat"
+# Pull subscriptions can otherwise keep ``nc.drain()`` waiting for nats-py's
+# 30-second default, racing the container stop grace period.
+_NATS_DRAIN_TIMEOUT_SECONDS = 5
 # compose stop 默认宽限 30 秒，这里留出 5 秒余量
 _SHUTDOWN_TIMEOUT_SECONDS = 25
 # ack_wait=30s，执行期间每 20 秒续约一次防止重投
@@ -626,7 +629,11 @@ class PipelineExecutor:
         from app.super_assistant.kernel.plugin_runner import PLUGIN_RUNNER_REPLY_PREFIX, PLUGIN_RUNNER_STREAM
         from app.super_assistant.kernel.plugin_runner_service import ensure_plugin_runner_stream
 
-        nc = await nats.connect(settings.nats_url.strip(), connect_timeout=3)
+        nc = await nats.connect(
+            settings.nats_url.strip(),
+            connect_timeout=3,
+            drain_timeout=_NATS_DRAIN_TIMEOUT_SECONDS,
+        )
         heartbeat = asyncio.ensure_future(self._heartbeat_loop())
         try:
             js = nc.jetstream()
