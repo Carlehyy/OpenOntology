@@ -16,10 +16,9 @@ Stop/detach/cleanup contract:
 - all source IO (preflight/resume, health, cleanup, offset read) runs on
   bounded pools so one unreachable source never blocks another cohort's local
   apply;
-- an already published cohort may only restart after the durable Debezium
-  offset file is read through the shared Java ``ReadOffsets`` reader and its
-  content/partition is proven; empty, truncated, malformed or foreign
-  partitions become an explicit ``gap`` instead of a silent re-snapshot.
+- after a complete snapshot, restart requires a durable Debezium offset and
+  source log position no further than the platform's received evidence.
+  Unproven restarts fail with an explicit gap instead of taking a new snapshot.
 
 Publication of ``catching_up`` runs is deliberately not decided here. The
 verified-coverage barrier/proof is owned by the main capture/apply layer; the
@@ -42,7 +41,7 @@ import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -55,6 +54,7 @@ from app.data_channel.integrated import replica_cleanup
 from app.data_channel.integrated import replica_connector as connector
 from app.data_channel.integrated import replica_control as control
 from app.data_channel.integrated import replica_coverage as coverage
+from app.data_channel.integrated import replica_offsets as offsets
 from app.data_channel.integrated import replica_runtime as runtime
 from app.data_channel.integrated.cdc_executor import (
     CHILD_JAVA_OPTS, DEBEZIUM_CLASSPATH, DEBEZIUM_MAIN, JAVA_BINARY, JAVA_HOME,
@@ -83,15 +83,14 @@ PROBE_TIMEOUT_SECONDS = 10.0
 # Locally received but unapplied transactions make a published replica stale
 # only after this grace window. Source idle time is never used for this.
 APPLY_LAG_SECONDS = 3.0
-# A confirmed ordered cut older than this no longer proves the source is still
-# being observed (probe interval 10s + bounded source IO).
-COVERAGE_STALE_SECONDS = 30.0
 
 # Closed error codes for the local durability gate. Content problems are
 # terminal gaps (a re-snapshot would silently skip the unproven interval);
 # transient read failures stay retryable and never claim a gap.
 OFFSETS_MISSING = "REPLICA_OFFSETS_MISSING"
 OFFSETS_INVALID = "REPLICA_OFFSETS_INVALID"
+OFFSETS_UNPROVEN = "REPLICA_OFFSETS_UNPROVEN"
+OFFSETS_AHEAD = "REPLICA_OFFSETS_AHEAD"
 OFFSETS_READ_FAILED = "REPLICA_OFFSETS_READ_FAILED"
 OFFSET_PARTITION_CHANGED = "SOURCE_PARTITION_CHANGED"
 CLEANUP_PENDING = "REPLICA_CLEANUP_PENDING"
@@ -129,6 +128,7 @@ class CaptureProcess:
     check_digest: str | None = None
     offset_check: Future | None = None
     offsets_verified: bool = False
+    received_lsn: int | None = None
     offset_read: Future | None = None
     next_offset_read: float = 0.0
     # Ordered source coverage cut (separate from transport liveness). The
@@ -353,37 +353,31 @@ class ReplicaSupervisor:
             self.lease.release(key)
             return
         item = self.processes.get(capture_id)
-        if item is None:
-            if len(self.processes) >= self.max_captures:
-                self.lease.release(key)
-                return
-            if self.retry_after.get(capture_id, 0) > self.clock():
-                self.lease.release(key)
-                return
-            # A process restart cannot recover the source transaction used by
-            # an unfinished initial snapshot. With an active peer present we
-            # must not drain the whole cohort (or bypass offsets): fail only
-            # the unfinished member and keep the active stream fenced.
+        if item is not None and item.child is not None and any(
+                run.status in {"loading", "catching_up"} and not control._pending_lease_valid(run)
+                for run in runs):
+            self._stop(item)
+            runs = self._live_runs(db, capture_id)
+        if item is None or item.child is None:
+            # A lost snapshot transaction cannot be reopened on the same
+            # relation. Preserve peers with complete snapshots, if any.
             unfinished = [run for run in runs if run.status == "loading"]
             state_dir = self.state_root / capture.id
-            if unfinished and (state_dir.exists() or capture.heartbeat_at is not None):
-                if any(run.status == "active" for run in runs):
-                    self._fail_unfinished_members(
-                        db, capture_id, unfinished,
-                        code="INITIAL_SNAPSHOT_INTERRUPTED")
-                    self._detach(db, capture)
-                    runs = [run for run in runs if run.status == "active"]
-                else:
-                    runtime.abandon_initialization(db, capture_id,
-                        code="INITIAL_SNAPSHOT_INTERRUPTED", retry=True)
+            if unfinished and (state_dir.exists() or capture.heartbeat_at is not None
+                               or any(not control._pending_lease_valid(run) for run in unfinished)
+                               or len(unfinished) != len(runs)):
+                runs = self._handle_interrupted_load(
+                    db, capture, runs, code="INITIAL_SNAPSHOT_INTERRUPTED")
+                if not runs:
                     self.lease.release(key)
                     return
-            index = next((index for index in range(self.max_captures)
-                          if index not in {process.index
-                                           for process in self.processes.values()}), None)
-            if index is None:
+        if item is None:
+            if (len(self.processes) >= self.max_captures
+                    or self.retry_after.get(capture_id, 0) > self.clock()):
                 self.lease.release(key)
                 return
+            index = next(index for index in range(self.max_captures)
+                         if index not in {process.index for process in self.processes.values()})
             item = CaptureProcess(capture.id, index, state_dir, self.run_root / capture.id)
             self.processes[capture_id] = item
         connection = db.get(Connection, capture.connection_id)
@@ -463,67 +457,56 @@ class ReplicaSupervisor:
         if item.child is not None and item.child.poll() is not None:
             code = getattr(item.child, "error_code", None) or "REPLICA_CHILD_EXITED"
             self._stop(item)
-            unfinished = [run for run in runs if run.status == "loading"]
-            if unfinished:
-                if any(run.status == "active" for run in runs):
-                    self._fail_unfinished_members(db, capture_id, unfinished,
-                                                  code=code)
-                    self._detach(db, capture)
-                    runs = [run for run in runs if run.status == "active"]
-                else:
-                    runtime.abandon_initialization(db, capture_id, code=code,
-                                                   retry=True)
-                    self.lease.release(key)
-                    return
-            mark_capture_error(db, capture_id, code, retryable=code != "SOURCE_LOG_GAP")
+            runs = self._handle_interrupted_load(db, capture, self._live_runs(db, capture_id), code=code)
+            if not runs:
+                self.lease.release(key)
+                return
             if code == cdc_runtime.CODE_SOURCE_LOG_GAP:
-                # An unusable source log position is a proven gap: never let
-                # the bounded restart masquerade as a fresh snapshot.
-                capture.status = "gap"
+                self._offset_gap(db, capture, code)
+                self.lease.release(key)
+                return
+            mark_capture_error(db, capture_id, code, retryable=True)
             item.next_retry_at = self.clock() + RETRY_SECONDS
         if item.child is not None and config_digest != item.config_digest:
             self._stop(item)
-            unfinished = [run for run in runs if run.status == "loading"]
-            if unfinished:
-                if any(run.status == "active" for run in runs):
-                    self._fail_unfinished_members(
-                        db, capture_id, unfinished,
-                        code="INITIAL_SNAPSHOT_CONFIG_CHANGED")
-                    self._detach(db, capture)
-                    runs = [run for run in runs if run.status == "active"]
-                else:
-                    runtime.abandon_initialization(db, capture_id,
-                        code="INITIAL_SNAPSHOT_CONFIG_CHANGED", retry=True)
-                    self.lease.release(key)
-                    return
-        runtime.renew_initializers(db, capture_id)
+            runs = self._handle_interrupted_load(db, capture, self._live_runs(db, capture_id),
+                                                 code="INITIAL_SNAPSHOT_CONFIG_CHANGED")
+            if not runs:
+                self.lease.release(key)
+                return
         if item.child is None:
             if item.next_retry_at > self.clock():
                 # Rotation: a backoff with no child must not pin the source
                 # fence. Another executor may take the next turn.
                 self.lease.release(key)
                 return
-            # Any published member means durable offsets are mandatory; a
-            # non-active sibling must never turn the restart into a silent
-            # re-snapshot or bypass the offset proof.
-            established = any(run.status == "active" for run in runs)
+            # A complete, unpublished snapshot needs exactly the same resume
+            # proof as a published one. Never let Debezium re-snapshot it.
+            established = any(run.status != "loading" for run in runs)
             if established:
-                verdict = self._durable_offsets(db, item, capture, connection)
+                if not all(control.snapshot_finished(run) for run in runs):
+                    self._offset_gap(db, capture, "SNAPSHOT_PROOF_INCOMPLETE")
+                    self.lease.release(key)
+                    return
+                verdict = self._durable_offsets(db, item, capture, connection, runs)
                 if verdict is None:
                     return  # bounded local read in flight
                 if verdict is False:
-                    # Retryable read failures and terminal gaps both stop the
-                    # restart; the fence is released for a fair retry.
                     self.lease.release(key)
                     return
+            else:
+                runtime.renew_initializers(db, capture_id)
             if not self._source_ready(item, connection, live_assets, config_digest,
                                       resume=established):
                 return
+            if established:
+                for run in runs:
+                    if run.status == "catching_up":
+                        control.reclaim_catching_up(db, run.id, capture_id)
             self._start(item, capture, connection, property_assets, config_digest)
-        elif not self._source_ready(item, connection, live_assets, config_digest, resume=False):
-            # The last successful check remains valid while its bounded
-            # successor runs. Source IO never blocks target transaction apply.
-            pass
+        else:
+            runtime.renew_initializers(db, capture_id)
+            self._source_ready(item, connection, live_assets, config_digest, resume=False)
         # ``applied_probe`` compares the frozen membership with the live runs.
         # A terminal member that is still listed would reject the cut, so
         # detach it before apply; the second pass catches runs retired by this
@@ -532,6 +515,10 @@ class ReplicaSupervisor:
         self._detach(db, capture)
         self._apply_capture(db, capture_id)
         self._detach(db, capture)
+        if capture.status in {"blocked", "gap", "draining", "stopped"}:
+            # The locked reload may have observed a receiver failure after
+            # this tick began. Cached child liveness may not clear that fence.
+            return
         # A completed coverage cut is persisted on the next tick; its token is
         # fenced by capture generation, so a late old result cannot overwrite
         # a newer pending probe.
@@ -548,9 +535,7 @@ class ReplicaSupervisor:
                 logger.info("replica capture streaming capture=%s", capture.id)
             capture.status, capture.last_error_code = "streaming", None
             confirmed_seq = self._confirmed_probe_seq(capture)
-            confirmed_age = self._confirmed_probe_age(capture)
-            coverage_stale = (confirmed_age is not None
-                              and confirmed_age > COVERAGE_STALE_SECONDS)
+            coverage_stale = coverage.coverage_age_stale(self._confirmed_probe_age(capture))
             active_runs = [run for run in self._live_runs(db, capture_id)
                            if run.status == "active"]
             active_ids = {run.id for run in active_runs}
@@ -640,9 +625,7 @@ class ReplicaSupervisor:
             confirmed_at = datetime.fromisoformat(value)
         except ValueError:
             return None
-        if confirmed_at.tzinfo is None:
-            confirmed_at = confirmed_at.replace(tzinfo=timezone.utc)
-        return (datetime.now(timezone.utc) - confirmed_at).total_seconds()
+        return coverage.coverage_age(confirmed_at)
 
     def _consume_probe(self, db, capture, item) -> None:
         """Persist a completed cut on a later tick; never block apply for it."""
@@ -730,6 +713,17 @@ class ReplicaSupervisor:
         integration point without changing the lifecycle state machine.
         """
         return runtime.apply_capture(db, capture_id)
+
+    def _handle_interrupted_load(self, db, capture, runs, *, code):
+        unfinished = [run for run in runs if run.status == "loading"]
+        if not unfinished:
+            return runs
+        if len(unfinished) == len(runs):
+            runtime.abandon_initialization(db, capture.id, code=code, retry=True)
+            return []
+        self._fail_unfinished_members(db, capture.id, unfinished, code=code)
+        self._detach(db, capture)
+        return self._live_runs(db, capture.id)
 
     def _fail_unfinished_members(self, db, capture_id: str, runs, *,
                                  code: str) -> int:
@@ -879,13 +873,11 @@ class ReplicaSupervisor:
             if capture_id not in active:
                 self.retry_after.pop(capture_id, None)
 
-    def _durable_offsets(self, db, item, capture, connection):
-        """Gate an established restart on the real Debezium offset content.
+    def _durable_offsets(self, db, item, capture, connection, runs):
+        """Require a resumable file offset covered by durable receiver state.
 
-        Returns ``True`` only after a single partition for this capture has a
-        non-empty, dialect-resumable offset. ``None`` means the bounded Java
-        read is still in flight; ``False`` records either an explicit gap
-        (content/partition cannot be trusted) or a retryable read failure.
+        ``None`` means the bounded read is in flight; ``False`` stops restart
+        for either a terminal gap or a retryable local read failure.
         """
         if item.offsets_verified:
             return True
@@ -909,11 +901,21 @@ class ReplicaSupervisor:
             if code is not None:
                 self._offset_gap(db, capture, code)
                 return False
+            dialect = "postgresql" if connection.kind == connector.KIND_POSTGRES else connection.kind
+            received = offsets.received_positions(capture, runs, dialect)
+            if not received:
+                self._offset_gap(db, capture, OFFSETS_UNPROVEN)
+                return False
+            if not offsets.received_offset_covers(received, entries[0]["offset"], dialect):
+                self._offset_gap(db, capture, OFFSETS_AHEAD)
+                return False
+            if dialect == "postgresql":
+                item.received_lsn = max(position.slot_lsn for position in received)
             item.offsets_verified = True
             return True
         path = item.state_dir / "offsets.dat"
         if not path.is_file():
-            mark_capture_error(db, capture.id, OFFSETS_MISSING, retryable=False)
+            self._offset_gap(db, capture, OFFSETS_MISSING)
             return False
         item.offset_check = self._offset_reads.submit(self.read_offsets, path)
         return None
@@ -945,26 +947,12 @@ class ReplicaSupervisor:
         if len(matched) != 1:
             return OFFSET_PARTITION_CHANGED
 
-        def integer(key):
-            value = matched[0].get(key)
-            return isinstance(value, int) and not isinstance(value, bool)
-
-        if kind == connector.KIND_POSTGRES:
-            if not any(integer(key) for key in ("lsn", "lsn_proc", "lsn_commit")):
-                return OFFSETS_INVALID
-        elif kind == connector.KIND_MYSQL:
-            file = matched[0].get("file")
-            if not isinstance(file, str) or not file or not integer("pos"):
-                return OFFSETS_INVALID
-        return None
+        dialect = "postgresql" if kind == connector.KIND_POSTGRES else kind
+        return None if offsets.resumable(matched[0], dialect) else OFFSETS_INVALID
 
     def _offset_gap(self, db, capture, code: str) -> None:
         """Persist an explicit, terminal gap instead of a silent snapshot."""
-        mark_capture_error(db, capture.id, code, retryable=False)
-        row = db.get(IntegratedReplicaCapture, capture.id, populate_existing=True)
-        if row is not None and row.status not in {"stopped", "draining"}:
-            row.status = "gap"
-        db.flush()
+        mark_capture_error(db, capture.id, code, retryable=False, gap=True)
 
     def _source_ready(self, item, connection, assets, digest, *, resume):
         if item.source_check is not None:
@@ -989,10 +977,12 @@ class ReplicaSupervisor:
                 table_name=asset.table_name, schema_fingerprint=asset.schema_fingerprint,
                 schema_json=copy.deepcopy(asset.schema_json)) for asset in assets]
 
+            received_lsn = item.received_lsn
+
             def check():
-                if resume:
-                    self.connector.validate_resume(source, item.capture_id)
                 self.connector.preflight(source, tables)
+                if resume:
+                    self.connector.validate_resume(source, item.capture_id, received_lsn=received_lsn)
 
             item.check_digest = digest
             item.source_check = self._source_checks.submit(check)
@@ -1085,13 +1075,8 @@ class ReplicaSupervisor:
     def _error(self, capture_id, code, *, retryable):
         try:
             with self.sessions() as db:
-                mark_capture_error(db, capture_id, code, retryable=retryable)
-                if code == cdc_runtime.CODE_SOURCE_LOG_GAP:
-                    capture = db.get(IntegratedReplicaCapture, capture_id,
-                                     populate_existing=True)
-                    if (capture is not None
-                            and capture.status not in {"stopped", "draining"}):
-                        capture.status = "gap"
+                mark_capture_error(db, capture_id, code, retryable=retryable,
+                                   gap=code == cdc_runtime.CODE_SOURCE_LOG_GAP)
                 db.commit()
         except Exception:
             logger.error("replica error report unavailable capture=%s", capture_id)
@@ -1113,6 +1098,7 @@ class ReplicaSupervisor:
         item.lag_since.clear()
         item.checked_digest = item.check_digest = None
         item.offsets_verified = False
+        item.received_lsn = None
         item.health_up = False
         item.next_schema_check = item.next_health_read = 0.0
         if self.receiver is not None:

@@ -22,6 +22,7 @@ from fastapi import HTTPException
 
 from app.data_channel.integrated import native
 from app.data_channel.integrated import replica_control as control
+from app.data_channel.integrated import replica_coverage as coverage
 from app.data_channel.integrated import replica_store as store
 from app.data_channel.integrated.contracts import fail, row_token, wire_value
 from app.data_channel.integrated.models import IntegratedAsset
@@ -63,14 +64,29 @@ def _utc_iso(value: datetime | None) -> str | None:
     return aware.astimezone(timezone.utc).isoformat()
 
 
-def _stale(replica: IntegratedReplica) -> bool:
-    """Readable but not fully caught up: anything other than a clean ``ready``.
+def _display_state(replica: IntegratedReplica) -> tuple[str, bool]:
+    """``(display status, stale)`` under the shared coverage freshness bound.
 
-    ``initializing``/``catching_up``/``stale`` may still serve the previous
-    complete active run, but its coverage is already behind the replication
-    frontier — reads must be annotated, never presented as fresh.
+    A persisted ``ready`` is only as fresh as its last confirmed coverage cut:
+    when that proof is missing or older than ``COVERAGE_STALE_SECONDS`` the
+    read lane presents ``stale`` — the same demotion the executor persists on
+    its next tick (``REPLICA_COVERAGE_STALE`` / ``REPLICA_COVERAGE_UNCONFIRMED``),
+    computed here read-only so status, preview and unified query stay honest
+    between executor ticks or while it is down. Every other status keeps its
+    exact label: unreadable states are never relabeled ``stale``, and reads
+    keep serving the old rows — nothing is written.
+
+    Readable but not fully caught up (``initializing``/``catching_up``/
+    ``stale``) may still serve the previous complete active run, but its
+    coverage is already behind the replication frontier — annotated, never
+    presented as fresh.
     """
-    return replica.status != "ready"
+    if replica.status == "ready":
+        age = coverage.coverage_age(replica.coverage_confirmed_at)
+        if age is None or coverage.coverage_age_stale(age):
+            return "stale", True
+        return "ready", False
+    return replica.status, replica.status != "ready"
 
 
 def _fail_http(code: str, status: str | None = None) -> None:
@@ -104,13 +120,14 @@ def replica_status_dto(db, asset) -> dict[str, Any] | None:
         and replica.status in control.READABLE_STATUSES
         and replica.schema_fingerprint == asset.schema_fingerprint
         and run.schema_fingerprint == asset.schema_fingerprint)
+    display, stale = _display_state(replica)
     return {
-        "status": replica.status,
+        "status": display,
         "complete": complete,
         # A non-ready replica that still serves an old active run is readable
         # but stale: the label must not imply the last confirmed coverage is
         # the last source change time.
-        "stale": bool(complete and _stale(replica)),
+        "stale": bool(complete and stale),
         "row_count": run.row_count if run is not None else None,
         "applied_at": _utc_iso(replica.applied_at),
         "coverage_confirmed_at": _utc_iso(replica.coverage_confirmed_at),
@@ -211,12 +228,12 @@ def preview_rows(db, user, asset_id, limit=100):
             values = {column["name"]: row[column["source_key"]]
                       for column in projection["columns"]}
         rows.append({"values": wire_value(values), "row_token": token})
-    coverage = replica.coverage_confirmed_at or replica.applied_at
-    stale = _stale(replica)
+    coverage_instant = replica.coverage_confirmed_at or replica.applied_at
+    display, stale = _display_state(replica)
     state = {
         "id": run.id, "kind": "replica_snapshot", "consistent": True,
-        "started_at": _utc_iso(coverage), "complete": True,
-        "row_count": len(rows), "replica_status": replica.status,
+        "started_at": _utc_iso(coverage_instant), "complete": True,
+        "row_count": len(rows), "replica_status": display,
         "stale": stale,
         # Coverage confirmation is the verified replication cut, not the last
         # source change time: quiet tables keep their confirmed coverage.

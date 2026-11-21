@@ -17,8 +17,30 @@ single transactions (3000 rows, update 1000, delete 1000), cross-table and
 PK-changing transactions, updates/deletes, TOASTed text/jsonb (unchanged
 placeholder fill), controlled source CRUD with row-token CAS/idempotency, a
 later-added table that must not restart the existing stream, interrupted
-initial candidates (abandon + rebuild), and drain/leak checks. Undrained gates
-are reported as honest SKIPPED reasons, never relaxed.
+initial candidates (abandon + rebuild), a PG TRUNCATE that must be captured
+and fenced (SOURCE_TRUNCATED -> rebuild_required, old rows refused by both
+read lanes), a restart of a catching_up candidate whose full snapshot is
+already persisted (same run/capture continues incrementally and stays
+readable, PG/MySQL), a platform-restore misalignment (older platform rows vs
+a verifiably newer real offset volume) whose continuation gate must fail
+closed (gap/rebuild_required, REPLICA_OFFSETS_AHEAD or SOURCE_LOG_GAP)
+without pulling a new child process, an interleaved long-transaction restore
+(T1 writes first, T2 commits first, T1 commits last; the real offsets.dat
+frozen on a mid-T1 DML entry whose lsn/lsn_proc sit below T2's END while the
+restored receive evidence ends exactly at T2's END) that must be rejected as
+REPLICA_OFFSETS_AHEAD without pulling a child (PG only), and drain/leak
+checks. Undrained gates are reported as honest SKIPPED reasons, never
+relaxed.
+
+The misalignment scenario performs an actual T0-consistent scoped rollback
+on the same fixture database: the cohort's control rows, its journal
+(transactions/receipts/batches) and its physical candidate table are backed
+up at a T0 boundary via CTAS and restored together with real SQL
+DELETE+reinsert after the offset volume verifiably advanced past what the
+T0 rows last received; the restored capture row is proven equal to the T0
+backup before the restart, and the T0-received vs T1 file ranks read
+through the production Java reader prove the file is strictly ahead of the
+restored received evidence. Unrelated platform rows are not reverted.
 
 Two source connections keep cohorts independent: cohort A (accounts, events,
 empty metrics, wide_types, toast_rows, long_tx, later orders) must never
@@ -45,7 +67,8 @@ import subprocess
 import threading
 import time
 import traceback
-from datetime import date, datetime, time as dt_time, timezone
+import uuid
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -141,6 +164,10 @@ CREATE TABLE acceptance.long_tx (
   id integer PRIMARY KEY, n integer NOT NULL, pad text NOT NULL);
 CREATE TABLE acceptance.float_types (
   id integer PRIMARY KEY, f4 real NOT NULL, f8 double precision NOT NULL);
+CREATE TABLE acceptance.resume_probe (
+  id integer PRIMARY KEY, val text NOT NULL);
+CREATE TABLE acceptance.interleave_probe (
+  id integer PRIMARY KEY, tag text NOT NULL, payload text NOT NULL);
 INSERT INTO acceptance.accounts VALUES
  (1,'alpha',3.141593,9999999999999999.9999,'{"k":[1,2],"s":"x"}',decode('0001ff5a','hex'),9223372036854775807),
  (2,'beta',0.000001,-0.0001,'{"nested":{"a":true}}',decode('ff00','hex'),-9223372036854775808),
@@ -164,6 +191,8 @@ INSERT INTO acceptance.wide_types VALUES
 INSERT INTO acceptance.float_types VALUES
  (1,1.5,-2.25),(2,-0.5,0.125),
  (4,1.234567,1.2345678901234567);
+INSERT INTO acceptance.resume_probe VALUES (1,'rp-1'),(2,'rp-2');
+INSERT INTO acceptance.interleave_probe VALUES (1,'seed','s1'),(2,'seed','s2');
 INSERT INTO acceptance.toast_rows VALUES
  (1,repeat('A',199990)||'-seed-tail-1',
   jsonb_build_object('blob',repeat('B',200000),'n',1),'seed'),
@@ -176,6 +205,8 @@ ALTER TABLE acceptance.wide_types REPLICA IDENTITY FULL;
 ALTER TABLE acceptance.toast_rows REPLICA IDENTITY FULL;
 ALTER TABLE acceptance.long_tx REPLICA IDENTITY FULL;
 ALTER TABLE acceptance.float_types REPLICA IDENTITY FULL;
+ALTER TABLE acceptance.resume_probe REPLICA IDENTITY FULL;
+ALTER TABLE acceptance.interleave_probe REPLICA IDENTITY FULL;
 """
 
 MYSQL_DDL = """
@@ -203,6 +234,8 @@ CREATE TABLE long_tx (
 CREATE TABLE float_types (
   id INT PRIMARY KEY, f4 FLOAT NOT NULL, f8 DOUBLE NOT NULL,
   u8 BIGINT UNSIGNED NOT NULL);
+CREATE TABLE resume_probe (
+  id INT PRIMARY KEY, val VARCHAR(100) NOT NULL);
 INSERT INTO accounts VALUES
  (1,'alpha',3.141593,9999999999999999.9999,'{"k":[1,2],"s":"x"}',UNHEX('0001ff5a'),9223372036854775807),
  (2,'beta',0.000001,-0.0001,'{"nested":{"a":true}}',UNHEX('ff00'),-9223372036854775808),
@@ -227,6 +260,7 @@ INSERT INTO float_types VALUES
  (2,-0.5,0.125,9223372036854775808),
  (3,0,0,0),
  (4,1.234567,1.2345678901234567,1);
+INSERT INTO resume_probe VALUES (1,'rp-1'),(2,'rp-2');
 INSERT INTO toast_rows VALUES
  (1,CONCAT(REPEAT('A',199990),'-seed-tail-1'),
   JSON_OBJECT('blob',REPEAT('B',200000),'n',1),'seed'),
@@ -572,7 +606,8 @@ def driver_main(args) -> int:
                   "host": "source-pg" if is_pg else "source-mysql",
                   "port": 5432 if is_pg else 3306,
                   "database": "replica_source" if is_pg else SRC_SCHEMA}
-        for connection_id in ("acc-src-a", "acc-src-b", "acc-src-c"):
+        for connection_id in ("acc-src-a", "acc-src-b", "acc-src-c",
+                              "acc-src-d", "acc-src-e"):
             db.add(Connection(id=connection_id,
                               name=f"acceptance cohort {connection_id[-1]}",
                               kind=kind, config=dict(common), status="active",
@@ -590,7 +625,8 @@ def driver_main(args) -> int:
 
     assets = {name: f"asset-{name}" for name in
               ("accounts", "events", "metrics_empty", "wide_types",
-               "toast_rows", "long_tx", "rebuild_target", "float_types")}
+               "toast_rows", "long_tx", "rebuild_target", "float_types",
+               "resume_probe", "interleave_probe")}
     cohort_a_assets = [assets["accounts"], assets["events"],
                        assets["metrics_empty"], assets["wide_types"],
                        assets["toast_rows"], assets["long_tx"]]
@@ -653,6 +689,39 @@ def driver_main(args) -> int:
                  "status": row.status, "generation": row.generation,
                  "committed_seq": row.committed_seq}
                 for row in db.scalars(statement)]
+
+    def durable_offset(capture_id):
+        """(matched offset, validator verdict) via the production reader."""
+        path = Path("/tmp/ra/state") / capture_id / "offsets.dat"
+        if not path.is_file():
+            return None, "missing"
+        entries = supervisor._read_offsets(path)
+        problem = supervisor._offset_problem(
+            entries, capture_id, "postgres" if is_pg else "mysql")
+        expected = "oo_replica_" + capture_id.replace("-", "")
+        matched = next(
+            (entry.get("offset") for entry in entries or []
+             if isinstance(entry, dict)
+             and (entry.get("partition") or {}).get("server") == expected
+             and isinstance(entry.get("offset"), dict)), None)
+        return matched, problem
+
+    def offset_rank(offset):
+        """Comparable durable position: PG LSN int, MySQL (file, pos)."""
+        if not isinstance(offset, dict):
+            return None
+        if is_pg:
+            for key in ("lsn", "lsn_proc", "lsn_commit"):
+                value = offset.get(key)
+                if isinstance(value, int) and not isinstance(value, bool) \
+                        and value > 0:
+                    return value
+            return None
+        file_name, pos = offset.get("file"), offset.get("pos")
+        if (isinstance(file_name, str) and file_name
+                and isinstance(pos, int) and not isinstance(pos, bool)):
+            return (file_name, pos)
+        return None
 
     # ── Gate 1: initial snapshot progress + baseline exactness ───────────
     # Per current runtime guidance: verify stream/run progress (stop at
@@ -871,6 +940,8 @@ def driver_main(args) -> int:
                 return toast_matches(rows)
             if name == "float_types":
                 return float_matches(rows)
+            if name == "resume_probe":
+                return [row["val"] for row in rows] == ["rp-1", "rp-2"]
             if name == "long_tx":
                 return rows == []
             if name == "rebuild_target":
@@ -1834,16 +1905,950 @@ def driver_main(args) -> int:
     except BaseException as exc:  # noqa: BLE001
         fail("add_table_keeps_existing_stream", exc)
 
-    # ── Gate 7: drain every owned capture and prove no source resources leak
+    # ── Gate 6b: PG TRUNCATE captured and fenced, old rows refused ────────
+    # A truncate must never leave a seemingly healthy old table behind: the
+    # journal raises SOURCE_TRUNCATED, the capture turns blocked and the
+    # member turns rebuild_required, so neither read lane may serve the old
+    # rows any more. Cohort C (acc-src-c) finished its coverage duty in Gate
+    # 1b; its single-member cohort makes the fence observable without
+    # poisoning the cohorts later gates depend on.
     try:
+        if not is_pg:
+            # PG-only scenario by assignment: MySQL TRUNCATE is DDL in the
+            # binlog, not an op 't' row event. Recorded as an explicit scope
+            # note (no gate entry) so the mysql lane stays meaningful
+            # instead of carrying a permanently red not-applicable gate.
+            print("@@GATE@@ pg_truncate_captured_rebuild_required="
+                  "SKIPPED_pg_only", flush=True)
+            observed["pg_truncate_scope"] = (
+                "PG-only scenario (MySQL TRUNCATE is DDL, not op 't'); "
+                "not evaluated on mysql")
+        else:
+            def float_state_ok(db, *, not_run=None):
+                state = replica_states(db).get(assets["float_types"], {})
+                return (state if state.get("active")
+                        and not state.get("pending")
+                        and (not_run is None or state["active"] != not_run)
+                        and state.get("status") in {"ready", "stale"}
+                        else None)
+
+            base_state = pump(float_state_ok, deadline=180,
+                              what="float_types published before truncate")
+            with SessionLocal() as db:
+                preview = service.preview_rows(
+                    db, db.get(User, user_id), assets["float_types"], 10)
+            baseline_ids = [row["values"].get("id") for row in preview["rows"]]
+            baseline_ok = (baseline_ids == [1, 2, 4]
+                           and preview["source_state"]["replica_status"]
+                           in {"ready", "stale"})
+
+            source_exec([f"TRUNCATE TABLE {SRC_SCHEMA}.float_types"])
+
+            def truncate_fenced(db):
+                capture = db.scalar(sa.select(IntegratedReplicaCapture).where(
+                    IntegratedReplicaCapture.connection_id == "acc-src-c"))
+                replica = db.get(IntegratedReplica, assets["float_types"])
+                if capture is None or replica is None:
+                    return None
+                if (capture.status in {"blocked", "gap"}
+                        or replica.status in {"rebuild_required",
+                                              "blocked"}):
+                    return {"capture": capture.status,
+                            "capture_code": capture.last_error_code,
+                            "replica": replica.status,
+                            "replica_code": replica.last_error_code}
+                return None
+
+            fenced = pump(truncate_fenced, deadline=120,
+                          what="TRUNCATE fenced as SOURCE_TRUNCATED")
+            fence_ok = (fenced["capture"] == "blocked"
+                        and fenced["capture_code"] == "SOURCE_TRUNCATED"
+                        and fenced["replica"] == "rebuild_required"
+                        and fenced["replica_code"] == "SOURCE_TRUNCATED")
+
+            def lane_refused(lane):
+                """One rejection check shared by both read lanes."""
+                from contextlib import ExitStack
+
+                from app.data_channel.query.contracts import QueryError
+
+                try:
+                    with SessionLocal() as db, ExitStack() as stack:
+                        if lane == "preview":
+                            service.preview_rows(
+                                db, db.get(User, user_id),
+                                assets["float_types"], 10)
+                        else:
+                            relation = providers.resolve_integrated(
+                                db, db.get(User, user_id),
+                                [("src", Binding(
+                                    kind="integrated",
+                                    asset_id=assets["float_types"]))],
+                                QueryLimits(), stack)["src"]
+                            db.execute(sa.select(
+                                relation.expressions["id"]))
+                            relation.recheck()
+                except (HTTPException, QueryError) as exc:
+                    detail = getattr(exc, "detail", None)
+                    code = (detail.get("code") if isinstance(detail, dict)
+                            else getattr(exc, "code", None))
+                    status = (getattr(exc, "status_code", None)
+                              or getattr(exc, "status", None))
+                    return status == 409 and code == "replica_not_ready"
+                return False
+
+            preview_rejected = lane_refused("preview")
+            query_rejected = lane_refused("query")
+            # The physical candidate still holds the old rows: the fence is a
+            # read-contract refusal, not a table drop. Proof, not assumption.
+            with SessionLocal() as db:
+                _, stale_candidate = candidate_rows(db, assets["float_types"])
+            old_rows_held = [row.get("id") for row in stale_candidate or []]
+
+            # The existing rebuild capability must replace the fenced replica
+            # with a snapshot of the now-empty source: no old rows survive.
+            with SessionLocal() as db:
+                old_run_id = replica_states(
+                    db)[assets["float_types"]]["active"]
+                control.request_rebuild(
+                    db, db.get(IntegratedAsset, assets["float_types"]))
+                db.commit()
+
+            def rebuilt_published(db):
+                return float_state_ok(db, not_run=old_run_id)
+
+            rebuilt = pump(rebuilt_published, deadline=240,
+                           what="post-truncate rebuild published")
+            with SessionLocal() as db:
+                rebuilt_preview = service.preview_rows(
+                    db, db.get(User, user_id), assets["float_types"], 10)
+            rebuilt_state = rebuilt_preview["source_state"]
+            ok = (baseline_ok and fence_ok and preview_rejected
+                  and query_rejected and old_rows_held == [1, 2, 4]
+                  and rebuilt_preview["rows"] == []
+                  and rebuilt_state["run_id"] != old_run_id
+                  and rebuilt_state["replica_status"] in {"ready", "stale"})
+            record("pg_truncate_captured_rebuild_required", bool(ok), {
+                "baseline_replica": base_state,
+                "baseline_preview_ids": baseline_ids, "fence": fenced,
+                "preview_rejected": preview_rejected,
+                "query_rejected": query_rejected,
+                "candidate_rows_after_fence": old_rows_held,
+                "rebuild": {"replica": rebuilt,
+                            "preview_rows": len(rebuilt_preview["rows"]),
+                            "run_id": rebuilt_state["run_id"],
+                            "replica_status":
+                                rebuilt_state["replica_status"]}})
+            if not ok:
+                raise AssertionError(
+                    f"TRUNCATE fence/rebuild mismatch: fence={fenced!r} "
+                    f"baseline={baseline_ids!r} preview={preview_rejected} "
+                    f"query={query_rejected} candidate={old_rows_held!r} "
+                    f"rebuilt_rows={len(rebuilt_preview['rows'])} "
+                    f"rebuilt_run={rebuilt_state['run_id']}")
+    except BaseException as exc:  # noqa: BLE001
+        fail("pg_truncate_captured_rebuild_required", exc)
+
+    # ── Gate 6c: catching_up candidate restart resumes the same run ───────
+    # The candidate has persisted its complete full snapshot but is still
+    # behind the verified-catchup barrier. Publication needs a confirmed
+    # coverage cut, so the minimal deterministic seam — holding the module
+    # level emit_coverage_probe the supervisor resolves per tick — keeps the
+    # candidate in catching_up without racing the probe cadence. A real
+    # graceful stop/start (with the run lease expired, so the restart must
+    # take the candidate over under a new owner) must then continue the SAME
+    # run/capture from the durable offsets (never abandon-and-resnapshot;
+    # Gate 5 keeps the mid-snapshot path), and the recovered replica must
+    # publish and serve real preview reads whose final row values match the
+    # source.
+    try:
+        from app.data_channel.integrated import replica_connector as seam
+
+        # Capacity: all four capture slots hold cohorts no later gate asserts
+        # on (their coverage duties are done). End them through the real
+        # drain path — final states recorded — so cohort D runs on the
+        # minimal configuration instead of queueing behind a full executor.
         with SessionLocal() as db:
             db.execute(sa.update(IntegratedReplicaCapture).values(
                 status="draining"))
             db.commit()
 
+        def all_stopped(db):
+            rows = capture_rows(db)
+            return ({"captures": rows} if rows and all(
+                row["status"] == "stopped" for row in rows) else None)
+
+        observed["capacity_drain_before_resume_cohort"] = pump(
+            all_stopped, deadline=120,
+            what="capacity drain before cohort D")
+
+        with SessionLocal() as db:
+            register_asset(db, "acc-src-d", "resume_probe")
+            db.commit()
+
+        real_emit = seam.emit_coverage_probe
+        held = []
+
+        def held_emit(_connection, capture_id, _token):
+            # Deterministic hold: consume the probe slot without emitting, so
+            # no confirmed cut can publish the catching_up candidate.
+            held.append(capture_id)
+            return None
+
+        seam.emit_coverage_probe = held_emit
+
+        def window_open(db):
+            run = db.scalar(sa.select(IntegratedReplicaRun).where(
+                IntegratedReplicaRun.asset_id == assets["resume_probe"],
+                IntegratedReplicaRun.status == "catching_up")
+                .order_by(IntegratedReplicaRun.created_at.desc()).limit(1))
+            capture = (db.get(IntegratedReplicaCapture, run.capture_id)
+                       if run is not None else None)
+            if capture is not None and capture.status in {"blocked", "gap"}:
+                return {"violation": {"capture": capture.status,
+                                      "code": capture.last_error_code}}
+            if run is None or (run.snapshot_proof or {}).get("complete") \
+                    is not True:
+                return None
+            return {"run_id": run.id, "run_row_count": run.row_count,
+                    "capture_id": capture.id,
+                    "generation": capture.generation,
+                    "snapshot_offset": run.snapshot_proof.get("offset")}
+
+        window = pump(window_open, deadline=240,
+                      what="catching_up window (publication held)")
+        if window.get("violation"):
+            raise AssertionError(
+                f"resume cohort fenced before restart: "
+                f"{window['violation']!r}")
+
+        # Wait for the offsets file to actually flush a resumable, non-skip
+        # position (production validator + a real dialect position) — not
+        # merely for the catching_up label.
+        def offsets_flushed(_db):
+            offset, problem = durable_offset(window["capture_id"])
+            return ({"offset": offset}
+                    if problem is None and offset_rank(offset) is not None
+                    else None)
+
+        flushed = pump(offsets_flushed, deadline=60,
+                       what="durable offsets flush at stop")
+        stopped_offset = flushed["offset"]
+
+        with SessionLocal() as db:
+            captures_d_before = {(row["id"], row["generation"])
+                                 for row in capture_rows(db)
+                                 if row["connection"] == "acc-src-d"}
+        supervisor.shutdown()
+        if getattr(supervisor, "lease", None) is not None:
+            supervisor.lease.reset()
+        engine.dispose()
+        # Expire the run lease only now, with the child and receiver stopped
+        # (a still-running child would have its batches rejected on the
+        # expired lease): the restart must take the candidate over under a
+        # new owner token instead of merely renewing the old one.
+        with SessionLocal() as db:
+            run = db.scalar(sa.select(IntegratedReplicaRun).where(
+                IntegratedReplicaRun.id == window["run_id"])
+                .with_for_update().execution_options(populate_existing=True))
+            owner_before = run.owner_token
+            run.lease_expires_at = (datetime.now(timezone.utc)
+                                    - timedelta(seconds=1))
+            db.commit()
+        # Real graceful restart; the hold died with the old pools and the
+        # restored module function lets the fresh supervisor probe again.
+        seam.emit_coverage_probe = real_emit
+        supervisor = fresh_supervisor()
+        # A real change committed while the whole executor was down.
+        source_exec([f"INSERT INTO {SRC_SCHEMA}.resume_probe"
+                     " VALUES (3,'rp-3')"])
+
+        def resumed(db):
+            captures_d = [row for row in capture_rows(db)
+                          if row["connection"] == "acc-src-d"]
+            window_row = next((row for row in captures_d
+                               if row["id"] == window["capture_id"]), None)
+            run = db.get(IntegratedReplicaRun, window["run_id"])
+            _, rows = candidate_rows(db, assets["resume_probe"])
+            values = [row["val"] for row in rows or []]
+            violation = None
+            if {(row["id"], row["generation"]) for row in captures_d} \
+                    != captures_d_before:
+                violation = {"kind": "capture_topology_changed",
+                             "captures": captures_d}
+            elif window_row is None:
+                violation = {"kind": "window_capture_missing"}
+            elif window_row["status"] in {"blocked", "gap", "stopped",
+                                          "draining"}:
+                violation = {"kind": "resumed_candidate_terminal",
+                             "capture": window_row}
+            elif run is None or run.status not in {"catching_up", "active"}:
+                violation = {"kind": "window_run_terminal",
+                             "run": None if run is None else run.status}
+            if violation is not None:
+                return {"violation": violation}
+            if "rp-3" not in values:
+                return None  # the offset and source checks may still be in flight
+            if run.status == "catching_up" and run.owner_token in (None, owner_before):
+                return {"violation": {"kind": "takeover_not_reclaimed",
+                                      "owner": run.owner_token}}
+            # Publication within one tick of the apply also proves the
+            # takeover: the expired owner could never have published.
+            return {"values": values, "owner": run.owner_token,
+                    "published_during_resume": run.status == "active"}
+
+        resume_detail = pump(resumed, deadline=240,
+                             what="catching_up restart resume")
+        if resume_detail.get("violation"):
+            raise AssertionError(
+                f"resume violation: {resume_detail['violation']!r}")
+
+        def published_d(db):
+            state = replica_states(db).get(assets["resume_probe"], {})
+            return (state if state.get("active")
+                    and state["active"] == window["run_id"]
+                    and not state.get("pending")
+                    and state.get("status") in {"ready", "stale"} else None)
+
+        published = pump(published_d, deadline=180,
+                         what="recovered replica publication")
+        with src.connect() as conn:
+            source_values = [row[0] for row in conn.execute(sa.text(
+                f"SELECT val FROM {SRC_SCHEMA}.resume_probe ORDER BY id"))]
+        with SessionLocal() as db:
+            preview = service.preview_rows(
+                db, db.get(User, user_id), assets["resume_probe"], 10)
+        preview_values = [row["values"].get("val") for row in preview["rows"]]
+        preview_state = preview["source_state"]
+        ok = (preview_values == source_values == ["rp-1", "rp-2", "rp-3"]
+              and preview_state["replica_status"] in {"ready", "stale"}
+              and preview_state["run_id"] == window["run_id"]
+              and (resume_detail.get("published_during_resume")
+                   or resume_detail.get("owner") not in (None,
+                                                         owner_before)))
+        record("catching_up_restart_resumes_same_run", bool(ok), {
+            "window": window, "resume": resume_detail, "published": published,
+            "hold_seam_held_probes": len(held),
+            "pre_restart_offset": stopped_offset,
+            "lease_expired_for_takeover": True,
+            "owner_before": owner_before,
+            "owner_after": resume_detail.get("owner"),
+            "read_lanes": {"candidate": "store.read_batches (same run)",
+                           "published": "service.preview_rows"},
+            "source_values": source_values, "preview_values": preview_values,
+            "preview_run": preview_state["run_id"],
+            "preview_status": preview_state["replica_status"]})
+        if not ok:
+            raise AssertionError(
+                f"recovered replica mismatch: preview={preview_values!r} "
+                f"source={source_values!r} status="
+                f"{preview_state['replica_status']} run="
+                f"{preview_state['run_id']} window_run={window['run_id']}")
+    except BaseException as exc:  # noqa: BLE001
+        fail("catching_up_restart_resumes_same_run", exc)
+
+    # ── Shared scoped T0 snapshot/restore (Gates 6d/6e) ───────────────────
+    # A T0-consistent scoped snapshot of one cohort's platform rows: control
+    # rows (capture/replica/runs), the journal (transactions/receipts/batches)
+    # and the physical candidate table, taken via CTAS on the same fixture
+    # database and restored together later with real DELETE+reinsert.
+    from app.data_channel.integrated.replica_capture_models import (
+        IntegratedReplicaReceipt, IntegratedReplicaTransaction)
+    from app.data_channel.integrated.replica_snapshot_models import (
+        IntegratedReplicaSnapshotBatch)
+
+    t0_names = {key: model.__table__.name for key, model in (
+        ("captures", IntegratedReplicaCapture),
+        ("runs", IntegratedReplicaRun),
+        ("replicas", IntegratedReplica),
+        ("transactions", IntegratedReplicaTransaction),
+        ("receipts", IntegratedReplicaReceipt),
+        ("batches", IntegratedReplicaSnapshotBatch))}
+    t0_backup_tables = ("capture", "runs", "replica", "tx", "receipts",
+                        "batches", "phys")
+
+    def t0_snapshot(prefix, cid, asset, phys_name):
+        with engine.begin() as conn:
+            for backup in t0_backup_tables:
+                conn.execute(sa.text(f"DROP TABLE IF EXISTS {prefix}_{backup}"))
+            conn.execute(sa.text(
+                f"CREATE TABLE {prefix}_capture AS SELECT * FROM "
+                f"{t0_names['captures']} WHERE id = '{cid}'"))
+            conn.execute(sa.text(
+                f"CREATE TABLE {prefix}_runs AS SELECT * FROM "
+                f"{t0_names['runs']} WHERE capture_id = '{cid}'"))
+            conn.execute(sa.text(
+                f"CREATE TABLE {prefix}_replica AS SELECT * FROM "
+                f"{t0_names['replicas']} WHERE asset_id = '{asset}'"))
+            conn.execute(sa.text(
+                f"CREATE TABLE {prefix}_tx AS SELECT * FROM "
+                f"{t0_names['transactions']} WHERE capture_id = '{cid}'"))
+            conn.execute(sa.text(
+                f"CREATE TABLE {prefix}_receipts AS SELECT r.* FROM "
+                f"{t0_names['receipts']} r JOIN {t0_names['transactions']} t ON "
+                f"r.transaction_id = t.id WHERE t.capture_id = '{cid}'"))
+            conn.execute(sa.text(
+                f"CREATE TABLE {prefix}_batches AS SELECT b.* FROM "
+                f"{t0_names['batches']} b JOIN {t0_names['runs']} ru ON "
+                f"b.run_id = ru.id WHERE ru.capture_id = '{cid}'"))
+            conn.execute(sa.text(
+                f"CREATE TABLE {prefix}_phys AS SELECT * FROM {phys_name}"))
+
+    def t0_rollback(prefix, cid, asset, phys_name):
+        # The actual rollback on the same fixture database: the journal is
+        # restored to T0 (never merely cleared), together with the control
+        # rows and the physical candidate table.
+        with engine.begin() as conn:
+            conn.execute(sa.text(
+                f"DELETE FROM {t0_names['receipts']} WHERE transaction_id IN "
+                f"(SELECT id FROM {t0_names['transactions']} WHERE "
+                f"capture_id = :cid)"), {"cid": cid})
+            conn.execute(sa.text(
+                f"DELETE FROM {t0_names['transactions']} WHERE capture_id ="
+                f" :cid"), {"cid": cid})
+            conn.execute(sa.text(
+                f"DELETE FROM {t0_names['batches']} WHERE run_id IN (SELECT id"
+                f" FROM {t0_names['runs']} WHERE capture_id = :cid)"),
+                {"cid": cid})
+            conn.execute(sa.text(
+                f"DELETE FROM {t0_names['runs']} WHERE capture_id = :cid"),
+                {"cid": cid})
+            conn.execute(sa.text(
+                f"DELETE FROM {t0_names['captures']} WHERE id = :cid"),
+                {"cid": cid})
+            conn.execute(sa.text(
+                f"DELETE FROM {t0_names['replicas']} WHERE asset_id = :asset"),
+                {"asset": asset})
+            conn.execute(sa.text(f"DELETE FROM {phys_name}"))
+            for target, backup in (
+                    (t0_names["replicas"], f"{prefix}_replica"),
+                    (t0_names["captures"], f"{prefix}_capture"),
+                    (t0_names["runs"], f"{prefix}_runs"),
+                    (t0_names["batches"], f"{prefix}_batches"),
+                    (t0_names["transactions"], f"{prefix}_tx"),
+                    (t0_names["receipts"], f"{prefix}_receipts"),
+                    (phys_name, f"{prefix}_phys")):
+                conn.execute(sa.text(
+                    f"INSERT INTO {target} SELECT * FROM {backup}"))
+
+    def t0_drop_snapshot(prefix):
+        with engine.begin() as conn:
+            for backup in t0_backup_tables:
+                conn.execute(sa.text(f"DROP TABLE IF EXISTS {prefix}_{backup}"))
+
+    # ── Gate 6d: platform restore misalignment fails the gate closed ──────
+    # A T0-consistent scoped backup is taken on this same fixture database —
+    # the cohort's control rows, its journal (transactions/receipts/batches)
+    # and its physical candidate table — and restored together after the
+    # real offset volume verifiably advanced past what the T0 rows last
+    # RECEIVED. Resuming from that file would silently skip everything in
+    # between, so the continuation gate must fail closed (capture gap,
+    # replica rebuild_required) without pulling a new child:
+    # REPLICA_OFFSETS_AHEAD (file ahead of the restored received evidence)
+    # or SOURCE_LOG_GAP (slot flushed past it) both close it.
+    try:
+        with SessionLocal() as db:
+            run_d = db.scalar(sa.select(IntegratedReplicaRun).where(
+                IntegratedReplicaRun.asset_id == assets["resume_probe"],
+                IntegratedReplicaRun.status.in_(["catching_up", "active"]))
+                .order_by(IntegratedReplicaRun.created_at.desc()).limit(1))
+            capture_d = (db.get(IntegratedReplicaCapture, run_d.capture_id)
+                         if run_d is not None else None)
+        if capture_d is None or capture_d.status not in {
+                "starting", "streaming", "stale"}:
+            raise AssertionError(
+                "misalignment needs cohort D streaming after Gate 6c: run="
+                f"{None if run_d is None else run_d.status} capture="
+                f"{None if capture_d is None else capture_d.status}")
+        phys_name = store.build_replica_schema(
+            run_d.id, run_d.schema_json,
+            schema_fingerprint=run_d.schema_fingerprint).table_name
+        try:
+            t0_offset, _ = durable_offset(capture_d.id)
+        except Exception:  # noqa: BLE001 - unreadable baseline is a failure
+            t0_offset = None
+        t0_rank = offset_rank(t0_offset)
+        if t0_rank is None:
+            raise AssertionError(
+                f"no provable T0 offset baseline: {t0_offset!r}")
+        uuid.UUID(capture_d.id)
+        cid, asset = capture_d.id, assets["resume_probe"]
+        t0_snapshot("ra_t0", cid, asset, phys_name)
+        # The backup snapshot itself is the T0 baseline (the receiver thread
+        # keeps advancing the live rows between any earlier read and here).
+        with SessionLocal() as db:
+            t0_row = dict(db.execute(sa.text(
+                "SELECT committed_seq, received_seq, source_offset, "
+                "committed_position FROM ra_t0_capture WHERE id = :cid"),
+                {"cid": cid}).mappings().first() or {})
+        db_received_rank = offset_rank(t0_row.get("source_offset"))
+        if db_received_rank is None:
+            raise AssertionError(
+                f"T0 rows carry no received-offset evidence: {t0_row!r}")
+
+        source_exec([f"INSERT INTO {SRC_SCHEMA}.resume_probe"
+                     " VALUES (4,'rp-4')"])
+
+        def journaled(db):
+            _, rows = candidate_rows(db, assets["resume_probe"])
+            values = [row["val"] for row in rows or []]
+            return {"rows": values} if "rp-4" in values else None
+
+        pump(journaled, deadline=180, what="misalignment pre-rollback commit")
+
+        def file_advanced(_db):
+            rank = offset_rank(durable_offset(capture_d.id)[0])
+            return ({"t1_rank": rank}
+                    if rank is not None and rank > t0_rank else None)
+
+        advanced = pump(file_advanced, deadline=60,
+                        what="offset volume ahead of T0")
+        t1_rank = advanced["t1_rank"]
+        # Misalignment proof: the file is ahead of what the restored rows
+        # last RECEIVED — not merely ahead of an older T0 file.
+        if not t1_rank > db_received_rank:
+            raise AssertionError(
+                f"file rank {t1_rank!r} is not ahead of the T0 received "
+                f"evidence {db_received_rank!r}")
+
+        supervisor.shutdown()
+        if getattr(supervisor, "lease", None) is not None:
+            supervisor.lease.reset()
+        engine.dispose()
+        t0_rollback("ra_t0", cid, asset, phys_name)
+        with SessionLocal() as db:
+            restored = db.get(IntegratedReplicaCapture, cid)
+            restored_row = {"committed_seq": restored.committed_seq,
+                            "received_seq": restored.received_seq,
+                            "source_offset": restored.source_offset,
+                            "committed_position": restored.committed_position}
+        if restored_row != t0_row:
+            raise AssertionError(
+                f"rollback not verifiable: {restored_row!r} != {t0_row!r}")
+
+        supervisor = fresh_supervisor()
+        spawned = []
+        production_start = supervisor._start
+
+        def recording_start(item, *start_args, **start_kwargs):
+            spawned.append(item.capture_id)
+            return production_start(item, *start_args, **start_kwargs)
+
+        supervisor._start = recording_start
+
+        def misaligned_fail_closed(db):
+            capture = db.get(IntegratedReplicaCapture, capture_d.id,
+                             populate_existing=True)
+            replica = db.get(IntegratedReplica, assets["resume_probe"])
+            child_pulled = capture_d.id in spawned
+            if capture is not None and (capture.status in {"blocked", "gap"}
+                                        or child_pulled):
+                return {"capture": capture.status,
+                        "code": capture.last_error_code,
+                        "replica": replica.status if replica else None,
+                        "replica_code": (replica.last_error_code
+                                         if replica else None),
+                        "child_pulled": child_pulled}
+            return None
+
+        verdict = pump(misaligned_fail_closed, deadline=120,
+                       what="restore misalignment fail-closed")
+        ok = (verdict["code"] in {"REPLICA_OFFSETS_AHEAD", "SOURCE_LOG_GAP"}
+              and verdict["replica"] == "rebuild_required"
+              and not verdict["child_pulled"])
+        try:
+            t0_drop_snapshot("ra_t0")
+        except Exception as exc:  # noqa: BLE001
+            failures.append("restore_misalignment_fail_closed: T0 backup "
+                            f"tables left behind ({type(exc).__name__})")
+        record("restore_misalignment_fail_closed", bool(ok), {
+            "capture_id": cid, "run_class_at_t0": run_d.status,
+            "t0_rank": t0_rank, "t1_rank": t1_rank,
+            "db_received_rank": db_received_rank,
+            "file_ahead_of_t0_received": True,
+            "t0_capture_row": t0_row, "restored_capture_row": restored_row,
+            "verdict": verdict, "spawned_captures": spawned,
+            "rollback": "scoped T0-consistent restore on the same fixture "
+                        "database: cohort control rows, journal (transactions/"
+                        "receipts/batches) and the physical candidate table "
+                        "all return to T0 together; restored capture row "
+                        "verified equal before restart",
+            "expected_code": "REPLICA_OFFSETS_AHEAD (file ahead of the "
+                             "restored received evidence) or SOURCE_LOG_GAP "
+                             "(slot flushed past it)"})
+        if not ok:
+            raise AssertionError(f"misalignment not fail-closed: {verdict!r}")
+    except BaseException as exc:  # noqa: BLE001
+        fail("restore_misalignment_fail_closed", exc)
+
+    # ── Gate 6e: interleaved mid-transaction restore fails closed ────────
+    # Confirmed real pgoutput behavior (.artifacts/replica-pg-order/): when
+    # T1 writes first and commits LAST while T2 commits first, Debezium
+    # delivers T2's END before any T1 DML, and the child's periodic offset
+    # flush parks offsets.dat on mid-T1 entries whose lsn/lsn_proc sit BELOW
+    # lsn_commit (T2's END). The frontier comparator collapses both a mid-T1
+    # file entry and a receive state that stopped exactly at T2's END to the
+    # same (lsn_commit, 0) position, so a platform restore whose durable
+    # receive evidence ends at T2's END looks "covered" by a file parked
+    # mid-T1 — yet Debezium's restart from that stored event point
+    # permanently skips the already-counted T1 rows the receiver never got.
+    # This gate builds that exact interleaving on a real child, freezes the
+    # REAL offsets.dat on a mid-T1 DML entry (a test-only receiver delay
+    # stretches the stream so the periodic flush is observable, then a
+    # graceful child stop finalizes it; the dead child can never overwrite
+    # it again), restores the cohort's T0 rows (receive evidence == T2's
+    # END) through the same scoped rollback as Gate 6d, and requires the
+    # continuation gate to reject the misalignment with REPLICA_OFFSETS_AHEAD
+    # without pulling a new child.
+    try:
+        if not is_pg:
+            # PG-only scenario by construction: the mid-transaction offset
+            # shape (lsn/lsn_proc < lsn_commit with counted DML events) and
+            # the T2-before-T1 delivery inversion are pgoutput semantics.
+            print("@@GATE@@ interleaved_midtxn_restore_fail_closed="
+                  "SKIPPED_pg_only", flush=True)
+            observed["interleaved_midtxn_scope"] = (
+                "PG-only scenario (pgoutput interleaved long-transaction "
+                "delivery); not evaluated on mysql")
+        else:
+            from app.data_channel.integrated import replica_connector as seam
+
+            # Isolated cohort E: the interleave probe never shares a capture,
+            # slot or journal with any cohort another gate asserts on.
+            with SessionLocal() as db:
+                register_asset(db, "acc-src-e", "interleave_probe")
+                db.commit()
+
+            def interleave_window(db):
+                run = db.scalar(sa.select(IntegratedReplicaRun).where(
+                    IntegratedReplicaRun.asset_id
+                    == assets["interleave_probe"],
+                    IntegratedReplicaRun.status.in_(
+                        ["catching_up", "active"]))
+                    .order_by(IntegratedReplicaRun.created_at.desc()).limit(1))
+                capture = (db.get(IntegratedReplicaCapture, run.capture_id)
+                           if run is not None else None)
+                if capture is not None and capture.status in {
+                        "blocked", "gap"}:
+                    return {"violation": {"capture": capture.status,
+                                          "code": capture.last_error_code}}
+                if run is None or (run.snapshot_proof or {}).get("complete") \
+                        is not True:
+                    return None
+                return {"run_id": run.id, "capture_id": capture.id,
+                        "run_status": run.status,
+                        "generation": capture.generation}
+
+            window = pump(interleave_window, deadline=240,
+                          what="interleave cohort established")
+            if window.get("violation"):
+                raise AssertionError(
+                    f"interleave cohort fenced: {window['violation']!r}")
+            cid = window["capture_id"]
+
+            def interleave_offsets_ready(_db):
+                offset, problem = durable_offset(cid)
+                return ({"offset": offset}
+                        if problem is None and offset_rank(offset) is not None
+                        else None)
+
+            pump(interleave_offsets_ready, deadline=60,
+                 what="interleave cohort durable offsets")
+
+            # Hold ordered coverage probes for the whole interleave: a probe
+            # MESSAGE observed between T2's END and the T0 snapshot would
+            # advance the receive evidence past the exact T2-END boundary
+            # this scenario must restore (same seam as Gate 6c).
+            real_emit = seam.emit_coverage_probe
+
+            def held_emit(_connection, _capture_id, _token):
+                return None
+
+            # Test-only stream stretch: once armed, every cohort E batch is
+            # delayed a bounded, interruptible ~3s inside the receiver, so
+            # the real child's periodic offset flush parks mid-T1 inside a
+            # window the driver controls. Never blocks forever; the finally
+            # below releases every wait even on failure.
+            slow = {"armed": False}
+            slow_release = threading.Event()
+            real_ingest = supervisor.receiver._replica_ingest_batch
+
+            def slowed_ingest(db, capture_id, records):
+                if capture_id == cid and slow["armed"]:
+                    until = time.monotonic() + 3.0
+                    while not slow_release.wait(0.2):
+                        if time.monotonic() >= until:
+                            break
+                return real_ingest(db, capture_id, records)
+
+            supervisor.receiver._replica_ingest_batch = slowed_ingest
+            t1 = src.connect()
+            try:
+                seam.emit_coverage_probe = held_emit
+
+                # T1 writes first and stays open; T2 writes later and commits
+                # first. T1's rows therefore own the lower WAL positions and
+                # T2's END is the lsn_commit every mid-T1 flush refers to.
+                t1_rows = 16000
+                t1_xid = t1.execute(sa.text(
+                    "SELECT txid_current() & 4294967295")).scalar_one()
+                t1.execute(sa.text(
+                    f"INSERT INTO {SRC_SCHEMA}.interleave_probe"
+                    " SELECT g, 't1', 'x' FROM generate_series(1000001,"
+                    f" {1000000 + t1_rows}) g"))
+                t2 = src.connect()
+                t2_xid = t2.execute(sa.text(
+                    "SELECT txid_current() & 4294967295")).scalar_one()
+                t2.execute(sa.text(
+                    f"INSERT INTO {SRC_SCHEMA}.interleave_probe"
+                    " SELECT g, 't2', 'x' FROM generate_series("
+                    "2000001, 2000003) g"))
+                t2.commit()
+                t2.close()
+
+                def t0_evidence(db):
+                    capture = db.get(IntegratedReplicaCapture, cid,
+                                     populate_existing=True)
+                    if capture is not None and capture.status in {
+                            "blocked", "gap"}:
+                        return {"violation": {"capture": capture.status,
+                                              "code": capture.last_error_code}}
+                    if capture is None:
+                        return None
+                    offset, problem = durable_offset(cid)
+                    if offset is None or problem is not None:
+                        return None
+                    if (offset.get("messageType") != "COMMIT"
+                            or offset.get("txId") != t2_xid
+                            or offset.get("lsn") != offset.get("lsn_commit")):
+                        return None
+                    received = capture.source_offset
+                    if (not isinstance(received, dict)
+                            or received.get("messageType") != "COMMIT"
+                            or received.get("txId") != t2_xid
+                            or received.get("lsn") != offset.get("lsn")):
+                        return None
+                    status, rows = candidate_rows(
+                        db, assets["interleave_probe"])
+                    tags = sorted(row.get("tag") for row in rows or [])
+                    if (status is None or tags != ["seed", "seed",
+                                                   "t2", "t2", "t2"]):
+                        return None
+                    return {"t2_end_offset": offset, "t2_applied_tags": tags}
+
+                t0 = pump(t0_evidence, deadline=180,
+                          what="T2 END received+applied before T1 commit (T0)")
+                if t0.get("violation"):
+                    raise AssertionError(
+                        f"interleave capture fenced before T0: "
+                        f"{t0['violation']!r}")
+                t2_end = t0["t2_end_offset"]
+                c_lsn = t2_end.get("lsn")
+
+                with SessionLocal() as db:
+                    run_e = db.get(IntegratedReplicaRun, window["run_id"])
+                    phys_name = store.build_replica_schema(
+                        run_e.id, run_e.schema_json,
+                        schema_fingerprint=run_e.schema_fingerprint
+                    ).table_name
+                uuid.UUID(cid)
+                t0_snapshot("ra_t0i", cid, assets["interleave_probe"],
+                            phys_name)
+                with SessionLocal() as db:
+                    t0_row = dict(db.execute(sa.text(
+                        "SELECT committed_seq, received_seq, source_offset, "
+                        "committed_position FROM ra_t0i_capture "
+                        "WHERE id = :cid"),
+                        {"cid": cid}).mappings().first() or {})
+                if (t0_row.get("source_offset") or {}).get("lsn") != c_lsn:
+                    raise AssertionError(
+                        f"T0 receive evidence is not exactly T2's END: "
+                        f"{t0_row!r}")
+
+                # Now commit T1: pgoutput hands Debezium the buffered T1 rows
+                # only now, strictly after T2's END, in batches the receiver
+                # stretches so the periodic flush is observable mid-T1.
+                slow["armed"] = True
+                t1.commit()
+                t1.close()
+
+                def is_mid_t1(offset):
+                    """A real mid-T1 DML flush: lsn/lsn_proc below T2's END."""
+                    if not isinstance(offset, dict):
+                        return False
+                    lsn = offset.get("lsn")
+                    commit = offset.get("lsn_commit")
+                    events = offset.get("lsn_events_processed")
+                    return bool(
+                        offset.get("messageType") in
+                        ("INSERT", "UPDATE", "DELETE", "TRUNCATE")
+                        and isinstance(lsn, int) and isinstance(commit, int)
+                        and isinstance(events, int) and events >= 1
+                        and lsn < commit and commit == c_lsn
+                        and offset.get("txId") == t1_xid)
+
+                def frozen_mid_t1(_db):
+                    offset, problem = durable_offset(cid)
+                    if offset is None or problem is not None:
+                        return None
+                    return {"frozen_offset": offset} if is_mid_t1(offset) \
+                        else None
+
+                pump(frozen_mid_t1, deadline=120,
+                     what="offsets.dat parked on a mid-T1 DML entry")
+                item = supervisor.processes.get(cid)
+                if item is None or item.child is None:
+                    raise AssertionError("interleave child missing at freeze")
+                # Graceful stop (never kill_group): the engine's shutdown
+                # finalizes the offset flush at/after the last acknowledged
+                # mid-T1 record without tearing the file, and the dead child
+                # can never flush a later state over it.
+                item.child.stop()
+                frozen_offset, frozen_problem = durable_offset(cid)
+                if frozen_problem is not None or not is_mid_t1(frozen_offset):
+                    raise AssertionError(
+                        f"child stop finalized a non mid-T1 offset: "
+                        f"problem={frozen_problem!r} offset={frozen_offset!r}")
+
+                slow_release.set()
+                supervisor.shutdown()
+                if getattr(supervisor, "lease", None) is not None:
+                    supervisor.lease.reset()
+                engine.dispose()
+                seam.emit_coverage_probe = real_emit
+                slow["armed"] = False
+
+                t0_rollback("ra_t0i", cid, assets["interleave_probe"],
+                            phys_name)
+                with SessionLocal() as db:
+                    restored = db.get(IntegratedReplicaCapture, cid)
+                    restored_row = {
+                        "committed_seq": restored.committed_seq,
+                        "received_seq": restored.received_seq,
+                        "source_offset": restored.source_offset,
+                        "committed_position": restored.committed_position}
+                if restored_row != t0_row:
+                    raise AssertionError(
+                        f"rollback not verifiable: {restored_row!r} != "
+                        f"{t0_row!r}")
+
+                supervisor = fresh_supervisor()
+                spawned = []
+                production_start = supervisor._start
+
+                def recording_start(start_item, *start_args, **start_kwargs):
+                    spawned.append(start_item.capture_id)
+                    return production_start(start_item, *start_args,
+                                            **start_kwargs)
+
+                supervisor._start = recording_start
+
+                def interleave_fail_closed(db):
+                    capture = db.get(IntegratedReplicaCapture, cid,
+                                     populate_existing=True)
+                    replica = db.get(IntegratedReplica,
+                                     assets["interleave_probe"])
+                    child_pulled = cid in spawned
+                    if capture is not None and (capture.status
+                                                in {"blocked", "gap"}
+                                                or child_pulled):
+                        return {"capture": capture.status,
+                                "code": capture.last_error_code,
+                                "replica": replica.status if replica else None,
+                                "replica_code": (replica.last_error_code
+                                                 if replica else None),
+                                "child_pulled": child_pulled}
+                    return None
+
+                verdict = pump(interleave_fail_closed, deadline=120,
+                               what="interleaved mid-T1 restore fail-closed")
+                # Settle: later ticks must not pull the child either.
+                for _ in range(6):
+                    supervisor.tick()
+                    time.sleep(0.5)
+
+                file_after, _ = durable_offset(cid)
+                frozen_keys = ("lsn", "lsn_proc", "lsn_commit", "messageType",
+                               "lsn_events_processed")
+                file_unchanged = (
+                    isinstance(file_after, dict)
+                    and all(file_after.get(key) == frozen_offset.get(key)
+                            for key in frozen_keys))
+                frozen_lsn_lt_commit = (frozen_offset.get("lsn")
+                                        < frozen_offset.get("lsn_commit"))
+                with src.connect() as conn:
+                    slot = conn.execute(sa.text(
+                        "SELECT confirmed_flush_lsn::text, restart_lsn::text"
+                        " FROM pg_replication_slots WHERE slot_name = :slot"),
+                        {"slot": "ir_" + cid.replace("-", "")}).first()
+                ok = (verdict["code"] == "REPLICA_OFFSETS_AHEAD"
+                      and verdict["replica"] == "rebuild_required"
+                      and not verdict["child_pulled"] and cid not in spawned
+                      and file_unchanged)
+                record("interleaved_midtxn_restore_fail_closed", bool(ok), {
+                    "capture_id": cid,
+                    "run_class_at_t0": window["run_status"],
+                    "t1_rows": t1_rows, "t1_xid": t1_xid, "t2_xid": t2_xid,
+                    "t2_end_offset": t2_end,
+                    "t2_applied_before_t1_commit": t0["t2_applied_tags"],
+                    "delivery_order": "all T2 records journaled and applied "
+                                      "before T1 committed (T1 stayed open "
+                                      "until after the T0 snapshot)",
+                    "frozen_offset": frozen_offset,
+                    "frozen_lsn_lt_t2_end": frozen_lsn_lt_commit,
+                    "t0_capture_row": t0_row,
+                    "restored_capture_row": restored_row,
+                    "file_unchanged_through_verdict": file_unchanged,
+                    "slot_confirmed": list(slot) if slot else None,
+                    "verdict": verdict, "spawned_captures": spawned,
+                    "freeze_mechanism": "test-only receiver delay stretches "
+                                        "the real stream; graceful child stop "
+                                        "finalizes the periodic flush mid-T1; "
+                                        "the dead child cannot overwrite it",
+                    "expected_code": "REPLICA_OFFSETS_AHEAD (the mid-T1 "
+                                     "event point is not covered by the "
+                                     "restored receive evidence ending at "
+                                     "T2's END)"})
+                if not ok:
+                    raise AssertionError(
+                        f"interleaved mid-T1 misalignment not rejected as "
+                        f"REPLICA_OFFSETS_AHEAD: {verdict!r} "
+                        f"file_after={file_after!r} "
+                        f"frozen={frozen_offset!r}")
+            finally:
+                # Release every wait and restore every seam, even on failure.
+                slow_release.set()
+                slow["armed"] = False
+                seam.emit_coverage_probe = real_emit
+                try:
+                    t1.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    t0_drop_snapshot("ra_t0i")
+                except Exception as exc:  # noqa: BLE001
+                    failures.append(
+                        "interleaved_midtxn_restore_fail_closed: T0 backup "
+                        f"tables left behind ({type(exc).__name__})")
+    except BaseException as exc:  # noqa: BLE001
+        fail("interleaved_midtxn_restore_fail_closed", exc)
+
+    # ── Gate 7: drain every owned capture and prove no source resources leak
+    try:
         def drained(db):
             rows = capture_rows(db)
-            return {"captures": rows} if all(
+            # Keep flipping late-appearing cohorts (a queued run can be
+            # admitted while slots free up) so the drain converges; the
+            # production stop/cleanup path itself is untouched.
+            pending = [row["id"] for row in rows
+                       if row["status"] not in {"stopped", "draining"}]
+            if pending:
+                db.execute(sa.update(IntegratedReplicaCapture).where(
+                    IntegratedReplicaCapture.id.in_(pending)
+                ).values(status="draining"))
+                db.commit()
+                return None
+            return {"captures": rows} if rows and all(
                 row["status"] == "stopped" for row in rows) else None
 
         drain = pump(drained, deadline=120, what="capture drain")

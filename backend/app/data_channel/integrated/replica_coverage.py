@@ -32,6 +32,11 @@ from app.data_channel.integrated.replica_models import IntegratedReplicaRun
 
 PROBE_INTERVAL_SECONDS = 10
 PROBE_DEADLINE_SECONDS = 60
+# A confirmed ordered cut older than this no longer proves the source is still
+# being observed (probe interval 10s + bounded source IO). Shared bound: the
+# executor persists the ``REPLICA_COVERAGE_STALE`` demotion with it, and the
+# read lane presents an expired ``ready`` as ``stale`` read-only.
+COVERAGE_STALE_SECONDS = 30.0
 _LIVE_RUN_STATUSES = frozenset({"loading", "catching_up", "active"})
 _READABLE_CAPTURE_STATUSES = frozenset({"starting", "streaming", "stale"})
 _DIALECTS = frozenset({"postgresql", "mysql"})
@@ -50,6 +55,28 @@ def now():
 
 def _utc(value):
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+
+
+def coverage_age(confirmed_at, *, current=None):
+    """Seconds since a confirmed coverage cut; ``None`` when there is no proof.
+
+    Naive timestamps are read as UTC (the platform stores UTC everywhere) and
+    anything that is not a datetime counts as unconfirmed. Pure time
+    arithmetic: no database access, no state mutation.
+    """
+    if not isinstance(confirmed_at, datetime):
+        return None
+    moment = current if current is not None else now()
+    return (moment - _utc(confirmed_at)).total_seconds()
+
+
+def coverage_age_stale(age):
+    """True when a confirmed cut this old no longer proves current coverage.
+
+    The executor's exact bound (strictly greater); a ``None`` age is
+    unconfirmed, not expired — that distinction stays with the caller.
+    """
+    return age is not None and age > COVERAGE_STALE_SECONDS
 
 
 def _invalid():
@@ -401,16 +428,15 @@ def gtid_covers(completed, required):
 
 
 def _valid_binlog_position(value):
-    if not isinstance(value, dict) or not _strict_positive_int(value.get("pos")):
-        return False
-    match = re.fullmatch(r"(.+)\.(\d+)", str(value.get("file", "")))
-    return match is not None
+    return (isinstance(value, dict) and _strict_positive_int(value.get("pos"))
+            and isinstance(value.get("file"), str)
+            and re.fullmatch(r"(.+)\.([0-9]+)", value["file"]) is not None)
 
 
 def _binlog_position(value):
     if not _valid_binlog_position(value):
         _invalid()
-    match = re.fullmatch(r"(.+)\.(\d+)", value["file"])
+    match = re.fullmatch(r"(.+)\.([0-9]+)", value["file"])
     return match.group(1), int(match.group(2)), value["pos"]
 
 

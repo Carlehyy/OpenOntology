@@ -722,14 +722,15 @@ def test_full_batch_replay_after_publish_never_rolls_back_values(db, world):
     db.commit()
     assert member.run.status == "active"
     ingest.ingest_batch(db, world.capture.id, [
-        change_record(world, table="orders", xid=100, lsn=10, ordinal=1, op="u",
+        change_record(world, table="orders", xid=100, lsn=910, ordinal=1, op="u",
                       after=snap_row(1, label="streamed")),
-        end_record(world, xid=100, commit_lsn=500, count=1)])
+        end_record(world, xid=100, commit_lsn=950, count=1)])
     db.commit()
     runtime.apply_capture(db, world.capture.id)
     db.commit()
     rows = {row["id"]: row for row in physical_rows(db, member)}
     assert rows[1]["label"] == "streamed"
+    assert db.get(IntegratedReplicaCapture, world.capture.id).source_offset["lsn"] == 950
     published_count = member.run.row_count
     published_coverage = db.get(IntegratedReplica, member.asset.id).coverage_confirmed_at
     # ACK 丢失重投整批快照：回执命中幂等跳过，绝不回滚已发布后的流式值，
@@ -744,24 +745,27 @@ def test_full_batch_replay_after_publish_never_rolls_back_values(db, world):
     replica = db.get(IntegratedReplica, member.asset.id)
     assert replica.status == "ready"
     assert replica.coverage_confirmed_at == published_coverage
-    assert db.get(IntegratedReplicaCapture, world.capture.id).source_offset["lsn"] == 500
+    assert db.get(IntegratedReplicaCapture, world.capture.id).source_offset["lsn"] == 950
 
 
-def test_established_stream_accepts_skipped_snapshot_on_resume(db, world):
+@pytest.mark.parametrize("published", [False, True])
+def test_established_stream_accepts_skipped_snapshot_on_resume(db, world, published):
     records, _ = notification_batch(world, [snap_record(world, snap_row(1))])
     ingest.ingest_batch(db, world.capture.id, records)
     db.commit()
-    receive_cut(db, world.capture, world.server, lsn=900)
-    runtime.apply_capture(db, world.capture.id)
-    db.commit()
-    assert world.members[0].run.status == "active"
+    if published:
+        receive_cut(db, world.capture, world.server, lsn=900)
+        runtime.apply_capture(db, world.capture.id)
+        db.commit()
+    expected = "active" if published else "catching_up"
+    assert world.members[0].run.status == expected
     result = ingest.ingest_batch(db, world.capture.id, [
         notify(world, kind="SKIPPED", event_id=uuid.uuid4(), offset={"lsn": 900})])
     db.commit()
     assert result == {"status": "accepted", "accepted": 0, "duplicates": 0}
-    assert world.members[0].run.status == "active"
+    assert world.members[0].run.status == expected
     assert world.members[0].run.row_count == 1
-    for offset in ({}, {"ts_usec": 0}):
+    for offset in ({}, {"ts_usec": 0}, {"lsn": 900, "snapshot": "initial"}):
         rejects(db, "INITIAL_SNAPSHOT_INTERRUPTED", lambda: ingest.ingest_batch(
             db, world.capture.id, [notify(world, kind="SKIPPED",
                 event_id=uuid.uuid4(), offset=offset)]))
@@ -838,6 +842,25 @@ def test_late_capture_error_does_not_restore_stopped_member(db, world):
     assert replica.last_error_code == "REPLICA_STOP_REQUESTED"
     assert replica.active_run_id is None
     assert replica.pending_run_id is None
+
+
+@pytest.mark.parametrize("code,gap,state", [
+    ("SOURCE_TRUNCATED", False, "blocked"),
+    ("REPLICA_OFFSETS_AHEAD", True, "gap"),
+])
+def test_terminal_capture_error_survives_late_receiver_failure(db, world, code, gap, state):
+    member = world.members[0]
+    member.replica.active_run_id = member.run.id
+    db.commit()
+    ingest.mark_capture_error(db, world.capture.id, code, retryable=False, gap=gap)
+    db.commit()
+    ingest.mark_capture_error(db, world.capture.id, "CAPTURE_NOT_ACCEPTING", retryable=False)
+    ingest.mark_capture_error(db, world.capture.id, "SOURCE_TIMEOUT", retryable=True)
+    db.commit()
+    assert world.capture.status == state
+    assert world.capture.last_error_code == code
+    assert member.replica.status == "rebuild_required"
+    assert member.replica.last_error_code == code
 
 
 def test_mark_capture_error_spares_independent_active(db, admin_user):

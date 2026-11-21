@@ -70,6 +70,7 @@ from decimal import Decimal
 
 import sqlalchemy as sa
 
+from app.data_channel.integrated import replica_offsets as offsets
 from app.data_channel.integrated.replica_capture_models import (
     IntegratedReplicaCapture, IntegratedReplicaReceipt, IntegratedReplicaTransaction,
 )
@@ -691,7 +692,7 @@ def append_batch(db, capture_id: str, records: list[dict], *, dialect: str) -> d
         # overwrite the already journaled (newer) source offset. A leaked
         # notification carries no position and must not clobber the offset.
         if offset and handled is not False:
-            capture.source_offset = offset
+            offsets.record_received(capture, offset, dialect)
         capture.heartbeat_at = datetime.now(timezone.utc)
     db.flush()
     return {"accepted": accepted, "duplicates": duplicates,

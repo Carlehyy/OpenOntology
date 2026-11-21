@@ -310,6 +310,7 @@ export default function IntegratedRegisterDialog({ onClose, onRegistered }: {
           <DialogDescription>
             在本弹窗内直接配置新的 MySQL / PostgreSQL 源或复用已有连接：先连通测试，再由 dbx
             发现并核验源表结构，配置字段后登记；不跳转数据连接页，测试与发现不保存任何凭据。
+            源表必须声明主键：本地副本按主键复制与去重，无主键的表不能登记。
           </DialogDescription>
         </DialogHeader>
 
@@ -571,6 +572,13 @@ export default function IntegratedRegisterDialog({ onClose, onRegistered }: {
             {schemaError && (
               <Alert variant="danger" role="alert" className="mt-2">{schemaError}</Alert>
             )}
+            {evidence.schema && evidence.schema.primary_key.length === 0 && (
+              <Alert variant="danger" role="alert" className="mt-2" data-testid="integrated-register-no-primary-key">
+                核验到的源表没有主键（REPLICA_PRIMARY_KEY_REQUIRED）：本地副本与受控写入都按主键寻址，
+                该表不能登记。请先在源端为该表定义主键（例如 ALTER TABLE … ADD PRIMARY KEY），
+                再「重新核验结构」后登记。
+              </Alert>
+            )}
           </section>
 
           {evidence.schema && evidence.fields.length > 0 && (
@@ -669,7 +677,7 @@ export default function IntegratedRegisterDialog({ onClose, onRegistered }: {
         )}
 
         <footer className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-border bg-muted px-5 py-3">
-          <p className="text-xs text-muted-foreground">确认登记前必须完成连通测试与源表结构核验；主键字段始终纳入。</p>
+          <p className="text-xs text-muted-foreground">确认登记前必须完成连通测试与源表结构核验；主键字段始终纳入，无主键的源表不能登记。</p>
           <div className="flex gap-2">
             <Button type="button" variant="outline" size="sm" onClick={onClose} disabled={saving}>取消</Button>
             <Button

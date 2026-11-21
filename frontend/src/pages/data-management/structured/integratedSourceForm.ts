@@ -299,8 +299,11 @@ export interface RegisterReadinessInput {
 }
 
 export function registerReady(evidence: RegisterEvidence, input: RegisterReadinessInput): boolean {
+  // The server rejects keyless tables with REPLICA_PRIMARY_KEY_REQUIRED; the
+  // dialog must never offer a submission the server is guaranteed to refuse.
   return !!input.assetName.trim() && input.sourceReady && evidence.testedOk
     && evidence.selectedResource !== null && evidence.schema !== null
+    && evidence.schema.primary_key.length > 0
     && input.fieldMessage === '' && !input.saving
 }
 
