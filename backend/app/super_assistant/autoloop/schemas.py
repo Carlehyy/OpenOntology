@@ -134,6 +134,78 @@ class EventDetailOut(EventOut):
     issueUrl: str | None = None
 
 
+TraceRoute = Literal["pending", "rule", "assistant"]
+TraceOutcome = Literal[
+    "pending", "queued", "sending", "review", "confirmed", "recorded",
+    "failed", "unknown", "ignored", "handled", "cancelled",
+]
+
+
+class TraceRuleRef(Contract):
+    id: str
+    name: str | None = None
+    version: int | None = None
+
+
+class EventTraceOut(Contract):
+    """One inbound routing trace per receipt; rule facts come from the frozen
+    prepared snapshot, so editing or deleting a rule never rewrites history."""
+
+    id: str
+    receivedAt: str
+    title: str | None = None
+    source: EventSource
+    route: TraceRoute
+    outcome: TraceOutcome
+    rule: TraceRuleRef | None = None
+    action: str | None = None
+    decisionItemId: str | None = None
+    issueRef: str | None = None
+    scheduledTaskId: str | None = None
+    scheduledRunId: str | None = None
+    reason: str | None = None
+
+
+class TraceAuditEventOut(Contract):
+    id: str
+    type: str
+    happenedAt: str
+    action: str
+    error: str | None = None
+
+
+class TraceStepOut(StepOut):
+    remoteObjectId: str | None = None
+
+
+class EventTraceDetailOut(EventTraceOut):
+    """Detail keeps the full reason; list rows carry a truncated summary."""
+
+    untrustedOriginal: Any
+    error: str | None = None
+    issueUrl: str | None = None
+    actionSteps: list[TraceStepOut]
+    auditEvents: list[TraceAuditEventOut]
+
+
+class RoutingRuleHit(Contract):
+    ruleId: str
+    ruleName: str | None = None
+    hits: int
+
+
+class RoutingStatsOut(Contract):
+    days: int
+    since: str
+    until: str
+    received: int
+    matched: int
+    unmatched: int
+    pendingRoute: int
+    outcomes: dict[str, int]
+    rules: list[RoutingRuleHit]
+
+
 class Option(Contract):
     id: str = Field(min_length=1, max_length=100)
     label: str = Field(min_length=1, max_length=2000)

@@ -731,7 +731,7 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     all_paths = app.openapi()["paths"]
     for path, methods in memory_operations.items():
         assert set(all_paths[path]) == methods
-    # AutoLoop is an additive feature contract; retain the legacy fingerprint.
+    # AutoLoop retains its audit endpoints and adds three read-only workbench endpoints.
     autoloop_operations = {
         f"{prefix}/autoloop/rules": {"get", "post"},
         f"{prefix}/autoloop/rules/{{identity}}": {"get", "patch", "delete"},
@@ -739,6 +739,9 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
         f"{prefix}/autoloop/rules/preview": {"post"},
         f"{prefix}/autoloop/events": {"get"},
         f"{prefix}/autoloop/events/{{identity}}": {"get"},
+        f"{prefix}/autoloop/event-traces": {"get"},
+        f"{prefix}/autoloop/event-traces/{{eventId}}": {"get"},
+        f"{prefix}/autoloop/routing-stats": {"get"},
         f"{prefix}/autoloop/decision-items": {"get"},
         f"{prefix}/autoloop/decision-items/summary": {"get"},
         f"{prefix}/autoloop/decision-items/{{identity}}": {"get"},
@@ -747,7 +750,7 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     }
     assert {path: set(value) for path, value in all_paths.items()
             if path.startswith(f"{prefix}/autoloop/")} == autoloop_operations
-    assert sum(map(len, autoloop_operations.values())) == 14
+    assert sum(map(len, autoloop_operations.values())) == 17
     weknora_operations = {
         f"{prefix}/weknora/mcp-endpoints": {"get"},
         f"{prefix}/weknora/mcp-initialize": {"post"},

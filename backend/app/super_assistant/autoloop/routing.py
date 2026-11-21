@@ -114,10 +114,11 @@ def _trusted_target(db, event, receipt, snapshot, config, token):
     return str(issue.get("identifier") or issue["id"]), issue, scope, thread, provenance
 
 
-def _decision(db, event, payload, *, source, reason, plan=None, workspace_id=None, issue=None):
+def _decision(db, event, payload, *, source, reason, plan=None, workspace_id=None, issue=None,
+              need_prefix="event:"):
     title = plan.title if plan and plan.title else "AutoLoop 事件需要确认"
     question = plan.question if plan and plan.question else "无法可靠执行此事件，请确认下一步处理方式。"
-    need = "event:" + event.id
+    need = need_prefix + event.id
     evidence = {"factsSummary": reason, "untrustedOriginal": payload,
                 "eventId": event.id, "issue": issue} if issue else {
                 "factsSummary": reason, "untrustedOriginal": payload, "eventId": event.id}
@@ -144,11 +145,13 @@ def route_event(db, event, prepared):
     try:
         if event.hops >= 8:
             raise planner.PlanningError("hop_limit_exceeded")
-        token = multica_service.decrypt_token(config) if config else None
         target, issue, scope, thread, provenance = (None, None, None, None, None)
-        if config:
-            target, issue, scope, thread, provenance = _trusted_target(db, event, receipt, snapshot, config, token)
         if snapshot:
+            # Only the enabled first-matching rule authorizes connector use; the
+            # miss branches below never decrypt credentials nor touch Multica.
+            token = multica_service.decrypt_token(config) if config else None
+            if config:
+                target, issue, scope, thread, provenance = _trusted_target(db, event, receipt, snapshot, config, token)
             rule = schemas.RuleCreate.model_validate({key: value for key, value in snapshot.items()
                                                       if key in schemas.RuleCreate.model_fields})
             rendered = service.preview(rule, payload, version=snapshot["version"])
@@ -159,9 +162,16 @@ def route_event(db, event, prepared):
             plan = planner.Plan(action="append_task" if target else "create_task", reason="first_matching_rule",
                 title=rendered["renderedTitle"], description=rendered["renderedDescription"],
                 issueRef=target, priority=rule.priority or "medium", assignee=rule.assignee)
+        elif event.type == "decision.answered":
+            # An answer re-entering without an enabled matching rule records the
+            # completion fact only: no model call, no new decision, no write.
+            plan = planner.Plan(action="ignore", reason="decision_answered_without_rule")
         else:
+            # No rule matched: read-only assessment restricted to local outcomes.
             plan = planner.plan_event(db, event=event, payload=payload,
-                workspace_id=workspace_id, trusted_issue=target)
+                workspace_id=workspace_id, decision_only=True, decision_purpose="miss")
+            if plan.action not in {"ignore", "create_decision"} or plan.assignee or plan.issueRef:
+                raise planner.PlanningError("untrusted_readonly_plan")
         if plan.action in {"create_task", "append_task"} and not config:
             raise planner.PlanningError("multica_unavailable")
         if plan.issueRef and plan.issueRef != target:
@@ -173,8 +183,10 @@ def route_event(db, event, prepared):
             assignee_id = str(found["id"]) if found else multica_client.match_agent(agents, plan.assignee)[0]
         decision, action = None, None
         if plan.action == "create_decision":
+            # Only the read-only miss branch reaches here; the need marker keeps
+            # these local assessment cards distinguishable from fallback needs.
             decision = _decision(db, event, payload, source="assistant", reason=plan.reason,
-                plan=plan, workspace_id=workspace_id, issue=issue)
+                plan=plan, workspace_id=workspace_id, issue=issue, need_prefix="readonly:")
         elif plan.action in {"create_task", "append_task"}:
             original = json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2)
             description = (plan.description or "") + "\n\n" + templates.UNTRUSTED_LABEL + "\n" + original

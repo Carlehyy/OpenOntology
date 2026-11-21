@@ -32,8 +32,10 @@ class Plan(Contract):
     def required_fields(self):
         if self.action == "create_task" and (not self.title or not self.title.strip()):
             raise ValueError("create_task requires title")
-        if self.action == "append_task" and (not self.issueRef or not self.description or not self.description.strip()):
-            raise ValueError("append_task requires issueRef and description")
+        # Rule plans may render an empty description. The write step also includes
+        # the original event, whereas model output must supply its own description.
+        if self.action == "append_task" and not self.issueRef:
+            raise ValueError("append_task requires issueRef")
         if self.action == "create_decision" and (not self.title or not self.question or len(self.options) < 2):
             raise ValueError("create_decision requires title, question and 2–5 options")
         ids = [item.id for item in self.options]
@@ -46,8 +48,23 @@ class PlanningError(ValueError):
     pass
 
 
+# Read-only callers share the two human-facing outcomes; each states its own authority.
+_READONLY_PROMPTS = {
+    "watchdog": (
+        "这是看门狗只读研判，只能 create_decision 或 ignore。"
+        "区分需要人作出选择与仅等待外部条件；明确只是等待时 ignore。"
+        "需要选择时提供 2–5 个具体选项，不推断人是否已经处理或问题已解决。"
+    ),
+    "miss": (
+        "这是未命中任何已启用规则的只读研判：没有任何规则授权写入外部系统。"
+        "只能 create_decision 或 ignore，禁止 create_task 与 append_task。"
+        "需要人作出选择时提供 2–5 个具体选项；无需处理或仅等待外部条件时 ignore 并说明理由。"
+    ),
+}
+
+
 def plan_event(db, *, event, payload, workspace_id, trusted_issue=None, model_id=None,
-               decision_only=False) -> Plan:
+               decision_only=False, decision_purpose="watchdog") -> Plan:
     provider.ensure_autoloop_available()
     identity = model_id if model_id is not None else settings.autoloop_model_config_id
     if identity:
@@ -75,11 +92,7 @@ def plan_event(db, *, event, payload, workspace_id, trusted_issue=None, model_id
         "workspaceId": workspace_id, "trustedIssue": trusted_issue,
         "untrustedOriginal": payload}, ensure_ascii=False)}]
     if decision_only:
-        messages[0]["content"] += (
-            "这是看门狗只读研判，只能 create_decision 或 ignore。"
-            "区分需要人作出选择与仅等待外部条件；明确只是等待时 ignore。"
-            "需要选择时提供 2–5 个具体选项，不推断人是否已经处理或问题已解决。"
-        )
+        messages[0]["content"] += _READONLY_PROMPTS.get(decision_purpose, _READONLY_PROMPTS["watchdog"])
     response = provider.chat(kwargs, messages, [])
     text = response.get("content")
     if not isinstance(text, str) or len(text) > 65536 or response.get("tool_calls"):
@@ -88,8 +101,10 @@ def plan_event(db, *, event, payload, workspace_id, trusted_issue=None, model_id
         plan = Plan.model_validate_json(text)
     except ValueError as exc:
         raise PlanningError("invalid_model_output") from exc
+    if plan.action == "append_task" and not (plan.description or "").strip():
+        raise PlanningError("invalid_model_output")
     if decision_only and plan.action not in {"create_decision", "ignore"}:
-        raise PlanningError("invalid_watchdog_action")
+        raise PlanningError("invalid_readonly_action" if decision_purpose == "miss" else "invalid_watchdog_action")
     if plan.workspaceId is not None and plan.workspaceId != workspace_id:
         raise PlanningError("workspace_mismatch")
     if plan.action == "append_task" and plan.issueRef != trusted_issue:

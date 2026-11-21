@@ -1148,6 +1148,56 @@ def test_dispatch_to_executor_end_to_end(monkeypatch):
     assert info.num_ack_pending == 0
 
 
+@pytest.mark.asyncio
+async def test_executor_uses_bounded_nats_drain_timeout(monkeypatch):
+    """Pull consumers must not race the container stop grace period on drain."""
+    import nats
+    from app.data_channel.pipeline_tasks import dispatch
+    from app.super_assistant.kernel import plugin_runner_service
+
+    connect_calls = []
+    drained = []
+
+    class FakeJetStream:
+        async def pull_subscribe(self, *_args, **_kwargs):
+            return object()
+
+    class FakeClient:
+        def jetstream(self):
+            return FakeJetStream()
+
+        async def drain(self):
+            drained.append(True)
+
+    async def connect(url, **kwargs):
+        connect_calls.append((url, kwargs))
+        return FakeClient()
+
+    async def noop(*_args, **_kwargs):
+        return None
+
+    async def no_fetch(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(nats, "connect", connect)
+    monkeypatch.setattr("app.config.settings.nats_url", "nats://test:4222")
+    monkeypatch.setattr(dispatch, "ensure_pipeline_stream", noop)
+    monkeypatch.setattr(dispatch, "ensure_execution_stream", noop)
+    monkeypatch.setattr(plugin_runner_service, "ensure_plugin_runner_stream", noop)
+    monkeypatch.setattr(nats_executor, "_handler_registry", lambda: ())
+    monkeypatch.setattr(nats_executor, "_execution_handler_registry", lambda: ())
+
+    executor = PipelineExecutor()
+    monkeypatch.setattr(executor, "_fetch_loop", no_fetch)
+    await executor.run()
+
+    assert connect_calls == [("nats://test:4222", {
+        "connect_timeout": 3,
+        "drain_timeout": nats_executor._NATS_DRAIN_TIMEOUT_SECONDS,
+    })]
+    assert drained == [True]
+
+
 def test_main_registers_full_model_registry_before_running(monkeypatch):
     """回归：executor 进程不经过 app.main 导入链，启动必须先注册全部表映射。
 

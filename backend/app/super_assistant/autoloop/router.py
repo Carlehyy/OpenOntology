@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.auth.models import User
 from app.deps import get_current_user, get_db
 
-from . import schemas, service, store, templates
+from . import schemas, service, store, templates, trace_service
 
 router = APIRouter(prefix="/autoloop")
 
@@ -98,6 +98,39 @@ def list_events(source: str | None = None, sourceSystem: str | None = None,
 def get_event(identity: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     with _errors(db):
         return service.get_event(db, current_user.id, identity)
+
+
+@router.get("/event-traces", response_model=schemas.Page[schemas.EventTraceOut])
+def list_event_traces(source: str | None = None, sourceSystem: str | None = None,
+                      route: str | None = None, action: str | None = None,
+                      outcome: str | None = None, ruleId: str | None = None,
+                      since: str | None = None, until: str | None = None,
+                      scheduledTaskId: str | None = None, scheduledRunId: str | None = None,
+                      cursor: str | None = None, limit: int = Query(default=20, ge=1, le=100),
+                      db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    with _errors(db):
+        return trace_service.list_traces(db, current_user.id, cursor=cursor, limit=limit,
+            source=source, sourceSystem=sourceSystem, route=route, action=action,
+            outcome=outcome, ruleId=ruleId, since=since, until=until,
+            scheduledTaskId=scheduledTaskId, scheduledRunId=scheduledRunId)
+
+
+@router.get("/event-traces/{eventId}", response_model=schemas.EventTraceDetailOut | None)
+def get_event_trace(eventId: str, db: Session = Depends(get_db),
+                    current_user: User = Depends(get_current_user)):
+    # A legal event without an inbound receipt answers null; the raw event
+    # detail stays available on GET /events/{identity}.
+    with _errors(db):
+        return trace_service.get_trace(db, current_user.id, eventId)
+
+
+@router.get("/routing-stats", response_model=schemas.RoutingStatsOut)
+def routing_stats(days: int = Query(default=7),
+                  db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    # Only whole-day 7/30 windows are offered; anything else answers 422 so
+    # clients cannot silently compare mismatched aggregation horizons.
+    with _errors(db):
+        return trace_service.routing_stats(db, current_user.id, days=days)
 
 
 @router.get("/decision-items", response_model=schemas.Page[schemas.DecisionOut])

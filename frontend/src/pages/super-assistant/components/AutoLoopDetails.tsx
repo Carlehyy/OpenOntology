@@ -1,6 +1,7 @@
-import type { AutoLoopStep } from '@/api/autoloop'
+import type { AutoLoopTraceStep } from '@/api/autoloop'
 import { Badge } from '@/components/ui/Badge'
 import { STEP_LABEL, trustedIssueUrl } from './autoloopLogic'
+import { EVENT_ACTION_LABEL, EVENT_ERROR_LABEL } from './autoloopDisplay'
 
 export const textAreaClass = 'w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50'
 
@@ -21,7 +22,7 @@ export function UntrustedOriginal({ value }: { value: unknown }) {
   )
 }
 
-export function ActionSteps({ steps }: { steps: AutoLoopStep[] }) {
+export function ActionSteps({ steps }: { steps: AutoLoopTraceStep[] }) {
   return (
     <section className="space-y-2" aria-label="动作步骤">
       <h3 className="text-sm font-medium">动作步骤</h3>
@@ -29,11 +30,12 @@ export function ActionSteps({ steps }: { steps: AutoLoopStep[] }) {
       {steps.map(step => (
         <div key={step.id} className="rounded-lg border border-border p-3 text-xs">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="break-all font-medium">{step.kind}</span>
+            <span className="break-words font-medium">{EVENT_ACTION_LABEL[step.kind] ?? step.kind}</span>
             <Badge variant={step.state === 'confirmed' ? 'success' : ['unknown', 'failed'].includes(step.state) ? 'warning' : 'secondary'}>{STEP_LABEL[step.state]}</Badge>
           </div>
+          {step.remoteObjectId && <p className="mt-1 break-all">Multica {step.kind === 'issue.comment' ? '评论' : '任务'}编号 <span className="font-mono">{step.remoteObjectId}</span></p>}
           <p className="mt-1 break-all text-muted-foreground">步骤 {step.id}</p>
-          {step.error && <p className="mt-2 whitespace-pre-wrap break-words text-[var(--color-danger)]">{step.error}</p>}
+          {step.error && <p className="mt-2 whitespace-pre-wrap break-words text-[var(--color-danger)]">{EVENT_ERROR_LABEL[step.error] ?? step.error}</p>}
         </div>
       ))}
     </section>
