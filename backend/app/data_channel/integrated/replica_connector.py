@@ -274,33 +274,37 @@ def _column_entries(assets) -> list[str]:
 
 # ── 续流校验 / 自有资源清理 ─────────────────────────────────────────
 
-def validate_resume(connection, capture_id: str) -> None:
-    """副本续流前的最小源端校验。
+def validate_resume(connection, capture_id: str, *, received_lsn: int | None) -> None:
+    """Verify the existing PG stream can resume without skipping a WAL range.
 
-    CDC 的 ``assert_log_continuity`` 形参（has_offsets/coverage_exists 与
-    ``cdc_`` 槽名白名单）与副本 cohort 不匹配，故此处做最小 PG 槽/gap
-    检查：持久化偏移在而自有槽丢失/被回收时，重启会从新槽当前位点静默
-    跳过未复制区间，必须显式报 gap。MySQL binlog 保留缺口无法廉价预检，
-    由子进程错误分类兜底（与 CDC 一致）。
+    START_REPLICATION uses the greater of the request and confirmed_flush_lsn.
+    MySQL has no slot; Debezium reports purged binlogs on startup.
     """
     owned = names(capture_id)
     if getattr(connection, "kind", None) != KIND_POSTGRES:
         return
-    if not _OWNED_SLOT.fullmatch(owned["slot"]):
-        raise ConnectorError(runtime.CODE_EXECUTOR_INTERNAL)
     engine = _source_check_engine(connection)
     try:
         with engine.connect() as conn:
-            status = conn.execute(sa.text(
-                "SELECT wal_status FROM pg_replication_slots "
-                "WHERE slot_name = :slot"),
-                {"slot": owned["slot"]}).scalar_one_or_none()
+            slot = conn.execute(sa.text(
+                "SELECT wal_status, confirmed_flush_lsn - '0/0'::pg_lsn "
+                "FROM pg_replication_slots WHERE slot_name = :slot "
+                "AND database = current_database() AND plugin = 'pgoutput'"),
+                {"slot": owned["slot"]}).one_or_none()
+            if (slot is None or slot[0] in {None, "lost"} or slot[1] is None
+                    or received_lsn is None or slot[1] > received_lsn):
+                raise ConnectorError(runtime.CODE_SOURCE_LOG_GAP)
+            # The filtered autocreate mode does not repair publish options on
+            # an existing publication with the same table list.
+            publishes_truncate = conn.execute(sa.text(
+                "SELECT pubtruncate FROM pg_publication WHERE pubname = :publication"),
+                {"publication": owned["publication"]}).scalar_one_or_none()
+            if publishes_truncate is not True:
+                raise ConnectorError("REPLICA_TRUNCATE_NOT_PUBLISHED")
     except sa.exc.SQLAlchemyError as exc:
         raise connector._driver_error(exc) from None
     finally:
         engine.dispose()
-    if status is None or str(status).lower() == "lost":
-        raise ConnectorError(runtime.CODE_SOURCE_LOG_GAP)
 
 
 def cleanup(connection, capture_id: str) -> bool:
@@ -441,6 +445,9 @@ def build_properties(connection, assets, capture_id: str, secret_b64: str,
         lines += [
             f"debezium.source.database.dbname={connector._properties_value(database)}",
             "debezium.source.plugin.name=pgoutput",
+            # Debezium defaults to skipping TRUNCATE. Let the journal stop
+            # the capture explicitly instead of continuing to serve old rows.
+            "debezium.source.skipped.operations=none",
             "debezium.source.message.prefix.include.list=oo_replica_cut_" + uuid.UUID(capture_id).hex,
             f"debezium.source.slot.name={owned['slot']}",
             f"debezium.source.publication.name={owned['publication']}",

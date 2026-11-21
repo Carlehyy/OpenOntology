@@ -81,6 +81,14 @@ def _metadata_mismatch(message: str) -> None:
     fail(409, "DBX_METADATA_MISMATCH", message)
 
 
+# Replication is keyed: the local replica manifest, CDC identity and the
+# controlled write lane all address rows by an explicit source primary key.
+# Registration enforces the key up front; the replica preflight reports the
+# same business code for legacy keyless assets until the source gains a key
+# and refresh-schema queues a fenced rebuild.
+REPLICA_PRIMARY_KEY_REQUIRED = "REPLICA_PRIMARY_KEY_REQUIRED"
+
+
 def _optional_int(value, label: str) -> int | None:
     if value is None:
         return None
@@ -388,6 +396,12 @@ def register_asset(db, user, body):
     # The inline connection is verified against the real source before any row
     # is persisted: a failed probe leaves nothing behind.
     schema, fingerprint = _verified_source_schema(connection, body.schema_name, body.table_name)
+    # Registration implies a local replica, which is keyed: reject keyless
+    # tables with the replication business code before anything is persisted.
+    if not schema["primary_key"]:
+        fail(422, REPLICA_PRIMARY_KEY_REQUIRED,
+             "The source table must declare a primary key; the local replica "
+             "replicates and deduplicates rows by primary key")
     config = (_field_config_or_fail([entry.model_dump() for entry in body.field_config], schema)
               if body.field_config is not None else None)
     name = body.name.strip()
@@ -662,10 +676,14 @@ def replica_preflight(db, user, asset_id):
     """源复制能力预检（admin/editor）：复用 CDC preflight，安全错误码。
 
     返回稳定错误码（cdc_runtime.CODE_*），绝不携带驱动原文、主机或凭据；
-    预检不做任何持久化。
+    预检不做任何持久化。存量无主键资产在触碰源之前即以
+    REPLICA_PRIMARY_KEY_REQUIRED 失败：自救路径是源端补主键后
+    refresh-schema（围栏重建），与登记时的同一业务码对齐。
     """
     authorize(db, user, write=True)
     asset = get_asset(db, user, asset_id)
+    if not (asset.schema_json.get("primary_key") or []):
+        return {"ok": False, "code": REPLICA_PRIMARY_KEY_REQUIRED}
     connection = _connection(db, asset.connection_id)
     from app.data_channel.integrated import replica_connector
     try:

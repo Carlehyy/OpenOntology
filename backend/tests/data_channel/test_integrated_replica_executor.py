@@ -188,6 +188,7 @@ class FakeConnector:
         self.cleanup_errors: list = []
         self.validate_resume_calls: list[str] = []
         self.validate_resume_sources: list[tuple[str, dict]] = []
+        self.received_lsns: list[int | None] = []
         self.preflight_calls: list[list[str]] = []
         self.preflight_sources: list[tuple[str, dict]] = []
         self.properties: list[dict] = []
@@ -219,8 +220,9 @@ class FakeConnector:
         self.cleanup_results.append(result)
         return result
 
-    def validate_resume(self, source, capture_id):
+    def validate_resume(self, source, capture_id, *, received_lsn):
         self.validate_resume_calls.append(capture_id)
+        self.received_lsns.append(received_lsn)
         self.validate_resume_sources.append(
             (source.id, copy.deepcopy(source.config)))
         self._wait_gate(source.id)
@@ -449,18 +451,23 @@ def _loading(db, connection, asset, *, capture=None, generation=1,
     return capture, run
 
 
-def _active(db, connection, asset, *, capture=None, generation=1,
-            created_offset_seconds=0):
-    """A published active replica bound to a capture cohort."""
+def _caught_snapshot(db, connection, asset, *, capture=None, generation=1,
+                     created_offset_seconds=0):
     capture, run = _loading(db, connection, asset, capture=capture,
                             generation=generation,
                             created_offset_seconds=created_offset_seconds)
-    token = run.owner_token
-    control.finish_load(db, run.id, token, completion={
+    control.finish_load(db, run.id, run.owner_token, completion={
         "complete": True, "row_count": 2, "expected_rows": 2,
         "schema_fingerprint": asset.schema_fingerprint,
-        "snapshot_id": capture.id})
-    control.publish_run(db, run.id, token,
+        "snapshot_id": capture.id, "offset": {"lsn": 100}})
+    db.commit()
+    return capture, run
+
+
+def _active(db, connection, asset, **kwargs):
+    """A published active replica bound to a capture cohort."""
+    capture, run = _caught_snapshot(db, connection, asset, **kwargs)
+    control.publish_run(db, run.id, run.owner_token,
                         applied_position={"capture_id": capture.id,
                                           "commit_seq": 3},
                         coverage_confirmed_at=datetime.now(timezone.utc),
@@ -530,7 +537,7 @@ def _multi_active(db, connection, assets):
         control.finish_load(db, run.id, token, completion={
             "complete": True, "row_count": 0, "expected_rows": 0,
             "schema_fingerprint": run.schema_fingerprint,
-            "snapshot_id": capture.id})
+            "snapshot_id": capture.id, "offset": {"lsn": 100}})
         control.publish_run(
             db, run.id, token,
             applied_position={"capture_id": capture.id, "commit_seq": 0},
@@ -551,7 +558,7 @@ def _mixed_capture(db, connection, *, active_asset, loading_asset):
     control.finish_load(db, run.id, token, completion={
         "complete": True, "row_count": 0, "expected_rows": 0,
         "schema_fingerprint": run.schema_fingerprint,
-        "snapshot_id": capture.id})
+        "snapshot_id": capture.id, "offset": {"lsn": 100}})
     control.publish_run(
         db, run.id, token,
         applied_position={"capture_id": capture.id, "commit_seq": 0},
@@ -761,7 +768,7 @@ def test_active_capture_without_offsets_is_blocked(
     harness.tick()
     db.expire_all()
     row = _capture_row(db, capture.id)
-    assert row.status == "blocked"
+    assert row.status == "gap"
     assert row.last_error_code == "REPLICA_OFFSETS_MISSING"
     assert _replica_row(db, asset.id).status == "rebuild_required"
     assert _run_row(db, run.id).status == "active"  # the active run survives
@@ -773,15 +780,47 @@ def test_active_capture_with_offsets_resumes_after_validation(
         db, admin_user, tmp_path, connection, new_harness):
     asset = _asset(db, admin_user, connection, asset_id="a1", table="orders")
     capture, _ = _active(db, connection, asset)
+    capture.source_offset = {"lsn": 120, "lsn_proc": 120, "lsn_commit": 125}
+    db.commit()
     harness = new_harness(tmp_path)
-    _write_offsets(harness, capture.id)
+    _write_offsets(harness, capture.id)  # the persisted file is safely behind at 100
     harness.settle(3)
     db.expire_all()
     assert harness.connector.validate_resume_calls == [capture.id]
+    assert harness.connector.received_lsns == [125]  # bound the slot by the receiver, not the file
     assert harness.child_for(capture.id) is not None
     row = _capture_row(db, capture.id)
     assert row.status in {"starting", "streaming"}
     assert row.last_error_code is None
+
+
+def test_expired_catching_up_candidate_reclaims_only_after_resume_checks(
+        db, admin_user, tmp_path, connection, new_harness):
+    asset = _asset(db, admin_user, connection, asset_id="a1", table="orders")
+    capture, run = _caught_snapshot(db, connection, asset)
+    previous_owner, generation = run.owner_token, run.generation
+    run.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    db.commit()
+    harness = new_harness(tmp_path)
+    _write_offsets(harness, capture.id)
+
+    harness.settle(2)  # offset read, then source validation; neither spawns
+    assert harness.children == []
+    assert _run_row(db, run.id).owner_token == previous_owner
+    assert harness.connector.received_lsns == [100]
+    db.rollback()
+    harness.tick()
+
+    recovered = _run_row(db, run.id)
+    assert recovered.capture_id == capture.id and recovered.generation == generation
+    assert recovered.status == "catching_up"
+    assert recovered.owner_token and recovered.owner_token != previous_owner
+    assert control._pending_lease_valid(recovered)
+    assert harness.child_for(capture.id) is not None
+    replica = _replica_row(db, asset.id)
+    assert replica.pending_run_id == run.id and replica.active_run_id is None
+    with pytest.raises(control.ReplicaControlError, match="REPLICA_OWNER_LOST"):
+        control.renew_run(db, run.id, previous_owner)
 
 
 # ---------------------------------------------------------------------------
@@ -1059,6 +1098,32 @@ def test_blocked_capture_stops_child_but_preserves_source_resources(
         IntegratedReplicaRun.asset_id == asset.id)).all() == [run]
 
 
+def test_fresh_child_evidence_cannot_clear_a_concurrent_truncate_fence(
+        db, admin_user, tmp_path, connection, new_harness, monkeypatch):
+    asset = _asset(db, admin_user, connection, asset_id="a1", table="orders")
+    capture, _ = _active(db, connection, asset)
+    harness = new_harness(tmp_path, health=lambda port: True)
+    _write_offsets(harness, capture.id)
+    harness.settle(4)
+    harness.receiver.accepted[(capture.id, capture.generation)] = harness.clock["now"]
+    apply = harness.supervisor._apply_capture
+
+    def apply_after_receiver_failure(session, capture_id):
+        from app.data_channel.integrated.replica_ingest import mark_capture_error
+
+        mark_capture_error(session, capture_id, "SOURCE_TRUNCATED", retryable=False)
+        return apply(session, capture_id)
+
+    monkeypatch.setattr(harness.supervisor, "_apply_capture", apply_after_receiver_failure)
+    harness.tick()
+
+    assert _capture_row(db, capture.id).status == "blocked"
+    assert _capture_row(db, capture.id).last_error_code == "SOURCE_TRUNCATED"
+    assert _replica_row(db, asset.id).status == "rebuild_required"
+    harness.tick()
+    assert harness.children[0].stopped
+
+
 # ---------------------------------------------------------------------------
 # fence: "streaming" needs fresh, current-child evidence and an UP probe
 # ---------------------------------------------------------------------------
@@ -1156,6 +1221,10 @@ def test_restarted_child_must_earn_streaming_with_its_own_evidence(
     ("wrong_partition", "SOURCE_PARTITION_CHANGED"),
     ("empty_offset", "REPLICA_OFFSETS_INVALID"),
     ("no_resume_coordinate", "REPLICA_OFFSETS_INVALID"),
+    ("snapshot_in_progress", "REPLICA_OFFSETS_INVALID"),
+    ("unproven", "REPLICA_OFFSETS_UNPROVEN"),
+    ("ahead", "REPLICA_OFFSETS_AHEAD"),
+    ("interleaved_partial", "REPLICA_OFFSETS_AHEAD"),
 ])
 def test_established_capture_with_unproven_offsets_becomes_explicit_gap(
         db, admin_user, tmp_path, connection, new_harness, case, code):
@@ -1164,14 +1233,32 @@ def test_established_capture_with_unproven_offsets_becomes_explicit_gap(
     harness = new_harness(tmp_path)
     _write_offsets(harness, capture.id)
     expected = _server(capture.id)
+    if case == "unproven":
+        # The run is complete, but the restored database has no offset evidence.
+        run.snapshot_proof = {**run.snapshot_proof, "offset": None}
+        db.commit()
+    if case == "interleaved_partial":
+        capture.source_offset = {"lsn": 110, "lsn_proc": 110, "lsn_commit": 110,
+                                 "messageType": "COMMIT", "txId": 8}
+        capture.committed_position = {"dialect": "postgresql", "commit_lsn": 110,
+                                      "offset": capture.source_offset}
+        db.commit()
     harness.offsets.result = {
         "empty_list": [],
         "wrong_partition": [{"partition": {"server": "oo_replica_" + "0" * 32},
                              "offset": {"lsn": 1}}],
         "empty_offset": [{"partition": {"server": expected}, "offset": {}}],
-        # A row LSN alone is not a resumable commit/progress coordinate.
         "no_resume_coordinate": [{"partition": {"server": expected},
                                   "offset": {"ts_usec": 5}}],
+        "snapshot_in_progress": [{"partition": {"server": expected},
+                                  "offset": {"lsn": 100, "snapshot": True}}],
+        "unproven": [{"partition": {"server": expected}, "offset": {"lsn": 100}}],
+        "ahead": [{"partition": {"server": expected},
+                   "offset": {"lsn": 90, "lsn_proc": 90, "lsn_commit": 101}}],
+        "interleaved_partial": [{"partition": {"server": expected},
+                                 "offset": {"lsn": 90, "lsn_proc": 90, "lsn_commit": 110,
+                                            "messageType": "INSERT", "lsn_events_processed": 1,
+                                            "txId": 7}}],
     }[case]
 
     harness.settle(2)
@@ -1835,7 +1922,7 @@ def test_active_capture_with_catching_up_sibling_still_requires_offsets(
     db.expire_all()
 
     row = _capture_row(db, capture.id)
-    assert row.status == "blocked"
+    assert row.status == "gap"
     assert row.last_error_code == "REPLICA_OFFSETS_MISSING"
     assert _run_row(db, members[asset1.id]["run_id"]).status == "active"
     assert _run_row(db, run2.id).status == "catching_up"

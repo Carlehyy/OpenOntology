@@ -9,6 +9,7 @@ kept pristine behind the logical projection, and full-row token continuity.
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from uuid import uuid4
+import copy
 
 import pytest
 import sqlalchemy as sa
@@ -18,13 +19,14 @@ from pydantic import ValidationError
 from app.data_channel.connections.models import Connection
 from app.data_channel.datasets import integrated_store as store
 from app.data_channel.datasets.models import Dataset, DatasetVersion, IntegratedSyncRun
-from app.data_channel.integrated import fields, native, service
+from app.data_channel.integrated import fields, native, replica_connector, service
 from app.data_channel.integrated.contracts import (
     DBX_COMMIT, DBX_VERSION, FieldConfigEntry, RegisterAsset, RowMutation,
     SourceConnection, SourceConnectionConfig, SourceReference, SourceSchemaRequest,
     digest,
 )
 from app.data_channel.integrated.models import IntegratedAsset, IntegratedAssetFieldConfig
+from app.data_channel.integrated.replica_models import IntegratedReplica, IntegratedReplicaRun
 from app.shared.encryption import decrypt
 
 
@@ -296,6 +298,128 @@ def test_failed_registration_leaves_nothing_behind(db, admin_user, monkeypatch):
         db.commit()
     finally:
         engine.dispose()
+
+
+def _keyless_physical_source(monkeypatch):
+    """SQLite protocol double whose table declares no primary key at all."""
+    engine = sa.create_engine("sqlite://")
+    table = sa.Table("rows", sa.MetaData(),
+                     sa.Column("id", sa.BigInteger),
+                     sa.Column("customer_name", sa.String(100)))
+    table.create(engine)
+    with engine.connect() as conn:
+        _, schema, fingerprint = native.reflect(
+            conn, SimpleNamespace(schema_name=None, table_name="rows"))
+    monkeypatch.setattr(service, "source_engine", lambda *_: engine)
+    monkeypatch.setattr(service, "reflect", lambda *_: (table, schema, fingerprint))
+    monkeypatch.setattr(service, "check_transactional_table", lambda *_: None)
+    return engine, table, schema, fingerprint
+
+
+def test_register_rejects_keyless_table_without_residue(db, admin_user, monkeypatch):
+    """Keyless tables are a replication-level business error, not a crash.
+
+    Discovery keeps describing them (the dialog needs the verified schema to
+    explain why submission is impossible); registration itself fails closed
+    with REPLICA_PRIMARY_KEY_REQUIRED before any row is persisted.
+    """
+    engine, table, schema, fingerprint = _keyless_physical_source(monkeypatch)
+    try:
+        monkeypatch.setattr(service, "dbx", lambda: _FakeDbxAdapter(_dbx_evidence(schema)))
+        body = SourceReference(source_connection=_inline_source())
+        described = service.describe_source_schema(db, admin_user, SourceSchemaRequest.model_validate(
+            {"source_connection": body.source_connection.model_dump(),
+             "schema_name": "public", "table_name": "rows"}))
+        assert described["primary_key"] == []
+        with pytest.raises(HTTPException) as exc:
+            service.register_asset(db, admin_user, RegisterAsset.model_validate(_register_body()))
+        assert (exc.value.status_code, exc.value.detail["code"]) == (422, "REPLICA_PRIMARY_KEY_REQUIRED")
+        # Registration failure leaves nothing behind: no connection, dataset,
+        # asset, field config, replica row or queued rebuild run.
+        assert (db.query(Connection).count(), db.query(Dataset).count(),
+                db.query(IntegratedAsset).count(),
+                db.query(IntegratedAssetFieldConfig).count(),
+                db.query(IntegratedReplica).count(),
+                db.query(IntegratedReplicaRun).count()) == (0, 0, 0, 0, 0, 0)
+    finally:
+        engine.dispose()
+
+
+def _keyless_asset(db, user):
+    """Legacy registered asset whose source table had no primary key."""
+    source = Connection(id="keyless-source", name="keyless source", kind="postgres", config={})
+    dataset = Dataset(id="keyless-dataset", name="keyless", kind="integrated",
+                      source_connection_id="keyless-source", source_resource="public.rows")
+    db.add(source)
+    db.flush()
+    db.add(dataset)
+    db.flush()
+    schema = {"columns": [
+        {"name": "id", "type": "integer", "source_type": "BIGINT", "nullable": True,
+         "precision": None, "scale": None, "timezone": None, "collation": None,
+         "length": None, "unsigned": False, "primary_key": False},
+        {"name": "customer_name", "type": "string", "source_type": "VARCHAR(100)",
+         "nullable": True, "precision": None, "scale": None, "timezone": None,
+         "collation": None, "length": 100, "unsigned": False, "primary_key": False},
+    ], "primary_key": []}
+    asset = IntegratedAsset(id="keyless-asset", dataset_id="keyless-dataset",
+                            connection_id="keyless-source", name="keyless",
+                            schema_name="public", table_name="rows",
+                            schema_json=schema, schema_fingerprint=digest(schema),
+                            writable=False, created_by=user.id)
+    db.add(asset)
+    db.commit()
+    return asset
+
+
+def test_replica_preflight_reports_keyless_asset_without_source_io(db, admin_user, monkeypatch):
+    """Legacy keyless assets preflight to the same business code, source-untouched."""
+    def must_not_probe(*_args, **_kwargs):
+        raise AssertionError("keyless preflight must not touch the source")
+
+    monkeypatch.setattr(replica_connector, "preflight", must_not_probe)
+    asset = _keyless_asset(db, admin_user)
+    assert service.replica_preflight(db, admin_user, asset.id) == {
+        "ok": False, "code": "REPLICA_PRIMARY_KEY_REQUIRED"}
+
+
+def test_refresh_schema_self_heals_after_source_gains_primary_key(db, admin_user, monkeypatch):
+    """The refresh-schema path stays open for legacy keyless assets.
+
+    Once the source declares a key, refresh adopts it, keeps frozen versions
+    frozen, and queues a fenced rebuild whose manifest carries the new key —
+    the documented self-heal behind REPLICA_PRIMARY_KEY_REQUIRED.
+    """
+    asset = _keyless_asset(db, admin_user)
+    dataset = db.get(Dataset, asset.dataset_id)
+    version = DatasetVersion(id="keyless-v1", dataset_id=dataset.id, version_no=1, rowcount=3)
+    dataset.latest_version_id = version.id
+    frozen_schema = copy.deepcopy(asset.schema_json)
+    dataset.schema_json = frozen_schema
+    db.add(version)
+    db.commit()
+    healed = {"columns": [
+        {**asset.schema_json["columns"][0], "nullable": False, "primary_key": True},
+        asset.schema_json["columns"][1],
+    ], "primary_key": ["id"]}
+    healed_fingerprint = digest(healed)
+    monkeypatch.setattr(service, "_verified_source_schema",
+                        lambda *_args: (healed, healed_fingerprint))
+    result = service.refresh_schema(db, admin_user, asset.id)
+    assert result["primary_key"] == ["id"]
+    stored = db.get(IntegratedAsset, asset.id)
+    assert stored.schema_json["primary_key"] == ["id"]
+    assert stored.schema_fingerprint == healed_fingerprint
+    # Frozen version contract: a sealed latest version is never reinterpreted.
+    refreshed_dataset = db.get(Dataset, dataset.id)
+    assert refreshed_dataset.schema_json == frozen_schema
+    # The fingerprint change queues a fenced rebuild keyed on the new PK.
+    replica = db.get(IntegratedReplica, asset.id)
+    assert replica is not None and replica.pending_run_id is not None
+    run = db.get(IntegratedReplicaRun, replica.pending_run_id)
+    assert run.status == "queued"
+    assert run.schema_json["primary_key"] == ["id"]
+    assert run.schema_fingerprint == healed_fingerprint
 
 
 def test_duplicate_connection_name_conflicts_without_echo(db, admin_user, monkeypatch):

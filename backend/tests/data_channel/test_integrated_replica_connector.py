@@ -163,6 +163,7 @@ def test_build_properties_postgres_replica_contract(tmp_path):
     assert parsed["debezium.source.publication.name"] == derived["publication"]
     assert parsed["debezium.source.publication.autocreate.mode"] == "filtered"
     assert parsed["debezium.source.plugin.name"] == "pgoutput"
+    assert parsed["debezium.source.skipped.operations"] == "none"
     # 偏移/模式历史落在 capture 状态目录
     assert parsed["debezium.source.offset.storage.file.filename"] == str(tmp_path / "offsets.dat")
     assert parsed["debezium.source.schema.history.internal.file.filename"] == str(tmp_path / "dbhistory.dat")
@@ -352,6 +353,7 @@ class _FakeConnection:
         return SimpleNamespace(
             scalar_one_or_none=lambda: result,
             scalar_one=lambda: result,
+            one_or_none=lambda: result,
             one=lambda: result)
 
     def execution_options(self, **kwargs):
@@ -384,22 +386,29 @@ def _patch_engine(monkeypatch, results):
     return engine
 
 
-def test_validate_resume_postgres_slot_gap_detection(monkeypatch):
-    connection = _pg_connection()
-    slot = replica.names(CAPTURE_ID)["slot"]
-    # 槽不存在：持久化偏移在而槽丢失，重启会静默跳过区间
-    _patch_engine(monkeypatch, [None])
+@pytest.mark.parametrize("slot_state", [None, ("lost", 100), ("reserved", None),
+                                       ("reserved", 101)])
+def test_validate_resume_postgres_slot_gap_detection(monkeypatch, slot_state):
+    engine = _patch_engine(monkeypatch, [slot_state])
     with pytest.raises(replica.ConnectorError) as exc:
-        replica.validate_resume(connection, CAPTURE_ID)
+        replica.validate_resume(_pg_connection(), CAPTURE_ID, received_lsn=100)
     assert exc.value.code == "SOURCE_LOG_GAP"
-    # 槽被回收（lost）同样显式 gap
-    _patch_engine(monkeypatch, ["lost"])
-    with pytest.raises(replica.ConnectorError) as exc:
-        replica.validate_resume(connection, CAPTURE_ID)
-    assert exc.value.code == "SOURCE_LOG_GAP"
-    # 正常 retained/active 槽续流放行
-    _patch_engine(monkeypatch, ["retained"])
-    assert replica.validate_resume(connection, CAPTURE_ID) is None
+    assert engine.connection.executed[0][1] == {"slot": replica.names(CAPTURE_ID)["slot"]}
+    assert engine.disposed
+
+
+@pytest.mark.parametrize("pubtruncate", [None, False, True])
+def test_validate_resume_requires_truncate_in_publication(monkeypatch, pubtruncate):
+    engine = _patch_engine(monkeypatch, [("reserved", 100), pubtruncate])
+    if pubtruncate:
+        replica.validate_resume(_pg_connection(), CAPTURE_ID, received_lsn=100)
+    else:
+        with pytest.raises(replica.ConnectorError) as exc:
+            replica.validate_resume(_pg_connection(), CAPTURE_ID, received_lsn=100)
+        assert exc.value.code == "REPLICA_TRUNCATE_NOT_PUBLISHED"
+    assert engine.connection.executed[1][1] == {
+        "publication": replica.names(CAPTURE_ID)["publication"]}
+    assert engine.disposed
 
 
 def test_validate_resume_timeout_classifies_to_stable_code(monkeypatch):
@@ -424,7 +433,7 @@ def test_validate_resume_timeout_classifies_to_stable_code(monkeypatch):
 
     monkeypatch.setattr(replica, "_source_check_engine", lambda connection: _TimeoutEngine())
     with pytest.raises(replica.ConnectorError) as exc:
-        replica.validate_resume(_pg_connection(), CAPTURE_ID)
+        replica.validate_resume(_pg_connection(), CAPTURE_ID, received_lsn=100)
     assert exc.value.code == "SOURCE_UNREACHABLE"
 
 
@@ -434,7 +443,7 @@ def test_validate_resume_mysql_never_touches_source(monkeypatch):
 
     monkeypatch.setattr(replica, "_source_check_engine", explode)
     assert replica.validate_resume(
-        SimpleNamespace(kind="mysql", config={}), CAPTURE_ID) is None
+        SimpleNamespace(kind="mysql", config={}), CAPTURE_ID, received_lsn=None) is None
 
 
 # ── cleanup ──────────────────────────────────────────────────────────

@@ -190,6 +190,12 @@ describe('integrated register inline source form contracts', () => {
     assert.equal(registerReady(ready, { ...input, sourceReady: false }), false)
     assert.equal(registerReady(ready, { ...input, fieldMessage: '字段标识重复' }), false)
     assert.equal(registerReady(ready, { ...input, saving: true }), false)
+    // A verified schema without a primary key can never register: the server
+    // rejects keyless tables with REPLICA_PRIMARY_KEY_REQUIRED.
+    assert.equal(
+      registerReady({ ...ready, schema: { columns: [], primary_key: [], schema_fingerprint: 'fp' } }, input),
+      false,
+    )
   })
 
   it('prefills field drafts with mandatory PK inclusion and unique aliases', () => {

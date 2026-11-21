@@ -87,6 +87,8 @@ type MockOptions = {
   sourceTestError?: boolean
   /** Fail the first POST /sources/schema so the re-verify path is exercised. */
   schemaErrorOnce?: boolean
+  /** Serve a verified source schema without any primary key (REPLICA_PRIMARY_KEY_REQUIRED). */
+  keylessSourceSchema?: boolean
   /** Serve an empty asset list so the page-level empty state renders. */
   noAssets?: boolean
   /** Menu keys granted to the mock user (defaults to data.structured only). */
@@ -202,6 +204,17 @@ async function mockIntegrated(page: Page, options: MockOptions = {}) {
       if (options.schemaErrorOnce && !schemaFailedOnce) {
         schemaFailedOnce = true
         return fail(503, { code: 'DBX_SCHEMA_UNAVAILABLE', message: 'Schema verification is unavailable' })
+      }
+      if (options.keylessSourceSchema) {
+        // Discovery still describes keyless tables; only registration refuses them.
+        return respond({
+          columns: [
+            { name: 'id', type: 'integer', nullable: true, primary_key: false, source_type: 'int4' },
+            { name: 'note', type: 'string', nullable: true, primary_key: false, source_type: 'text' },
+          ],
+          primary_key: [],
+          schema_fingerprint: 'schema-keyless',
+        })
       }
       return respond({ columns: physicalColumns, primary_key: ['id'], schema_fingerprint: 'schema-orders' })
     }
@@ -702,6 +715,21 @@ test('primary key inclusion stays mandatory in the field editor', async ({ page 
   expect(registration?.body.field_config.map((field: { source_key: string }) => field.source_key)).toEqual(['id', 'amount'])
 })
 
+test('keyless source tables are explained up front and can never be submitted', async ({ page }) => {
+  const requests = await mockIntegrated(page, { role: 'editor', connections: [], keylessSourceSchema: true })
+  await page.goto('/#/data/structured?tab=integrated')
+  await page.getByRole('button', { name: '登记集成数据集', exact: true }).click()
+  const dialog = page.getByRole('dialog')
+  // 前置说明：弹窗描述与页脚在核验前就声明主键要求。
+  await expect(dialog).toContainText('源表必须声明主键')
+  const editor = await openFieldEditor(page, 'postgres')
+  await expect(editor.dialog.getByTestId('integrated-register-no-primary-key')).toContainText('REPLICA_PRIMARY_KEY_REQUIRED')
+  await expect(editor.dialog.getByTestId('integrated-register-no-primary-key')).toContainText('定义主键')
+  // 无主键的登记提交被本地禁止，也绝不发出登记 POST（服务端同码兜底）。
+  await expect(editor.dialog.getByTestId('integrated-register-submit')).toBeDisabled()
+  expect(requests.filter(request => request.path === '/api/v2/integrated-datasets' && request.method === 'POST')).toHaveLength(0)
+})
+
 test('editing the inline source invalidates discovered tables and verified fields until re-run', async ({ page }) => {
   const requests = await mockIntegrated(page, { role: 'editor', connections: [] })
   await page.goto('/#/data/structured?tab=integrated')
@@ -1153,6 +1181,19 @@ test('源复制预检失败与围栏重建分别显示稳定错误码和初始�
   await expect(detail.getByRole('button', { name: '重建本地副本', exact: true })).toBeDisabled()
   expect(requests.filter(request => request.path.endsWith('/replica/preflight') && request.method === 'POST')).toHaveLength(1)
   expect(requests.filter(request => request.path.endsWith('/replica/rebuild') && request.method === 'POST')).toHaveLength(1)
+})
+
+test('keyless preflight points at the primary-key remediation and the refresh-schema self-heal', async ({ page }) => {
+  await mockIntegrated(page, {
+    replicaPreflight: { ok: false, code: 'REPLICA_PRIMARY_KEY_REQUIRED' },
+  })
+  await page.goto(deepLink)
+  const detail = page.getByTestId('integrated-asset-detail')
+  await detail.getByRole('button', { name: '源复制预检', exact: true }).click()
+  await expect(detail.getByTestId('integrated-replica-state')).toContainText('预检未通过：REPLICA_PRIMARY_KEY_REQUIRED')
+  // 详情不止给错误码，还给出自救路径：源端补主键 → 刷新源结构。
+  await expect(detail.getByTestId('integrated-replica-state')).toContainText('补建主键')
+  await expect(detail.getByTestId('integrated-replica-state')).toContainText('刷新源结构')
 })
 
 test('DBX 503 is an explicit discovery error rather than invented source success', async ({ page }) => {

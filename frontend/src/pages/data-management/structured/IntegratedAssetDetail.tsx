@@ -640,7 +640,9 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
             <p className="mt-1 break-words text-muted-foreground" role="status">
               {preflight.ok
                 ? '预检通过：源具备复制所需能力。'
-                : `预检未通过：${preflight.code ?? '未知错误码'}；请按错误码修正源配置后重试。`}
+                : preflight.code === 'REPLICA_PRIMARY_KEY_REQUIRED'
+                  ? '预检未通过：REPLICA_PRIMARY_KEY_REQUIRED；源表当前没有主键，本地副本无法按行寻址。请先在源端为该表补建主键（例如 ALTER TABLE … ADD PRIMARY KEY），再点击「刷新源结构」；结构更新后会自动排队重建副本。'
+                  : `预检未通过：${preflight.code ?? '未知错误码'}；请按错误码修正源配置后重试。`}
             </p>
           )}
         </div>

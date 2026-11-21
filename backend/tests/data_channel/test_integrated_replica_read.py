@@ -6,7 +6,7 @@ row tokens stay in the source read's namespace, and unreadable/replaced
 replicas fail closed without any silent source fallback.
 """
 from contextlib import ExitStack
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from app.data_channel.connections.models import Connection
 from app.data_channel.datasets.models import Dataset
 from app.data_channel.integrated import native, replica_control as control
+from app.data_channel.integrated import replica_coverage as coverage
 from app.data_channel.integrated import replica_read, replica_store as store, service
 from app.data_channel.integrated.contracts import digest, row_token
 from app.data_channel.integrated.models import IntegratedAsset
@@ -144,6 +145,125 @@ def test_preview_rejects_unreadable_replicas_instead_of_falling_back(db, admin_u
     preview = service.preview_rows(db, admin_user, asset.id, 10)
     assert preview["stale"] is True
     assert preview["source_state"]["replica_status"] == "stale"
+
+
+def _read_lanes(db, user, asset):
+    """All three read lanes over the same replica: DTO, preview, query relation."""
+    dto = replica_read.replica_status_dto(db, asset)
+    preview = service.preview_rows(db, user, asset.id, 10)
+    binding = Binding(kind="integrated", asset_id=asset.id)
+    with ExitStack() as stack:
+        relation = providers.resolve_integrated(
+            db, user, [("src", binding)], QueryLimits(), stack)["src"]
+    relation.recheck()
+    return dto, preview, relation
+
+
+def test_expired_or_unproven_ready_reads_as_stale_in_every_lane(db, admin_user, asset):
+    run, _ = _publish_active(db, asset)
+    # Fresh: a confirmed cut inside the shared bound is a clean ready everywhere.
+    dto, preview, relation = _read_lanes(db, admin_user, asset)
+    assert dto["status"] == "ready" and dto["stale"] is False
+    assert dto["complete"] is True and dto["run_id"] == run.id
+    assert dto["coverage_confirmed_at"]
+    assert preview["stale"] is False
+    assert preview["source_state"]["replica_status"] == "ready"
+    assert preview["source_state"]["stale"] is False
+    assert relation.state["replicaStatus"] == "ready"
+    assert relation.state["stale"] is False
+
+    # Expired: the confirmed cut is older than the shared bound. The persisted
+    # row still says ready, but every lane presents stale while the old rows
+    # keep serving — the demotion the executor persists on its next tick
+    # (REPLICA_COVERAGE_STALE), computed here read-only.
+    expired = datetime.now(timezone.utc) - timedelta(
+        seconds=coverage.COVERAGE_STALE_SECONDS + 5)
+    replica = db.get(IntegratedReplica, asset.id)
+    replica.coverage_confirmed_at = expired
+    db.commit()
+    dto, preview, relation = _read_lanes(db, admin_user, asset)
+    assert dto["status"] == "stale" and dto["stale"] is True and dto["complete"] is True
+    assert dto["coverage_confirmed_at"] == replica_read._utc_iso(expired)
+    assert [row["values"]["id"] for row in preview["rows"]] == [1, 2]
+    assert preview["stale"] is True
+    assert preview["source_state"]["replica_status"] == "stale"
+    assert preview["source_state"]["stale"] is True
+    assert preview["source_state"]["coverage_confirmed_at"] == \
+        replica_read._utc_iso(expired)
+    assert relation.state["replicaStatus"] == "stale"
+    assert relation.state["stale"] is True
+    # Presentation only: the demotion is never written back.
+    db.expire_all()
+    persisted = db.get(IntegratedReplica, asset.id)
+    assert persisted.status == "ready" and persisted.last_error_code is None
+    assert replica_read._utc_iso(persisted.coverage_confirmed_at) == \
+        replica_read._utc_iso(expired)
+
+    # Missing proof: a ready row without a confirmed cut is readable history,
+    # never proven-current coverage (executor: REPLICA_COVERAGE_UNCONFIRMED).
+    persisted.coverage_confirmed_at = None
+    db.commit()
+    dto, preview, relation = _read_lanes(db, admin_user, asset)
+    assert dto["status"] == "stale" and dto["stale"] is True
+    assert dto["coverage_confirmed_at"] is None
+    assert [row["values"]["id"] for row in preview["rows"]] == [1, 2]
+    assert preview["stale"] is True
+    assert preview["source_state"]["replica_status"] == "stale"
+    assert relation.state["replicaStatus"] == "stale"
+    assert relation.state["stale"] is True
+    db.expire_all()
+    final = db.get(IntegratedReplica, asset.id)
+    assert final.status == "ready" and final.last_error_code is None
+    assert final.coverage_confirmed_at is None
+
+
+def test_unreadable_statuses_are_never_relabelled_stale(db, admin_user, asset):
+    _publish_active(db, asset)
+    replica = db.get(IntegratedReplica, asset.id)
+    # Even without any coverage proof, unreadable states keep their exact
+    # label and fail closed: "stale" is a readable-only annotation.
+    replica.coverage_confirmed_at = None
+    binding = Binding(kind="integrated", asset_id=asset.id)
+    for status in ("blocked", "rebuild_required", "stopped", "pending"):
+        replica.status = status
+        db.commit()
+        dto = replica_read.replica_status_dto(db, asset)
+        assert dto["status"] == status and dto["complete"] is False
+        assert dto["stale"] is False
+        with pytest.raises(HTTPException) as exc:
+            service.preview_rows(db, admin_user, asset.id, 10)
+        assert exc.value.detail["code"] == "replica_not_ready"
+        assert exc.value.detail["replica_status"] == status
+        with ExitStack() as stack:
+            with pytest.raises(QueryError) as query_exc:
+                providers.resolve_integrated(db, admin_user, [("src", binding)],
+                                             QueryLimits(), stack)
+            assert (query_exc.value.status, query_exc.value.code) == \
+                (409, "replica_not_ready")
+
+
+def test_shared_coverage_bound_is_strict_and_reads_naive_as_utc():
+    # The executor's exact predicate: strictly greater at the bound, and an
+    # unconfirmed cut (None age) is not "expired" — that stays the separate
+    # REPLICA_COVERAGE_UNCONFIRMED branch.
+    assert coverage.COVERAGE_STALE_SECONDS == 30.0
+    assert coverage.coverage_age_stale(None) is False
+    assert coverage.coverage_age_stale(coverage.COVERAGE_STALE_SECONDS) is False
+    assert coverage.coverage_age_stale(coverage.COVERAGE_STALE_SECONDS + 0.001) is True
+    current = datetime.now(timezone.utc)
+    at_bound = current - timedelta(seconds=coverage.COVERAGE_STALE_SECONDS)
+    beyond = current - timedelta(seconds=coverage.COVERAGE_STALE_SECONDS + 1)
+    assert coverage.coverage_age(at_bound, current=current) == \
+        coverage.COVERAGE_STALE_SECONDS
+    assert coverage.coverage_age_stale(
+        coverage.coverage_age(at_bound, current=current)) is False
+    assert coverage.coverage_age_stale(
+        coverage.coverage_age(beyond, current=current)) is True
+    # Naive timestamps are read as UTC; a non-datetime is missing proof.
+    assert coverage.coverage_age(at_bound.replace(tzinfo=None), current=current) == \
+        coverage.COVERAGE_STALE_SECONDS
+    assert coverage.coverage_age("2026-11-19T00:00:00Z", current=current) is None
+    assert coverage.coverage_age(None, current=current) is None
 
 
 def test_replica_status_dto_and_routes(db, admin_user, asset):

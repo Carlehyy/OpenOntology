@@ -110,6 +110,11 @@ def resolve_integrated(db, user, bindings: list[tuple[str, Binding]], limits, st
                 unique = [str(name) for name in meta.get("primary_key") or []]
             unique = unique if unique and all(name in columns for name in unique) else None
             coverage = replica.coverage_confirmed_at or replica.applied_at
+            # The shared coverage freshness bound (replica_coverage) applies
+            # here too: a persisted ``ready`` whose confirmed cut is missing
+            # or expired reads as ``stale`` — the same label status and
+            # preview expose, computed read-only, never a write.
+            replica_status, stale = replica_read._display_state(replica)
 
             def recheck(asset_id=binding.asset_id, auth=expected_auth, schema=expected_schema,
                         run_id=run.id):
@@ -147,11 +152,13 @@ def resolve_integrated(db, user, bindings: list[tuple[str, Binding]], limits, st
                        "asOf": replica_read._utc_iso(coverage),
                        "consistency": "replica_snapshot", "completeness": "complete",
                        "dialect": db.get_bind().dialect.name, "snapshotId": run.id,
-                       "uniqueKey": unique, "replicaStatus": replica.status,
-                       # Anything except a clean ready is readable-but-stale:
-                       # initializing/catching_up keep serving the previous
-                       # active run while coverage lags the replication cut.
-                       "stale": replica.status != "ready",
+                       "uniqueKey": unique, "replicaStatus": replica_status,
+                       # Anything except a proven-fresh ready is
+                       # readable-but-stale: initializing/catching_up keep
+                       # serving the previous active run while coverage lags,
+                       # and a ready whose confirmed cut is missing or older
+                       # than the shared bound is demoted read-only.
+                       "stale": stale,
                        "generation": replica.generation},
                 auth_fingerprint=integrated_auth_fingerprint(expected_auth, run.id),
                 schema_fingerprint=expected_schema,

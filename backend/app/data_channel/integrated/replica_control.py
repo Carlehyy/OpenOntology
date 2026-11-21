@@ -69,8 +69,8 @@ def _pending_lease_valid(run) -> bool:
 def _pending_run_resumable(db, run) -> bool:
     """A candidate can only stay pending while it can still progress.
 
-    A claimed initializer whose owner lease expired has no production recovery
-    caller; an explicit rebuild must supersede it. ``blocked``/``gap``/
+    A rebuild can supersede an expired lease unless the supervisor has already
+    fenced and reclaimed the candidate. ``blocked``/``gap``/
     ``draining``/``stopped`` (and a missing capture row) cannot apply or accept
     ingest either. A queued (unbound) run or one in a starting/streaming/stale
     capture with a valid owner lease remains idempotent, including a long
@@ -183,6 +183,31 @@ def claim_run(db, run_id: str) -> str:
 
 def renew_run(db, run_id: str, token: str) -> None:
     _, run = _owned(db, run_id, token, statuses={"capturing", "loading", "catching_up"})
+    run.lease_expires_at = _now() + timedelta(seconds=LEASE_SECONDS)
+    db.flush()
+
+
+def snapshot_finished(run) -> bool:
+    proof = run.snapshot_proof
+    return (isinstance(proof, dict) and proof.get("complete") is True
+            and proof.get("snapshot_id") == run.capture_id)
+
+
+def reclaim_catching_up(db, run_id: str, capture_id: str) -> None:
+    """Renew or replace the candidate owner after fenced source/offset checks."""
+    initial = db.get(IntegratedReplicaRun, run_id)
+    if initial is None:
+        raise ReplicaControlError("REPLICA_RUN_MISSING")
+    replica = _replica(db, initial.asset_id)
+    run = db.scalar(sa.select(IntegratedReplicaRun).where(
+        IntegratedReplicaRun.id == run_id).with_for_update()
+        .execution_options(populate_existing=True))
+    if (replica.pending_run_id != run.id or replica.generation != run.generation
+            or run.capture_id != capture_id or run.status != "catching_up"
+            or not snapshot_finished(run)):
+        raise ReplicaControlError("REPLICA_OWNER_LOST")
+    if not _pending_lease_valid(run):
+        run.owner_token = str(uuid.uuid4())
     run.lease_expires_at = _now() + timedelta(seconds=LEASE_SECONDS)
     db.flush()
 

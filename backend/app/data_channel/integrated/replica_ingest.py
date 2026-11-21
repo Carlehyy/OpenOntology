@@ -16,8 +16,9 @@ import sqlalchemy as sa
 
 from app.data_channel.connections.models import Connection
 from app.data_channel.integrated import cdc_control, replica_control as control
-from app.data_channel.integrated import replica_journal as journal
 from app.data_channel.integrated import replica_coverage as coverage
+from app.data_channel.integrated import replica_journal as journal
+from app.data_channel.integrated import replica_offsets as offsets
 from app.data_channel.integrated import replica_store as store
 from app.data_channel.integrated.models import IntegratedAsset
 from app.data_channel.integrated.replica_capture_models import IntegratedReplicaCapture
@@ -133,7 +134,7 @@ def _snapshot_batch(db, capture, run, asset, envelopes):
     return len(rows), 0
 
 
-def _notification(db, capture, targets, envelope, offset):
+def _notification(db, capture, targets, envelope, offset, dialect):
     payload = envelope["payload"]
     if (envelope["schema"].get("name") != "io.debezium.connector.common.Notification"
             or payload.get("aggregate_type") != "Initial Snapshot"):
@@ -153,12 +154,10 @@ def _notification(db, capture, targets, envelope, offset):
     if kind == "SKIPPED":
         # An established stream resumes from its verified persistent offset;
         # Debezium announces that no new initial snapshot is necessary.
-        positioned = ((type(offset.get("lsn")) is int and offset["lsn"] > 0)
-                      or (isinstance(offset.get("file"), str) and bool(offset["file"])
-                          and type(offset.get("pos")) is int and offset["pos"] >= 4))
-        if not targets or not positioned or any(run.status != "active" or
-                (run.snapshot_proof or {}).get("complete") is not True
-                for _, run, _ in targets.values()):
+        if (not targets or not offsets.resumable(offset, dialect)
+                or any(run.status not in {"active", "catching_up"}
+                       or not control.snapshot_finished(run)
+                       for _, run, _ in targets.values())):
             raise ReplicaIngestError("INITIAL_SNAPSHOT_INTERRUPTED")
         return
     if kind not in {"STARTED", "DATA_COLLECTIONS_RESOLVED", "IN_PROGRESS",
@@ -223,6 +222,7 @@ def ingest_batch(db, capture_id: str, records: list[dict]) -> dict:
     dialect = "postgresql" if connection.kind == "postgres" else connection.kind
     expected_server = "oo_replica_" + uuid.UUID(capture.id).hex
     snapshot_rows = defaultdict(list)
+    snapshot_offsets = {}
     ordered = []
     change_seen = completed_seen = False
     accepted = duplicates = 0
@@ -252,7 +252,9 @@ def ingest_batch(db, capture_id: str, records: list[dict]) -> dict:
                     # set while other tables finish their snapshot and stream.
                     continue
                 raise ReplicaIngestError("SOURCE_TABLE_CHANGED")
-            snapshot_rows[target[1].id].append(envelope)
+            run_id = target[1].id
+            snapshot_rows[run_id].append(envelope)
+            snapshot_offsets[run_id] = offset
         else:
             notification = bool(envelope and envelope["schema"].get("name") ==
                                 "io.debezium.connector.common.Notification")
@@ -268,12 +270,7 @@ def ingest_batch(db, capture_id: str, records: list[dict]) -> dict:
             accepted += count
             duplicates += replayed
             if count:
-                for record in reversed(records):
-                    _, offset, event = journal.unpack(record)
-                    if (event and event["payload"].get("op") == "r"
-                            and event["payload"].get("source", {}).get("table") == asset.table_name):
-                        capture.source_offset = offset
-                        break
+                offsets.record_received(capture, snapshot_offsets[run.id], dialect)
     streaming = []
 
     def flush_streaming():
@@ -291,7 +288,7 @@ def ingest_batch(db, capture_id: str, records: list[dict]) -> dict:
     for record, envelope, offset, notification in ordered:
         if notification:
             flush_streaming()
-            _notification(db, capture, targets, envelope, offset)
+            _notification(db, capture, targets, envelope, offset, dialect)
         elif envelope and envelope["payload"].get("op") == "m":
             flush_streaming()
             if (dialect != "postgresql" or envelope["schema"].get("name") !=
@@ -300,7 +297,7 @@ def ingest_batch(db, capture_id: str, records: list[dict]) -> dict:
             try:
                 coverage.observe_postgres_message(db, capture, envelope, offset,
                                                    record["payload"].get("topic"))
-                capture.source_offset = offset
+                offsets.record_received(capture, offset, dialect)
             except coverage.ReplicaCoverageError as exc:
                 raise ReplicaIngestError(exc.code) from exc
         elif dialect == "mysql" and (envelope is None or
@@ -308,7 +305,7 @@ def ingest_batch(db, capture_id: str, records: list[dict]) -> dict:
             flush_streaming()
             try:
                 coverage.observe_mysql_offset(db, capture, offset)
-                capture.source_offset = offset
+                offsets.record_received(capture, offset, dialect)
             except coverage.ReplicaCoverageError as exc:
                 raise ReplicaIngestError(exc.code) from exc
         else:
@@ -323,31 +320,35 @@ def ingest_batch(db, capture_id: str, records: list[dict]) -> dict:
     return {"status": "accepted", "accepted": accepted, "duplicates": duplicates}
 
 
-def mark_capture_error(db, capture_id: str, code: str, *, retryable: bool) -> None:
-    """Record a bounded error after the rejected batch has rolled back."""
+def mark_capture_error(db, capture_id: str, code: str, *, retryable: bool,
+                       gap: bool = False) -> None:
+    """Persist the capture failure and fence its dependent replicas together."""
     initial = db.get(IntegratedReplicaCapture, str(capture_id))
-    if initial is None or initial.status in {"stopped", "draining"}:
+    if initial is None:
         return
-    members = list(initial.tables_json)
-    for asset_id in sorted({item["asset_id"] for item in members}):
-        replica = db.scalar(sa.select(IntegratedReplica).where(
-            IntegratedReplica.asset_id == asset_id).with_for_update()
-            .execution_options(populate_existing=True))
-        if replica is None or replica.status == "stopped":
+    asset_ids = {item["asset_id"] for item in initial.tables_json}
+    replicas = list(db.scalars(sa.select(IntegratedReplica).where(
+        IntegratedReplica.asset_id.in_(asset_ids)).order_by(IntegratedReplica.asset_id)
+        .with_for_update().execution_options(populate_existing=True)))
+    capture = db.scalar(sa.select(IntegratedReplicaCapture).where(
+        IntegratedReplicaCapture.id == str(capture_id)).with_for_update()
+        .execution_options(populate_existing=True))
+    if capture is None or capture.status in {"stopped", "draining", "blocked", "gap"}:
+        # A late receiver error cannot hide a known gap or make stale data
+        # readable again. Check after locking, since another batch may race.
+        return
+    for replica in replicas:
+        if replica.status == "stopped":
             continue
         # A failed candidate must never invalidate an independent, healthy
         # active capture or restore a terminal member after stop/detachment.
-        run_ids = {item["run_id"] for item in members
-                   if item["asset_id"] == asset_id and not item.get("detached")}
+        run_ids = {item["run_id"] for item in capture.tables_json
+                   if item["asset_id"] == replica.asset_id and not item.get("detached")}
         if (replica.active_run_id in run_ids or
                 (not replica.active_run_id and replica.pending_run_id in run_ids)):
             replica.status = ("stale" if retryable and replica.active_run_id
                               else "blocked" if retryable else "rebuild_required")
             replica.last_error_code = code
-    capture = db.scalar(sa.select(IntegratedReplicaCapture).where(
-        IntegratedReplicaCapture.id == str(capture_id)).with_for_update()
-        .execution_options(populate_existing=True))
-    if capture is not None and capture.status not in {"stopped", "draining"}:
-        capture.status = "stale" if retryable else "blocked"
-        capture.last_error_code = code
+    capture.status = "stale" if retryable else "gap" if gap else "blocked"
+    capture.last_error_code = code
     db.flush()
