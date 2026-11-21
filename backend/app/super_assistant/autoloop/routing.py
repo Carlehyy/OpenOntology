@@ -10,7 +10,14 @@ from app.notifications.models import NotificationIngestKey
 from app.super_assistant import multica_client, multica_service, provider
 
 from . import facts, planner, schemas, service, sourcing, store, templates
-from .models import NO_WORKSPACE, AutoLoopBinding, AutoLoopEvent, AutoLoopReceipt, AutoLoopRule
+from .models import (
+    NO_WORKSPACE,
+    AutoLoopBinding,
+    AutoLoopDecision,
+    AutoLoopEvent,
+    AutoLoopReceipt,
+    AutoLoopRule,
+)
 
 
 def _field(payload, path):
@@ -163,11 +170,18 @@ def _answer_reference(event):
     return reference if reference or event.issue_ref else None
 
 
+def _is_readonly_answer(db, event):
+    if event.type != "decision.answered" or not event.decision_item_id:
+        return False
+    decision = db.get(AutoLoopDecision, event.decision_item_id)
+    return bool(decision and decision.need_key.startswith("readonly:"))
+
+
 def _decision(db, event, payload, *, source, reason, plan=None, workspace_id=None, issue=None,
-              source_ref=None):
+              source_ref=None, need_prefix="event:"):
     title = plan.title if plan and plan.title else "AutoLoop 事件需要确认"
     question = plan.question if plan and plan.question else "无法可靠执行此事件，请确认下一步处理方式。"
-    need = "event:" + event.id
+    need = need_prefix + event.id
     evidence = {"factsSummary": reason, "untrustedOriginal": payload,
                 "eventId": event.id, "issue": issue} if issue else {
                 "factsSummary": reason, "untrustedOriginal": payload, "eventId": event.id}
@@ -196,8 +210,16 @@ def route_event(db, event, prepared):
     try:
         if event.hops >= 8:
             raise planner.PlanningError("hop_limit_exceeded")
-        target, scope, thread, provenance, bound = _trusted_target(db, event, receipt, snapshot)
-        answer_ref = _answer_reference(event)
+
+        # Resolve a binding only for an enabled matching rule. Historical
+        # bindings never authorize an ordinary miss to append remotely.
+        target = scope = thread = provenance = bound = None
+        if snapshot:
+            target, scope, thread, provenance, bound = _trusted_target(db, event, receipt, snapshot)
+        readonly_answer = _is_readonly_answer(db, event)
+        answer_ref = None if readonly_answer else _answer_reference(event)
+        config = None
+        profile_revision_id = None
         if answer_ref is not None:
             reference, workspace_id = answer_ref, answer_ref.get("workspaceId")
             try:
@@ -214,19 +236,34 @@ def route_event(db, event, prepared):
             if config is None:
                 raise planner.PlanningError("binding_source_unavailable")
             profile_revision_id = str(config.id)
-        else:
+        elif snapshot:
+            # Only a matching enabled rule authorizes connector resolution and
+            # credential use. The ordinary miss branch below remains local only.
             config = multica_service.active_config(db, event.owner_id)
             profile_revision_id = str(config.profile_revision_id) if config else None
-        if config is not None:
-            workspace_id = config.workspace_id
-            reference = sourcing.source_ref(config, profile_revision_id)
-        token = multica_service.decrypt_token(config) if config else None
+            if config is not None:
+                workspace_id = config.workspace_id
+                reference = sourcing.source_ref(config, profile_revision_id)
+        elif event.type != "decision.answered":
+            # A normal miss has no connector authority. Reading the active
+            # profile's workspace/revision is metadata only; credentials remain
+            # encrypted and the connector is never contacted on this branch.
+            config = multica_service.active_config(db, event.owner_id)
+            workspace_id = config.workspace_id if config else None
+            profile_revision_id = str(config.profile_revision_id) if config else None
+            if config is not None:
+                reference = sourcing.source_ref(config, profile_revision_id)
+
+        token = None
         issue = None
-        if target:
-            if not config:
+        if snapshot or bound is not None or answer_ref is not None:
+            if config is None:
                 raise planner.PlanningError("multica_unavailable")
-            issue = verified_issue(config, token, target)
-            target = str(issue.get("identifier") or issue["id"])
+            token = multica_service.decrypt_token(config)
+            if target:
+                issue = verified_issue(config, token, target)
+                target = str(issue.get("identifier") or issue["id"])
+
         if snapshot:
             rule = schemas.RuleCreate.model_validate({key: value for key, value in snapshot.items()
                                                       if key in schemas.RuleCreate.model_fields})
@@ -238,9 +275,22 @@ def route_event(db, event, prepared):
             plan = planner.Plan(action="append_task" if target else "create_task", reason="first_matching_rule",
                 title=rendered["renderedTitle"], description=rendered["renderedDescription"],
                 issueRef=target, priority=rule.priority or "medium", assignee=rule.assignee)
-        else:
+        elif event.type == "decision.answered" and _is_readonly_answer(db, event):
+            # Answers to a local read-only card only record completion; they do
+            # not call the model or create a second remote write.
+            plan = planner.Plan(action="ignore", reason="decision_answered_without_rule")
+        elif event.type == "decision.answered":
+            # A non-read-only answer may continue through ordinary planning,
+            # while preserving its frozen source when one is present.
             plan = planner.plan_event(db, event=event, payload=payload,
                 workspace_id=workspace_id, trusted_issue=target)
+        else:
+            # No rule matched: read-only assessment restricted to local outcomes.
+            plan = planner.plan_event(db, event=event, payload=payload,
+                workspace_id=workspace_id, decision_only=True, decision_purpose="miss")
+            if plan.action not in {"ignore", "create_decision"} or plan.assignee or plan.issueRef:
+                raise planner.PlanningError("untrusted_readonly_plan")
+
         if plan.action in {"create_task", "append_task"} and not config:
             raise planner.PlanningError("multica_unavailable")
         if plan.issueRef and plan.issueRef != target:
@@ -253,7 +303,8 @@ def route_event(db, event, prepared):
         decision, action = None, None
         if plan.action == "create_decision":
             decision = _decision(db, event, payload, source="assistant", reason=plan.reason,
-                plan=plan, workspace_id=workspace_id, issue=issue, source_ref=reference)
+                plan=plan, workspace_id=workspace_id, issue=issue, source_ref=reference,
+                need_prefix="readonly:" if not snapshot and answer_ref is None else "event:")
         elif plan.action in {"create_task", "append_task"}:
             original = json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2)
             description = (plan.description or "") + "\n\n" + templates.UNTRUSTED_LABEL + "\n" + original

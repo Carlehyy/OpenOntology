@@ -22,6 +22,7 @@ export interface ConfirmDialogProps {
   variant?: 'danger' | 'warning' | 'default'
   loading?: boolean
   layer?: DialogLayer
+  onCloseAutoFocus?: (event: Event) => void
 }
 
 export function ConfirmDialog({
@@ -35,12 +36,13 @@ export function ConfirmDialog({
   variant = 'default',
   loading,
   layer = 'base',
+  onCloseAutoFocus,
 }: ConfirmDialogProps) {
   const danger = variant === 'danger'
   const warning = variant === 'warning'
   return (
     <Dialog open={open} onOpenChange={next => { if (!next) onClose() }}>
-      <DialogContent layer={layer} className="w-[min(92vw,26rem)]">
+      <DialogContent layer={layer} onCloseAutoFocus={onCloseAutoFocus} className="w-[min(92vw,26rem)]">
         <DialogHeader
           icon={danger || warning ? <AlertTriangle size={18} /> : <Info size={18} />}
           iconClassName={cn(

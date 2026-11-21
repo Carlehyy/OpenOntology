@@ -419,7 +419,13 @@ def submit_decision(db: Session, *, owner_id: str, decision_id: str,
         raise StoreConflict("invalid_decision_value", http_status=422)
     if row.source == "watchdog" and not row.issue_key:
         raise StoreConflict("watchdog_issue_required", http_status=422)
-    config, revision_id = source_resolver(db, row) if source_resolver else (None, None)
+    # A read-only assistant decision is intentionally local. Its answer emits
+    # only the atomic decision.answered fact and must not resolve or decrypt a
+    # Multica source merely because the card is being submitted.
+    if row.need_key.startswith("readonly:"):
+        config, revision_id = None, None
+    else:
+        config, revision_id = source_resolver(db, row) if source_resolver else (None, None)
     value = {"optionId": option_id, "freeText": text_value or None,
              "answer": text_value or chosen["label"]}
     _cas_decision(db, row, status="pending_dispatch", submitted_value=value,
