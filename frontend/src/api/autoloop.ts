@@ -172,7 +172,8 @@ export const autoloopApi = {
   getEventTrace: (id: string) => apiClientV2.get<AutoLoopTraceDetail | null>(`${base}/event-traces/${encodeURIComponent(id)}`),
   routingStats: (days: 7 | 30) => apiClientV2.get<AutoLoopRoutingStats>(`${base}/routing-stats`, { params: { days } }),
   getEvent: (id: string) => apiClientV2.get<AutoLoopEventDetail>(`${base}/events/${encodeURIComponent(id)}`),
-  listDecisions: (status: string, cursor?: string | null) => apiClientV2.get<AutoLoopPage<DecisionItem>>(`${base}/decision-items`, { params: { status, cursor: cursor || undefined, limit: 20 } }),
+  // limit 取服务端上限 100 以内的值；既有弹窗分页沿用默认 20，全局提醒一次取全
+  listDecisions: (status: string, cursor?: string | null, limit = 20) => apiClientV2.get<AutoLoopPage<DecisionItem>>(`${base}/decision-items`, { params: { status, cursor: cursor || undefined, limit } }),
   decisionSummary: () => apiClientV2.get<DecisionSummary>(`${base}/decision-items/summary`),
   getDecision: (id: string) => apiClientV2.get<DecisionItem>(itemPath(id)),
   decide: (id: string, body: DecisionMutation & { optionId?: string; freeText?: string }) => apiClientV2.post<DecisionItem>(`${itemPath(id)}/decide`, body),

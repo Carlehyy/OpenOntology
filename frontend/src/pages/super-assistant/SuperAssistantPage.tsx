@@ -36,6 +36,8 @@ import RuleRoutingDialog from './components/RuleRoutingDialog'
 import DecisionItemsDialog, { useDecisionSummary } from './components/DecisionItemsDialog'
 import type { AutoLoopRuleCreate } from '@/api/autoloop'
 import { createDecisionSession } from './components/autoloopLogic'
+import { PendingDecisionCard } from './components/PendingDecisionCard'
+import { noteDecisionDialogState, refreshDecisionAlerts } from './decisionAlerts'
 import { createSummaryScheduler } from './summaryScheduler'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Dialog, DialogTrigger } from '@/components/ui/dialog'
@@ -203,6 +205,16 @@ export default function SuperAssistantPage() {
   const [decisionSession, setDecisionSession] = useState(createDecisionSession)
   useEffect(() => { setDecisionSession(createDecisionSession()) }, [user?.id])
   const { summary: decisionSummary, refresh: refreshDecisionSummary } = useDecisionSummary(canUseAutoLoop)
+  // 全局决策提醒（聊天区右上角卡片/系统通知/标题角标）：弹窗内每次刷新摘要时同步对齐，避免卡片
+  // 计数滞后到下一轮轮询；弹窗打开期间用户正在看列表，不再叠加应用内提示
+  const refreshDecisionOverviews = useCallback(async () => {
+    await Promise.all([refreshDecisionSummary(), refreshDecisionAlerts()])
+  }, [refreshDecisionSummary])
+  const decisionDialogActive = Boolean(canUseAutoLoop && decisionsOpen)
+  useEffect(() => {
+    noteDecisionDialogState(decisionDialogActive)
+    return () => noteDecisionDialogState(false)
+  }, [decisionDialogActive])
   useEffect(() => {
     const decisions = canUseAutoLoop && Boolean(decisionId || searchParams.get('decisions'))
     const routing = canUseAutoLoop && !decisions && Boolean(eventId || searchParams.get('ruleRouting'))
@@ -1674,7 +1686,7 @@ export default function SuperAssistantPage() {
       )}
       {canUseAutoLoop && decisionsOpen && <DecisionItemsDialog initialId={decisionId} summary={decisionSummary} session={decisionSession} onSelect={id => {
         setSearchParams(previous => { const next = new URLSearchParams(previous); next.delete('decision'); next.delete('decisions'); if (id) next.set('decision', id); else next.set('decisions', '1'); return next }, { replace: true })
-      }} onOpenEvent={openAutoLoopEvent} onRefreshSummary={refreshDecisionSummary} onClose={() => {
+      }} onOpenEvent={openAutoLoopEvent} onRefreshSummary={refreshDecisionOverviews} onClose={() => {
         setDecisionsOpen(false)
         setSearchParams(previous => { const next = new URLSearchParams(previous); next.delete('decision'); next.delete('decisions'); return next }, { replace: true })
       }} />}
@@ -2000,6 +2012,9 @@ export default function SuperAssistantPage() {
               </ContextMenuItem>
             </ContextMenuContent>
             </ContextMenu>
+            {/* 待决策提醒卡片：聊天区右上角的常驻入口（有需要处理的事项才出现），与右键菜单「决策事项」
+                打开同一弹窗；挂在 main 内而非滚动容器，消息滚动时不被带走 */}
+            {canUseAutoLoop && <PendingDecisionCard onOpen={() => openDecisionItems()} />}
             {/* 离底较远时的兜底入口：一键回到最新消息（与贴底判定同一 96px 阈值） */}
             {hasMessages && showJumpToLatest && (
               <button
