@@ -121,6 +121,22 @@ if git -C "$REPO_ROOT" ls-files --error-unmatch \
   printf 'the production dependency manifest must not be tracked; it is materialized from Repository secrets on the runner\n' >&2
   exit 1
 fi
+# Compose 挂载的 ./docker/<dir>/** 配置必须随部署归档上服务器：allowlist
+# 漏登记时文件不存在，Docker 会把挂载源自动建成目录、网关容器启动失败
+# （multica-gateway 8446 首次部署即因此拒动）。
+deployment_archive_script="$REPO_ROOT/scripts/ci/create-deployment-archive.sh"
+while IFS= read -r compose_docker_mount; do
+  mounted_top="docker/$(printf '%s' "$compose_docker_mount" | cut -d/ -f3)"
+  if ! grep -Fq "\"$mounted_top\"" "$deployment_archive_script"; then
+    printf 'compose mounts %s but the deployment archive allowlist lacks "%s"\n' \
+      "$compose_docker_mount" "$mounted_top" >&2
+    exit 1
+  fi
+done < <(
+  sed -n 's/.*- \(\.\/docker\/[^:space:]*\):.*/\1/p' \
+    "$REPO_ROOT/docker-compose.prod.yml" | sort -u
+)
+printf 'ok deployment-archive-covers-compose-docker-mounts\n'
 manifest_materialize_step_count="$(
   grep -cF 'bash scripts/ci/materialize-production-dependencies.sh' \
     "$DEPLOY_WORKFLOW"
@@ -1264,6 +1280,8 @@ archive_fixture_paths=(
   "docker/weknora/weknora-proxy.inc"
   "docker/kaneo/gateway.conf.template"
   "docker/kaneo/kaneo-proxy.inc"
+  "docker/multica/gateway.conf"
+  "docker/multica/multica-proxy.inc"
   "deploy/deploy-prod.sh"
   "deploy/runtime_source_attestation.py"
   "deploy/runtime-source-manifest.json"
@@ -1324,6 +1342,8 @@ for required_member in \
   "docker/weknora/weknora-proxy.inc" \
   "docker/kaneo/gateway.conf.template" \
   "docker/kaneo/kaneo-proxy.inc" \
+  "docker/multica/gateway.conf" \
+  "docker/multica/multica-proxy.inc" \
   "deploy/runtime_source_attestation.py" \
   "deploy/runtime-source-manifest.json" \
   "deploy/production.dependencies.env"; do

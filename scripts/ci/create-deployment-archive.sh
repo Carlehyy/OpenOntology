@@ -46,6 +46,9 @@ required_paths=(
   "docker/browser"
   "docker/weknora"
   "docker/kaneo"
+  # multica-gateway 的 nginx 配置（同 weknora/kaneo 网关）：漏归档会让
+  # Docker 把挂载源自动建成目录，网关容器启动失败（8446 无法监听）。
+  "docker/multica"
   "deploy/deploy-prod.sh"
   "deploy/runtime_source_attestation.py"
   "deploy/runtime-source-manifest.json"
