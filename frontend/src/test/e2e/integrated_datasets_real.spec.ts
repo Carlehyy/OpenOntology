@@ -248,8 +248,8 @@ test.describe('real integrated-dataset isolated stack', () => {
     }
     const waitForDetailFields = async () => {
       const detail = page.getByTestId('integrated-asset-detail')
-      // 源字段与主键 renders inside a default-open <details>; the 47 physical
-      // columns arrive from the asset schema fetch.
+      // 「字段结构」 renders open by default; the 47 physical columns arrive from
+      // the asset schema fetch.
       await expect(detail.getByText('c40').first()).toBeVisible({ timeout: 15000 })
       return detail
     }
@@ -274,40 +274,47 @@ test.describe('real integrated-dataset isolated stack', () => {
       // Full 47-column source contents/checksums are independently streamed by
       // integrated_stack oracle; this browser stage checks persisted CRUD values.
       const detail = page.getByTestId('integrated-asset-detail')
-      await detail.getByRole('button', { name: '新增源记录', exact: true }).click()
+      await detail.getByRole('button', { name: '新增记录', exact: true }).click()
       const fixture = {
         id: '0', join_key: '9007199254740992', amount_cents: '0',
         active: source === 'postgres' ? true : '1', observed_at: '2026-01-01T00:00:00', source_tag: source, source_note: 'browser-insert',
         ...Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`c${String(i + 1).padStart(2, '0')}`, `v${String(i + 1).padStart(2, '0')}-000000`])),
       }
+      // The field form is the default input; the 47-field fixture is raw wire
+      // JSON, so switch the editor to its JSON segment first.
+      await page.getByRole('dialog', { name: '新增源记录', exact: true }).getByRole('button', { name: 'JSON', exact: true }).click()
       await page.getByLabel('源记录值 JSON').fill(JSON.stringify(fixture))
       let mutation = page.waitForResponse(response => response.url().endsWith(`/${id}/rows`) && response.request().method() === 'POST')
-      await page.getByRole('button', { name: '确认写入源表', exact: true }).click()
+      await page.getByRole('button', { name: '写入源表', exact: true }).click()
       expect((await mutation).ok()).toBeTruthy()
       let actual = await runQuery(page, 'from source as s | where s.id = 0 | fields s.id, s.source_note', binding)
       expect(actual.rows).toEqual([{ id: '0', source_note: 'browser-insert' }])
       await expect(detail.getByRole('button', { name: '编辑源记录 1', exact: true })).toBeEnabled()
       await detail.getByRole('button', { name: '编辑源记录 1', exact: true }).click()
-      // Preserve the server's typed/tagged PK wire encoding when editing.
+      // Preserve the server's typed/tagged PK wire encoding when editing: the JSON
+      // segment seeds itself from the row's wire values (tagged wide integers and
+      // decimals stay tagged), so only the edited field changes.
+      const editor = page.getByRole('dialog', { name: '编辑源记录', exact: true })
+      await editor.getByRole('button', { name: 'JSON', exact: true }).click()
       const original = JSON.parse(await page.getByLabel('源记录值 JSON').inputValue())
       await page.getByLabel('源记录值 JSON').fill(JSON.stringify({ ...original, source_note: 'browser-updated' }))
       mutation = page.waitForResponse(response => response.url().endsWith(`/${id}/rows`) && response.request().method() === 'PATCH')
-      await page.getByRole('button', { name: '确认写入源表', exact: true }).click()
+      await editor.getByRole('button', { name: '写入源表', exact: true }).click()
       expect((await mutation).ok()).toBeTruthy()
       actual = await runQuery(page, 'from source as s | where s.id = 0 | fields s.id, s.source_note', binding)
       expect(actual.rows).toEqual([{ id: '0', source_note: 'browser-updated' }])
       await detail.getByRole('button', { name: '删除源记录 1', exact: true }).click()
       mutation = page.waitForResponse(response => response.url().endsWith(`/${id}/rows`) && response.request().method() === 'DELETE')
-      await page.getByRole('button', { name: '确认写入源表', exact: true }).click()
+      await page.getByRole('button', { name: '确认删除', exact: true }).click()
       expect((await mutation).ok()).toBeTruthy()
       // A real reread must show the restored first source row, not just a toast.
       await expect(detail.getByRole('button', { name: '编辑源记录 1', exact: true })).toBeEnabled()
       const firstSourceRow = detail.getByTestId('integrated-source-rows').getByRole('row').filter({ has: page.getByRole('button', { name: '编辑源记录 1', exact: true }) })
       await expect(firstSourceRow).toContainText('9007199254740993')
       const syncPending = page.waitForResponse(response => response.url().endsWith(`/${id}/sync`) && response.request().method() === 'POST')
-      // 完整同步在「离线快照与高级操作」折叠区：先展开再点击。
+      // 完整同步在「版本与同步」折叠区：先展开再点击。
       await detail.getByTestId('integrated-advanced-operations').locator('summary').click()
-      await detail.getByRole('button', { name: '完整同步到版本', exact: true }).click()
+      await detail.getByRole('button', { name: '创建离线快照', exact: true }).click()
       const syncResponse = await syncPending
       expect(syncResponse.status()).toBe(202)
       type SyncRun = { run_id: string; status: string; complete: boolean; row_count: number; dataset_id: string; version_id: string | null }

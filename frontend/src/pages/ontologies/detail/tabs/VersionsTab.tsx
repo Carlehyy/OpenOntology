@@ -804,13 +804,13 @@ export default function VersionsTab({ ontologyId, onClose }: { ontologyId: strin
           return (
             <Dialog open onOpenChange={next => { if (!next) setPromotion(null) }}>
               <DialogContent className="flex max-h-[min(88dvh,900px)] w-[min(92vw,56rem)] flex-col">
-                <DialogHeader>
-                  <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${blocked ? 'bg-[var(--color-danger-bg)] text-[var(--color-danger)]' : 'bg-[var(--color-success-bg)] text-[var(--color-success)]'}`}>
-                    {blocked ? <CircleAlert size={20} /> : <ShieldCheck size={20} />}
-                  </div>
-                  <div className="min-w-0">
-                    <DialogTitle>{`发布前检查 · ${promotion.node.version_number}`}</DialogTitle>
-                  </div>
+                <DialogHeader
+                  icon={blocked ? <CircleAlert size={18} /> : <ShieldCheck size={18} />}
+                  iconClassName={blocked
+                    ? 'bg-[var(--color-danger-bg)] text-[var(--color-danger)]'
+                    : 'bg-[var(--color-success-bg)] text-[var(--color-success)]'}
+                >
+                  <DialogTitle>{`发布前检查 · ${promotion.node.version_number}`}</DialogTitle>
                 </DialogHeader>
               <div className="min-h-0 flex-1 space-y-5 overflow-y-auto text-sm">
                 {blocked ? (

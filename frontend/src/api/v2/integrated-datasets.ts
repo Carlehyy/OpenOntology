@@ -1,5 +1,4 @@
 import { apiClientV2 } from '../client.ts'
-import { formatDateTime } from '../../utils/datetime.ts'
 
 export interface IntegratedColumn {
   name: string
@@ -14,6 +13,8 @@ export interface IntegratedColumn {
   display_name?: string
   /** Physical source type from dbx; present only when it differs from the logical type. */
   source_type?: string
+  /** For timestamp/time columns: whether the source column carries a time zone. */
+  timezone?: boolean | null
 }
 
 export interface IntegratedDbxStatus {
@@ -268,40 +269,6 @@ export function isIntegratedCdcStatus(payload: unknown): payload is IntegratedCd
   })
 }
 
-/** Card label for a verified payload: not enabled is an explicit state, not an error. */
-export function cdcCardLabel(status: IntegratedCdcStatus): string {
-  if (!status.enabled) return '未启用'
-  // active 但 healthy=false 是矛盾的服务端事实：不得显示订阅中，降级为未核验。
-  if (status.status === 'active' && status.healthy !== true) return '未核验'
-  return cdcStatusLabel(status.status)
-}
-
-/**
- * Aggregate subscription count; per-state counts are surfaced only when some
- * subscription is not actively streaming, so problems stay visible.
- */
-export function cdcSubscriptionSummary(subscriptions: IntegratedCdcSubscription[]): string {
-  const total = subscriptions.length
-  const counts = new Map<string, number>()
-  for (const subscription of subscriptions) {
-    if (subscription.status === 'active') continue
-    const label = cdcStatusLabel(subscription.status)
-    counts.set(label, (counts.get(label) ?? 0) + 1)
-  }
-  if (counts.size === 0) return `订阅 ${total} 条`
-  const breakdown = [...counts.entries()].map(([label, count]) => `${label} ${count}`).join(' · ')
-  return `订阅 ${total} 条（${breakdown}）`
-}
-
-/** Observable facts only: no coverage claim before coverage_started_at, no invented events. */
-export function cdcFactsDetail(status: IntegratedCdcStatus): string {
-  const parts = [
-    `最近变更事件 ${formatDateTime(status.last_event_at, { fallback: '暂无' })}`,
-    `增量覆盖起点 ${formatDateTime(status.coverage_started_at, { fallback: '尚未建立' })}`,
-  ]
-  if (status.last_error_code) parts.push(`最近错误码 ${status.last_error_code}`)
-  return parts.join(' · ')
-}
 export interface DiscoveredResource { schema_name: string; table_name: string }
 
 export type IntegratedSourceKind = 'mysql' | 'postgres'
@@ -381,7 +348,8 @@ export const integratedDatasetsApi = {
   schema: (id: string): Promise<IntegratedSchema> => apiClientV2.get(`${assetPath(id)}/schema`),
   /** Server returns the refreshed asset DTO, not a bare schema object. */
   refreshSchema: (id: string): Promise<IntegratedAsset> => apiClientV2.post(`${assetPath(id)}/refresh-schema`, {}),
-  rows: (id: string, limit = 100): Promise<IntegratedRows> => apiClientV2.get(`${assetPath(id)}/rows`, { params: { limit } }),
+  rows: (id: string, limit = 100, signal?: AbortSignal): Promise<IntegratedRows> =>
+    apiClientV2.get(`${assetPath(id)}/rows`, { params: { limit }, signal }),
   insert: (id: string, payload: MutationRequest): Promise<MutationReceipt> => apiClientV2.post(`${assetPath(id)}/rows`, payload),
   update: (id: string, payload: MutationRequest): Promise<MutationReceipt> => apiClientV2.patch(`${assetPath(id)}/rows`, payload),
   delete: (id: string, payload: MutationRequest): Promise<MutationReceipt> => apiClientV2.delete(`${assetPath(id)}/rows`, { data: payload }),

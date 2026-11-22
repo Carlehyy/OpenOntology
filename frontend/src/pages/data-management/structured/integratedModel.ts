@@ -1,6 +1,6 @@
 import type {
   IntegratedAsset, IntegratedReplica, IntegratedReplicaStatus, IntegratedReplicaStatusPayload,
-  IntegratedRows, IntegratedSyncRun, IntegratedVersion,
+  IntegratedSyncRun, IntegratedVersion,
 } from '@/api/v2/integrated-datasets'
 import { formatDateTime } from '../../../utils/datetime.ts'
 
@@ -102,37 +102,11 @@ export function versionIsVerified(version: Pick<IntegratedVersion, 'status' | 'c
   return version.status === 'sealed' && version.complete === true
 }
 
-export function versionStateLabel(version: Pick<IntegratedVersion, 'status' | 'complete'>): string {
-  return versionIsVerified(version) ? '完整封存已核验' : '完整性未核验'
-}
-
-/** Never let an existing version id imply that its sealed manifest was verified. */
-export function latestVersionStateLabel(asset: Pick<IntegratedAsset, 'latest_version_id'>, versions: IntegratedVersion[]): string {
-  if (!asset.latest_version_id) return '尚无完整版本'
-  const version = versions.find(item => item.id === asset.latest_version_id)
-  if (!version) return `最新版本 ${asset.latest_version_id}（封存状态未核验）`
-  return `最新版本 ${version.id} · ${versionStateLabel(version)}`
-}
-
-/** A successful preview proves the local replica was readable at that instant, not total rows. */
-export function sourceReadLabel(rows: IntegratedRows | null | undefined): string {
-  if (!rows) return '未核验'
-  return rows.stale || rows.source_state.stale ? '副本可读（可能滞后）' : '副本读取已核验'
-}
-
-export function sourceReadDetail(rows: IntegratedRows | null | undefined): string {
-  if (!rows) return '登记不等于副本可读；请先核验副本状态'
-  const state = rows.source_state
-  const coverage = state.coverage_confirmed_at ?? state.started_at
-  const staleNote = rows.stale || state.stale ? ' · 副本可能滞后（源网不可达不阻断本地读取）' : ''
-  return `副本覆盖确认时点 ${coverage ?? '未知'}（非最后变更时间） · 读取完整性 完整 · 预览最多 ${rows.limit ?? 100} 行，不是总行数${staleNote}`
-}
-
 /** Local replica lifecycle labels; unknown values never render as healthy. */
 export const REPLICA_STATUS_LABELS: Record<string, string> = {
-  pending: '等待初始化', initializing: '初始化中', catching_up: '追平增量中',
-  ready: '已就绪', stale: '已滞后（可读）', rebuild_required: '需重建',
-  blocked: '被阻塞', stopped: '已停止',
+  pending: '等待初始化', initializing: '初始化中', catching_up: '追平中',
+  ready: '已就绪', stale: '可能滞后', rebuild_required: '需重新同步',
+  blocked: '已阻断', stopped: '已暂停',
 }
 
 const REPLICA_STATUSES = new Set<IntegratedReplicaStatus>(
@@ -196,7 +170,7 @@ export function replicaFactsDetail(replica: IntegratedReplica | null | undefined
 }
 
 /** A source write succeeded but the local replica has not caught up yet. */
-export const REPLICA_PENDING_SYNC_NOTE = '源库已写入，等待副本同步；本地查询暂未包含该写入。'
+export const REPLICA_PENDING_SYNC_NOTE = '已写入源表，正在同步到本地数据，稍后会自动更新。'
 
 /**
  * Baseline for deciding when the replica covers a source write.

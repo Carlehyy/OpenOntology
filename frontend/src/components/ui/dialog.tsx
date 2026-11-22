@@ -105,6 +105,8 @@ function DialogHeader({
   icon?: React.ReactNode
   iconClassName?: string
 }) {
+  // children 始终进入同一个文字列：无图标时若把 DialogTitle 与 DialogDescription
+  // 直接平铺成 flex 子项，标题会与描述并排（描述被挤成窄列）。
   return (
     <div className={cn('mb-4 flex items-center gap-3 pr-14', className)} {...props}>
       {icon && (
@@ -117,7 +119,7 @@ function DialogHeader({
           {icon}
         </div>
       )}
-      {icon ? <div className="min-w-0">{children}</div> : children}
+      <div className="min-w-0">{children}</div>
     </div>
   )
 }
