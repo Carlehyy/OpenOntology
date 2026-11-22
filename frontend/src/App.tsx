@@ -51,6 +51,7 @@ import SceneDetailPage from '@/pages/scenes/detail/SceneDetailPage'
 import SceneModelingPage from '@/pages/scenes/modeling/SceneModelingPage'
 import PublicManualDatasetPage from '@/pages/data-management/structured/PublicManualDatasetPage'
 import { Toaster } from '@/components/ui/sonner'
+import { DecisionAlertHub } from '@/pages/super-assistant/components/DecisionAlertHub'
 import { AccessDeniedPage, NoAssignedPagesPage } from '@/pages/errors/AccessDeniedPage'
 import { canAccessPath, defaultLandingPath, firstAccessiblePath } from '@/config/navigation'
 
@@ -159,6 +160,8 @@ export default function App() {
         }
       />
         <HashRouter>
+          {/* 待决策事项提醒的全局轮询器：驱动系统通知、应用内提示与标签页标题角标 */}
+          <DecisionAlertHub />
           <Routes>
           <Route path="/login" element={<LoginPage />} />
           <Route path="/share/manual/:token" element={<PublicManualDatasetPage />} />

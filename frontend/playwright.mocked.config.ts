@@ -117,6 +117,7 @@ export default defineConfig({
     '**/super_assistant_agent_mode.spec.ts',
     '**/super_assistant_browser_collaboration.spec.ts',
     '**/super_assistant_confirmation_delivery.spec.ts',
+    '**/super_assistant_decision_alerts.spec.ts',
     '**/super_assistant_evolution.spec.ts',
     '**/super_assistant_kernel_run_view.spec.ts',
     '**/super_assistant_quick_inputs.spec.ts',
