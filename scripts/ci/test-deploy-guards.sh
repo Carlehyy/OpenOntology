@@ -3696,8 +3696,10 @@ fi
 grep -q 'MULTICA_DEFAULT_\* must be all set or all empty' \
   "$test_dir/multica-partial-enabled.log"
 # Four-of-five with WEB_URL missing: configure derives the internal base URL
-# and prints the explicit-WEB_URL hint, then validation still refuses the
-# incomplete set (the deployment never guesses a browser origin).
+# and completes the set with the bundled multica-gateway origin
+# (PUBLIC_TLS_IP + MULTICA_HTTPS_PORT, same shape as WEKNORA/KANEO_WEB_URL),
+# so the deployment succeeds; partial sets without that derivation path stay
+# covered by the enabled/disabled two-of-five checks above and below.
 set_test_env_value MULTICA_DEFAULT_WORKSPACE_NAME "OpenOntology 默认工作台"
 if (
   cd "$test_dir"
@@ -3708,23 +3710,30 @@ if (
     DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
     bash "$DEPLOY_SCRIPT"
 ) >"$test_dir/multica-missing-web-url.log" 2>&1; then
-  printf 'a four-of-five Multica default set (WEB_URL missing) must be rejected\n' >&2
+  :
+else
+  printf 'a WEB_URL-less Multica default must complete via the bundled gateway derivation\n' >&2
+  cat "$test_dir/multica-missing-web-url.log" >&2
   exit 1
 fi
-grep -Fq 'MULTICA_DEFAULT_WEB_URL is not set while the rest of the five-value default is present' \
+grep -Fq 'configured MULTICA_DEFAULT_WEB_URL from PUBLIC_TLS_IP and MULTICA_HTTPS_PORT' \
   "$test_dir/multica-missing-web-url.log"
 grep -Fq 'configured MULTICA_DEFAULT_BASE_URL from the bundled multica service' \
-  "$test_dir/multica-missing-web-url.log"
-grep -q 'MULTICA_DEFAULT_\* must be all set or all empty (found 4/5)' \
   "$test_dir/multica-missing-web-url.log"
 set_test_env_value MULTICA_DEFAULT_WORKSPACE_NAME ""
 set_test_env_value MULTICA_DEFAULT_PAT ""
 set_test_env_value MULTICA_DEFAULT_WORKSPACE_ID ""
 grep -Fxq 'MULTICA_DEFAULT_BASE_URL=http://multica:8080' "$test_dir/.env" \
   || {
-    printf 'configure must persist the derived internal base URL before validation rejects the four-of-five set\n' >&2
+    printf 'configure must persist the derived internal base URL\n' >&2
     exit 1
   }
+grep -Fxq 'MULTICA_DEFAULT_WEB_URL=https://64.83.14.139:8446' "$test_dir/.env" \
+  || {
+    printf 'configure must persist the derived bundled-gateway web URL\n' >&2
+    exit 1
+  }
+set_test_env_value MULTICA_DEFAULT_WEB_URL ""
 set_test_env_value MULTICA_DEFAULT_BASE_URL ""
 set_test_env_value MULTICA_ENABLED false
 # Re-establish the partial set for the disabled-state check: all-or-nothing
