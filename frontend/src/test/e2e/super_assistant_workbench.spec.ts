@@ -1164,16 +1164,19 @@ test('工作台骨架：功能入口齐备，近期会话单列表，归档折�
 
   await expect(page.getByRole('button', { name: '新建会话' })).toBeVisible()
   await expect(page.getByRole('button', { name: /全局搜索/ })).toBeVisible()
-  // 消息通知可点击；任务实例与能力拓展入口已移出工作台功能区（2026-11 确认）：
-  // 任务实例弹窗保留「定时任务 → 查看实例」触发链，五大功能入口迁入聊天区域右键菜单
+  // 消息通知可点击；任务实例、能力拓展与定时任务入口已移出工作台功能区（2026-11 确认）：
+  // 任务实例弹窗保留「定时任务 → 查看实例」触发链，五大功能入口迁入聊天区域右键菜单，
+  // 定时任务入口迁至头部图标行（能力地图左侧）
   const notificationsEntry = page.getByRole('button', { name: /消息通知/ })
   await expect(notificationsEntry).toBeVisible()
   await expect(notificationsEntry).toBeEnabled()
   await expect(notificationsEntry).toContainText('2')
+  // 定时任务入口自侧栏迁至头部图标行：按钮仍在页面（头部），侧栏功能项不再渲染
   await expect(page.getByRole('button', { name: '定时任务' })).toBeVisible()
   const workbenchNav = page.locator('nav[aria-label="工作台功能"]')
   await expect(workbenchNav.getByRole('button', { name: '任务实例', exact: true })).toHaveCount(0)
   await expect(workbenchNav.getByRole('button', { name: '能力拓展', exact: true })).toHaveCount(0)
+  await expect(workbenchNav.getByRole('button', { name: '定时任务', exact: true })).toHaveCount(0)
   await expect(page.getByRole('link', { name: '本体治理' })).toBeVisible()
   // 五大功能入口已迁入聊天区域右键菜单：头部不再保留对应按钮/链接
   await expect(page.getByRole('button', { name: '能力拓展' })).toHaveCount(0)
@@ -1181,9 +1184,9 @@ test('工作台骨架：功能入口齐备，近期会话单列表，归档折�
   await expect(page.getByRole('link', { name: '知识库（WeKnora）' })).toHaveCount(0)
   await expect(page.locator('[data-workbench-palace]')).toHaveCount(0)
 
-  // 功能项顺序契约：规则路由紧邻定时任务。
+  // 功能项顺序契约：规则路由紧邻消息通知（定时任务已迁至头部图标行）。
   const navEntries = page.locator('nav[aria-label="工作台功能"] > *')
-  const expectedOrder = ['全局搜索', '消息通知', '定时任务', '规则路由', '本体治理']
+  const expectedOrder = ['全局搜索', '消息通知', '规则路由', '本体治理']
   await expect(navEntries).toHaveCount(expectedOrder.length)
   for (let index = 0; index < expectedOrder.length; index += 1) {
     await expect(navEntries.nth(index)).toContainText(expectedOrder[index])
@@ -1438,6 +1441,46 @@ for (const role of ['editor', 'viewer', 'custom'] as const) {
     expect(requests).toEqual([])
   })
 }
+
+test('AutoLoop 模拟：规则路由与决策事项弹窗遮罩空白点击关闭', async ({ page }) => {
+  await seedAuth(page)
+  await mockApis(page)
+  await mockAutoLoop(page, {})
+
+  // 规则路由：干净状态遮罩点击与右上关闭/ Esc 同路，直接关闭并清理深链参数
+  await page.goto('/#/super-assistant?ruleRouting=1')
+  const rules = page.getByRole('dialog', { name: '规则路由', exact: true })
+  await expect(rules).toBeVisible()
+  await page.mouse.click(5, 400)
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await expect(page).not.toHaveURL(/ruleRouting=1/)
+
+  // 规则路由：脏稿遮罩点击先确认，「放弃草稿」后才关闭。重开走侧栏入口
+  // （真实用户路径）：同页 hash goto 重开深链在 hash history 下存在间歇性
+  // 丢失更新（存量行为，与弹窗关闭改动无关），不作为本用例的打开方式
+  await page.getByRole('button', { name: '规则路由', exact: true }).click()
+  await expect(rules).toBeVisible()
+  await rules.getByRole('tab', { name: '规则模板', exact: true }).click()
+  await rules.getByRole('button', { name: '新建规则', exact: true }).click()
+  await rules.getByRole('textbox', { name: '规则名称', exact: true }).fill('遮罩关闭前的草稿')
+  await page.mouse.click(5, 400)
+  const guard = page.getByRole('dialog', { name: '放弃未保存的规则草稿？' })
+  await expect(guard).toBeVisible()
+  await expect(rules).toBeVisible()
+  await guard.getByRole('button', { name: '放弃草稿', exact: true }).click()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await expect(page).not.toHaveURL(/ruleRouting=1/)
+
+  // 决策事项（聊天区右键入口打开）：遮罩点击直接关闭并清理深链参数
+  const menu = await openChatActionsMenu(page)
+  await menu.locator('[data-ctx-item="decisions"]').click()
+  const decisions = page.getByRole('dialog', { name: '决策事项', exact: true })
+  await expect(decisions).toBeVisible()
+  await expect(page).toHaveURL(/decisions=1/)
+  await page.mouse.click(5, 400)
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await expect(page).not.toHaveURL(/decisions=1/)
+})
 
 test('AutoLoop 模拟：未登录决策深链与错误密码保留 returnTo，登录后恢复详情', async ({ page }) => {
   await mockApis(page)
@@ -2290,10 +2333,12 @@ test('AutoLoop 模拟：窄屏菜单顺序、规则入口与决策详情可返�
   await page.keyboard.press('Escape')
   await page.getByRole('button', { name: '更多操作', exact: true }).click()
   const menu = page.getByRole('dialog')
-  // 五大功能入口已迁入聊天区域右键菜单：溢出菜单只保留实时浏览器/助手配置
-  await expect(menu.getByRole('button')).toHaveCount(2)
-  await expect(menu.getByRole('button').nth(0)).toHaveText(/实时浏览器/)
-  await expect(menu.getByRole('button').nth(1)).toHaveText(/助手配置/)
+  // 五大功能入口已迁入聊天区域右键菜单：溢出菜单保留定时任务（头部图标窄屏让位标题的
+  // 镜像项）/实时浏览器/助手配置
+  await expect(menu.getByRole('button')).toHaveCount(3)
+  await expect(menu.getByRole('button').nth(0)).toHaveText(/定时任务/)
+  await expect(menu.getByRole('button').nth(1)).toHaveText(/实时浏览器/)
+  await expect(menu.getByRole('button').nth(2)).toHaveText(/助手配置/)
   await page.keyboard.press('Escape')
   await page.getByRole('button', { name: '打开工作台导航' }).click()
   await page.getByRole('button', { name: '规则路由', exact: true }).click()
@@ -3949,13 +3994,14 @@ test('窄屏：溢出菜单移除五大入口仅留实时浏览器/助手配置�
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto('/#/super-assistant?conversation=c-earlier')
 
-  // 窄屏「更多操作」溢出菜单：五大入口已迁入聊天区域右键菜单，仅保留
-  // 实时浏览器/助手配置两项
+  // 窄屏「更多操作」溢出菜单：五大入口已迁入聊天区域右键菜单，保留定时任务
+  // （头部图标窄屏让位标题的镜像项）/实时浏览器/助手配置三项
   await page.getByRole('button', { name: '更多操作' }).click()
   const menu = page.getByRole('dialog')
-  await expect(menu.getByRole('button')).toHaveCount(2)
-  await expect(menu.getByRole('button').nth(0)).toHaveText(/实时浏览器/)
-  await expect(menu.getByRole('button').nth(1)).toHaveText(/助手配置/)
+  await expect(menu.getByRole('button')).toHaveCount(3)
+  await expect(menu.getByRole('button').nth(0)).toHaveText(/定时任务/)
+  await expect(menu.getByRole('button').nth(1)).toHaveText(/实时浏览器/)
+  await expect(menu.getByRole('button').nth(2)).toHaveText(/助手配置/)
   await page.keyboard.press('Escape')
 
   // 聊天区域右键菜单在窄屏同样弹出且六项齐备

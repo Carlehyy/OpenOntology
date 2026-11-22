@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
-  Archive, ArchiveRestore, Bell, Brain, ChevronRight, Clock, Download, History, Inbox, LayoutDashboard,
+  Archive, ArchiveRestore, Bell, Brain, ChevronRight, Download, History, Inbox, LayoutDashboard,
   LogOut, Megaphone, Mic, Network, Pencil, Plug, Plus, Route, Search, Sparkles, Trash2, Wrench, X,
 } from 'lucide-react'
 
@@ -38,7 +38,6 @@ interface WorkbenchSidebarProps {
   onDelete: (id: string) => void
   onSetArchived: (id: string, archived: boolean) => void
   onOpenSearch: () => void
-  onOpenScheduled: () => void
   onOpenRuleRouting: () => void
   /** 打开消息通知弹窗（仅 admin 入口可见） */
   onOpenNotifications: () => void
@@ -187,7 +186,6 @@ export default function WorkbenchSidebar({
   onDelete,
   onSetArchived,
   onOpenSearch,
-  onOpenScheduled,
   onOpenRuleRouting,
   onOpenNotifications,
   onRename,
@@ -318,15 +316,13 @@ export default function WorkbenchSidebar({
             )}
           </button>
         )}
-        <button type="button" onClick={() => { onOpenScheduled(); onCloseMobile() }} className={actionItemClass}>
-          <Clock size={16} className="shrink-0" /> 定时任务
-        </button>
         {hasMenuAccess(user, 'super_assistant') && <button type="button" onClick={() => { onOpenRuleRouting(); onCloseMobile() }} className={actionItemClass} data-workbench-rule-routing>
           <Route size={16} className="shrink-0" /> 规则路由
         </button>}
-        {/* 任务实例与能力拓展入口已移出工作台功能区（2026-11 确认）：任务实例
-            弹窗仍由「定时任务」记录的「查看实例」触发链打开，能力拓展入口迁至
-            页面头部图标行（SuperAssistantPage），本侧栏不再渲染 */}
+        {/* 任务实例、能力拓展与定时任务入口已移出工作台功能区（2026-11 确认）：
+            任务实例弹窗仍由「定时任务」记录的「查看实例」触发链打开，能力拓展入口
+            迁至聊天区域右键菜单，定时任务入口迁至页面头部图标行（SuperAssistantPage，
+            能力地图左侧），本侧栏不再渲染 */}
         {hasMenuAccess(user, 'ontologies') && (
           <Link to="/ontologies" onClick={onCloseMobile} className={actionItemClass} data-workbench-governance>
             <LayoutDashboard size={16} className="shrink-0" /> 本体治理
