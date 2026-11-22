@@ -3,6 +3,8 @@
  *  kind=platform_default 只读，custom 可增删改/激活；「停用回默认」= 激活默认 profile。 */
 import type { MulticaProfile, MulticaProfilePayload } from '@/api/superAssistant'
 
+import { resolveNativeWebUrl } from '../webEntryUrl.ts'
+
 /** 表单态（token 永不回显，只收集新输入；空串 = 保留已存凭据） */
 export interface MulticaProfileFormState {
   id: string
@@ -39,6 +41,20 @@ export function multicaTestStatusMeta(status: MulticaProfile['last_test_status']
   if (status === 'success') return { label: '测试成功', ok: true }
   if (status === 'error') return { label: '测试失败', ok: false }
   return { label: '未测试', ok: null }
+}
+
+/** 自定义 profile 的 Web 工作台入口：官方自托管栈单源发布，web 容器把
+ *  /api/* 服务端代理到后端，服务地址（base_url）的 origin 即浏览器可达的
+ *  Web 入口，因此入口 = origin(base_url)，剥掉路径只留协议+主机+端口。
+ *  仅接受 http(s)；地址缺失或非法返回 null（不渲染外链，不猜测入口）。
+ *  平台默认 profile 不走此推导（web_url 由部署显式下发，契约不做推导）。 */
+export function multicaCustomWebEntryUrl(profile: Pick<MulticaProfile, 'base_url'>): string | null {
+  if (!profile.base_url) return null
+  try {
+    return resolveNativeWebUrl(new URL(profile.base_url).origin)
+  } catch {
+    return null
+  }
 }
 
 /** 组装 POST/PATCH 负载并做必填校验（返回 missing 非空时 body 为 null）：

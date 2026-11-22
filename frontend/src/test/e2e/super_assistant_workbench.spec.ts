@@ -4162,13 +4162,21 @@ test('multica 多 profile：激活自定义配置与停用回默认', async ({ p
   await expect(dialog.getByTestId('multica-effective-commands')).toContainText('/multica:list_agents')
 
   // 「打开 Multica」只出现在默认卡（部署下发的 web_url 原样使用，新窗口隔离）；
-  // custom 行恒无 web_url，不渲染外链
+  // custom 行恒无 web_url 字段，不渲染该外链
   const openWebLink = dialog.getByTestId('multica-default-card').getByTestId('multica-open-web')
   await expect(openWebLink).toBeVisible()
   await expect(openWebLink).toHaveAttribute('href', 'http://localhost:18100')
   await expect(openWebLink).toHaveAttribute('target', '_blank')
   await expect(openWebLink).toHaveAttribute('rel', 'noopener noreferrer')
   await expect(row.getByTestId('multica-open-web')).toHaveCount(0)
+
+  // custom 行的「打开工作台」：入口 = base_url 的 origin（官方自托管栈 web 与
+  // API 同源），剥掉路径只留协议+主机+端口，新窗口隔离打开
+  const customOpenWeb = row.getByTestId('multica-profile-open-web')
+  await expect(customOpenWeb).toBeVisible()
+  await expect(customOpenWeb).toHaveAttribute('href', 'http://127.0.0.1:8080')
+  await expect(customOpenWeb).toHaveAttribute('target', '_blank')
+  await expect(customOpenWeb).toHaveAttribute('rel', 'noopener noreferrer')
 
   // 停用并回默认 = 激活平台默认 profile（POST /profiles/{default_id}/activate）
   await dialog.getByTestId('multica-profile-deactivate').click()
