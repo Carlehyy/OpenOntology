@@ -401,6 +401,30 @@ def test_production_rejects_non_public_multica_default_web_url(web_url):
     )
 
 
+def test_production_compose_publishes_multica_gateway_tls_entry():
+    """Multica web 的公开入口是 bundled multica-gateway（TLS，复用平台证书），
+    与 weknora/kaneo 网关同构；loopback 宿主端口不再承担公开访问。"""
+    compose = yaml.safe_load((ROOT / "docker-compose.prod.yml").read_text())
+    gateway = compose["services"]["multica-gateway"]
+
+    assert gateway["profiles"] == ["multica"]
+    assert gateway["ports"] == ["${MULTICA_HTTPS_PORT:-8446}:443"]
+    assert gateway["networks"] == ["multica_internal"]
+    assert gateway["depends_on"]["multica-web"]["condition"] == (
+        "service_healthy"
+    )
+    assert gateway["depends_on"]["frontend_ssl_init"]["condition"] == (
+        "service_completed_successfully"
+    )
+    volumes = gateway["volumes"]
+    assert (
+        "./docker/multica/gateway.conf:/etc/nginx/conf.d/default.conf:ro"
+        in volumes
+    )
+    assert "./docker/multica/multica-proxy.inc:/etc/nginx/multica-proxy.inc:ro" in volumes
+    assert "frontend_ssl_certs:/etc/nginx/certs:ro" in volumes
+
+
 def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():
     compose = yaml.safe_load((ROOT / "docker-compose.prod.yml").read_text())
     backend = compose["services"]["backend"]
@@ -1470,6 +1494,57 @@ def test_deploy_derives_bundled_redis_requirepass_from_client_url(tmp_path):
     assert generated["REDIS_URL"] == redis_url
     assert "synchronized the bundled Redis service password" in result.stdout
     assert password not in result.stdout + result.stderr
+
+
+def test_deploy_derives_multica_default_web_url_from_public_tls_ip(tmp_path):
+    """五值默认集只缺 WEB_URL 时按 PUBLIC_TLS_IP + MULTICA_HTTPS_PORT 推导
+    bundled multica-gateway 的公开 TLS origin（与 WEKNORA/KANEO 同构）。"""
+    shutil.copy(ROOT / ".env.example", tmp_path / ".env.example")
+    shutil.copy(ROOT / ".env.example", tmp_path / ".env")
+    (tmp_path / ".env").write_text(
+        (tmp_path / ".env").read_text(encoding="utf-8")
+        + "PUBLIC_TLS_IP=203.0.113.10\n"
+        + "MULTICA_DEFAULT_WORKSPACE_ID=11111111-1111-1111-1111-111111111111\n"
+        + "MULTICA_DEFAULT_WORKSPACE_NAME=平台默认工作区\n"
+        + "MULTICA_DEFAULT_PAT=synthetic-multica-pat-0123456789\n",
+        encoding="utf-8",
+    )
+
+    result = _run_deploy_validation(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    generated = _read_env(tmp_path / ".env")
+    assert generated["MULTICA_DEFAULT_WEB_URL"] == "https://203.0.113.10:8446"
+    assert generated["MULTICA_DEFAULT_BASE_URL"] == "http://multica:8080"
+    assert (
+        "configured MULTICA_DEFAULT_WEB_URL from PUBLIC_TLS_IP"
+        in result.stdout
+    )
+
+
+def test_deploy_preserves_explicit_multica_default_web_url(tmp_path):
+    """显式 WEB_URL 一律尊重：不按 PUBLIC_TLS_IP 改写运维已给的 origin。"""
+    shutil.copy(ROOT / ".env.example", tmp_path / ".env.example")
+    shutil.copy(ROOT / ".env.example", tmp_path / ".env")
+    (tmp_path / ".env").write_text(
+        (tmp_path / ".env").read_text(encoding="utf-8")
+        + "PUBLIC_TLS_IP=203.0.113.10\n"
+        + "MULTICA_DEFAULT_WEB_URL=https://multica.example.com\n"
+        + "MULTICA_DEFAULT_WORKSPACE_ID=11111111-1111-1111-1111-111111111111\n"
+        + "MULTICA_DEFAULT_WORKSPACE_NAME=平台默认工作区\n"
+        + "MULTICA_DEFAULT_PAT=synthetic-multica-pat-0123456789\n",
+        encoding="utf-8",
+    )
+
+    result = _run_deploy_validation(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    generated = _read_env(tmp_path / ".env")
+    assert generated["MULTICA_DEFAULT_WEB_URL"] == "https://multica.example.com"
+    assert (
+        "configured MULTICA_DEFAULT_WEB_URL from PUBLIC_TLS_IP"
+        not in result.stdout
+    )
 
 
 def test_deploy_preserves_external_redis_url_without_binding_local_password(

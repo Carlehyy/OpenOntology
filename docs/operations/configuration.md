@@ -531,9 +531,11 @@ Multica 是超级助手的外部任务/智能体集成（每用户自配模式�
 - 生产 `MULTICA_DEFAULT_WEB_URL`（设置时）必须是无凭据/路径/查询的绝对
   http(s) origin 且浏览器可达公网 host（后端启动校验拒绝 loopback/
   localhost）；`MULTICA_DEFAULT_BASE_URL` 允许内网 origin（bundled 部署
-  即 compose 内网地址）。部署脚本**不推导** WEB_URL：web 宿主端口默认只
-  绑 loopback（见下），按 `PUBLIC_TLS_IP` 推导出的明文 origin 既不可达
-  也不安全，必须由管理员显式给出。
+  即 compose 内网地址）。WEB_URL 缺省而其余四值已齐时，部署脚本按
+  `PUBLIC_TLS_IP` + `MULTICA_HTTPS_PORT`（bundled multica-gateway 的公开
+  TLS origin，默认 8446）推导——与 `WEKNORA_WEB_URL`/`KANEO_WEB_URL`
+  同构；`PUBLIC_TLS_IP` 缺失时不代写，由 all-or-nothing 校验显式报错。
+  显式配置一律尊重（可指向自备 TLS 反代或外部 Multica 的 web origin）。
 
 bundled 官方栈（`MULTICA_ENABLED` 留空/true 均启用，默认；仅显式 `false`
 关闭，关闭只停 bundled 容器、不删卷，外部 Multica 仍可配合五项默认值使用）：
@@ -564,16 +566,19 @@ compose 提供上游 multica-ai/multica **v0.11.0**（commit
   `internal: true`：官方 backend 需要出站调用（配置 RESEND 时的验证
   邮件、Multica 智能体调用管理员配置的模型服务），标成 internal 只会
   破坏官方 web/agent 依赖而不增加真实隔离面（API 无宿主端口、web 默认
-  只绑 loopback 已界定暴露面）。生产仅
-  web 发布宿主端口（`MULTICA_WEB_PORT`，默认 18100），且**默认只绑
-  loopback**（`MULTICA_WEB_BIND_ADDR`，默认 `127.0.0.1`）：Multica web
-  自带账号登录与 PAT 铸造界面，**不得明文公网暴露**。管理员访问走 SSH
-  隧道（`ssh -L 18100:127.0.0.1:18100 <server>` 后开
-  `http://localhost:18100`），或由同宿主 TLS 反代把公开 HTTPS origin
-  （即 `MULTICA_DEFAULT_WEB_URL`）转发到 `127.0.0.1:18100`；反代在另一
-  台机器时才用 `MULTICA_WEB_BIND_ADDR` 显式改绑具体网卡 IP（必须保持在
-  TLS 反代之后）。API 容器不发布任何宿主端口；本地 compose 同样仅
-  loopback（web `MULTICA_WEB_LOOPBACK_PORT` 18100、API
+  只绑 loopback 已界定暴露面）。生产 web 另发布两个宿主端口：
+  `MULTICA_WEB_PORT`（默认 18100）**默认只绑 loopback**
+  （`MULTICA_WEB_BIND_ADDR`，默认 `127.0.0.1`），供 SSH 隧道
+  （`ssh -L 18100:127.0.0.1:18100 <server>` 后开
+  `http://localhost:18100`）或自备同宿主反代使用；公开入口走 bundled
+  **multica-gateway**（nginx，`MULTICA_HTTPS_PORT`，默认 8446，与
+  weknora/kaneo 网关同构地复用 `frontend_ssl_certs` 证书），把公开
+  HTTPS origin（即 `MULTICA_DEFAULT_WEB_URL` 应配置的值）反代到
+  multica-web:3000——Multica web 自带账号登录与 PAT 铸造界面，
+  **不得明文公网暴露**，公开访问一律经该 TLS 网关（或自备 TLS 反代，
+  反代在另一台机器时才用 `MULTICA_WEB_BIND_ADDR` 显式改绑具体网卡 IP，
+  必须保持在 TLS 反代之后）。API 容器不发布任何宿主端口；本地 compose
+  仅 loopback、不带网关（web `MULTICA_WEB_LOOPBACK_PORT` 18100、API
   `MULTICA_API_LOOPBACK_PORT` 18101），本地默认随 `.env` 的
   `COMPOSE_PROFILES=multica` 启动（见 development/setup.md）。容器健康
   检查用官方 `/healthz`；平台侧保留上文的真实 readiness 探测。
@@ -586,7 +591,8 @@ compose 提供上游 multica-ai/multica **v0.11.0**（commit
   .env.example）不会把 multica 偷渡进核心 up。
 - 启动时机（与 Hindsight 不同，刻意在 readiness 门禁**之前**）：最终核心
   `up -d` 成功后立即以单独的有界 `--profile multica` 调用启动
-  `multica multica-web` 并做有界 `/healthz` 健康等待，然后才进入 backend
+  `multica multica-web multica-gateway` 并做有界 `/healthz` 健康等待，
+  然后才进入 backend
   readiness 循环——五项默认值配置完整时 readiness 会门禁 `multica_default`，
   等就绪之后再启动会形成自我死锁。有界启动默认上界 300 秒
   （`MULTICA_START_TIMEOUT`，与 Hindsight 的隔离启动先例一致——首次
