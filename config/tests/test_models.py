@@ -38,14 +38,14 @@ def test_default_profile_generates_stable_security_material() -> None:
     assert profile.minio.access_key == "admin"
     assert profile.hindsight.base_url == "http://127.0.0.1:18888"
     assert profile.hindsight.web_url == ""
-    assert profile.hindsight.timeout_seconds == 2.0
+    assert profile.hindsight.timeout_seconds == 5.0
 
 
 def test_hindsight_config_validates_origin_and_timeout_bounds() -> None:
     config = HindsightConfig()
     assert config.base_url == "http://127.0.0.1:18888"
     assert config.web_url == ""
-    assert config.timeout_seconds == 2.0
+    assert config.timeout_seconds == 5.0
 
     with pytest.raises(ValidationError):
         HindsightConfig(base_url="http://127.0.0.1:18888/memory")

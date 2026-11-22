@@ -255,7 +255,7 @@ class HindsightConfig(StrictModel):
     # center default stays empty and hostnames are stored exactly as entered,
     # never rewritten.
     web_url: str = Field(default="", min_length=0, max_length=500)
-    timeout_seconds: float = Field(default=2.0, gt=0, le=60)
+    timeout_seconds: float = Field(default=5.0, gt=0, le=60)
 
     @model_validator(mode="after")
     def validate_hindsight(self) -> "HindsightConfig":
