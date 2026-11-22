@@ -722,6 +722,10 @@ start_multica_default_stack() {
       ;;
   esac
   log "starting the Multica default stack in a separate bounded compose invocation (before the readiness gate, so a configured multica_default check cannot deadlock on a stack that was never started)"
+  # 网关容器按部署强制重建：历史上一次挂载源缺失的失败创建会让 Docker 在
+  # 容器内把 /etc/nginx 挂载点建成目录，之后源文件就位也复用旧容器而无法
+  # file→file 挂载（not a directory）。nginx 容器秒级重建，代价可忽略。
+  compose --profile multica rm -f --stop multica-gateway >/dev/null 2>&1 || true
   local up_status=0
   COMPOSE_CALL_TIMEOUT="$start_timeout" \
     compose --profile multica up -d multica multica-web multica-gateway || up_status=$?
