@@ -220,6 +220,8 @@ test.describe('待处理决策事项提醒', () => {
     // 含一次真实的注意力脉冲到期等待（15s），放宽超时
     test.slow()
     await seedAuth(page)
+    await mockDesktopNotifications(page, 'denied')
+    await page.emulateMedia({ reducedMotion: 'no-preference' })
     const state = await mockDecisionAlerts(page, [])
     await page.goto('/#/super-assistant')
     await expect(page.getByTestId('super-assistant-composer')).toBeVisible()
@@ -239,6 +241,13 @@ test.describe('待处理决策事项提醒', () => {
     await expect(card.locator('.animate-ping')).toHaveCount(1)
     await expect(page).toHaveTitle('(1) OpenOntology')
 
+    const bell = card.getByTestId('super-assistant-decision-notify').locator('svg')
+    await expect(bell).toHaveCSS('animation-name', 'decisionBellRing')
+    await expect(bell).toHaveCSS('animation-iteration-count', '1')
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await expect(bell).toHaveCSS('animation-name', 'none')
+    await page.emulateMedia({ reducedMotion: 'no-preference' })
+
     await arrival.getByRole('button', { name: '查看' }).click()
     await expect(page).toHaveURL(/decision=d-2/)
     const dialog = page.getByRole('dialog')
@@ -247,6 +256,7 @@ test.describe('待处理决策事项提醒', () => {
     // 注意力脉冲只持续一小段：到点自动静止，用户打算稍后处理时不被持续打扰
     await expect(card).toHaveAttribute('data-pulsing', 'false', { timeout: 20_000 })
     await expect(card.locator('.animate-ping')).toHaveCount(0)
+    await expect(bell).toHaveCSS('animation-name', 'none')
 
     // 弹窗内处理后同步对齐：卡片与标题角标立即消失，而不是滞后到下一轮轮询
     await dialog.getByRole('button', { name: '已人工处理' }).click()

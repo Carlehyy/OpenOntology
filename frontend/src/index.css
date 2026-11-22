@@ -62,6 +62,14 @@
   100% { opacity: 1; transform: translateY(0); }
 }
 
+@keyframes decisionBellRing {
+  0%, 100% { transform: rotate(0); }
+  20% { transform: rotate(20deg); }
+  40% { transform: rotate(-16deg); }
+  60% { transform: rotate(10deg); }
+  80% { transform: rotate(-5deg); }
+}
+
 .animate-slide-up {
   animation: slideUp 0.3s ease-out;
 }

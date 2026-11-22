@@ -107,7 +107,7 @@ export function PendingDecisionCard({ onOpen }: { onOpen: () => void }) {
     : permission
   const waiting = waitingLabel(items, now)
   const overview = `待决策 ${openCount} 项${failedCount ? `，需关注 ${failedCount} 项` : ''}`
-  const bellOff = notify === 'muted' || notify === 'denied'
+  const BellIcon = notify === 'muted' || notify === 'denied' ? BellOff : Bell
 
   // 外层实色卡片底承托内层浅底：深色主题下 --color-warning-bg 为半透明，直接叠在消息文字上会透底
   return (
@@ -154,7 +154,13 @@ export function PendingDecisionCard({ onOpen }: { onOpen: () => void }) {
               title={NOTIFY_COPY[notify].hint}
               className={`mr-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[var(--color-warning)] transition-colors ${HOVER_TINT} ${FOCUS_RING}${notify === 'denied' ? ' opacity-60' : ''}`}
             >
-              {bellOff ? <BellOff size={14} /> : <Bell size={14} fill={notify === 'granted' ? 'currentColor' : 'none'} />}
+              <BellIcon
+                key={pulseUntil}
+                size={14}
+                fill={notify === 'granted' ? 'currentColor' : 'none'}
+                aria-hidden="true"
+                className={pulsing ? 'origin-top [transform-box:fill-box] motion-safe:animate-[decisionBellRing_0.7s_ease-in-out]' : undefined}
+              />
             </button>
           </>
         )}
