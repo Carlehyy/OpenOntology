@@ -1444,8 +1444,16 @@ env \
   PROD_N8N_API_URL=https://n8n.example.com \
   PROD_N8N_API_KEY=synthetic-n8n-api-key \
   PROD_N8N_TIMEOUT_SECONDS=30 \
+  PROD_MULTICA_DEFAULT_BASE_URL= \
+  PROD_MULTICA_DEFAULT_WEB_URL= \
+  PROD_MULTICA_DEFAULT_WORKSPACE_ID= \
+  PROD_MULTICA_DEFAULT_WORKSPACE_NAME= \
+  PROD_MULTICA_DEFAULT_PAT= \
   bash "$REPO_ROOT/scripts/ci/materialize-production-dependencies.sh" \
     "$test_dir/test-production-dependencies.env" >/dev/null
+# 上面五个显式空值不可省：`env A=B … cmd` 继承作业环境，仓库级
+# PROD_MULTICA_DEFAULT_* 变量（如仅设 WEB_URL）会泄漏进合成 manifest，
+# 把全新空 .env 引导变成被 all-or-nothing 拒绝的 1/5 部分配置。
 
 grep -Fxq 'N8N_TIMEOUT_SECONDS=30' \
   "$test_dir/test-production-dependencies.env"
@@ -1457,8 +1465,12 @@ grep -Fxq 'N8N_TIMEOUT_SECONDS=30' \
     SKIP_GIT=1 \
     DEPLOY_VALIDATE_ONLY=1 \
   DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
-    bash "$DEPLOY_SCRIPT" >/dev/null
-)
+    bash "$DEPLOY_SCRIPT" >"$test_dir/manifest-bootstrap-validate.log" 2>&1
+) || {
+  printf 'the manifest bootstrap validation deploy must succeed; log follows\n' >&2
+  cat "$test_dir/manifest-bootstrap-validate.log" >&2
+  exit 1
+}
 grep -Fxq 'KANEO_BASE_URL=http://kaneo-app:5173' "$test_dir/.env"
 grep -Fxq 'KANEO_WEB_URL=https://64.83.14.139:8445' "$test_dir/.env"
 
@@ -1700,8 +1712,16 @@ env \
   PROD_N8N_TIMEOUT_SECONDS=30 \
   PROD_KANEO_WEB_URL=http://kaneo.example.invalid:8445 \
   PROD_KANEO_ADMIN_EMAIL=admin@kaneo.example.invalid \
+  PROD_MULTICA_DEFAULT_BASE_URL= \
+  PROD_MULTICA_DEFAULT_WEB_URL= \
+  PROD_MULTICA_DEFAULT_WORKSPACE_ID= \
+  PROD_MULTICA_DEFAULT_WORKSPACE_NAME= \
+  PROD_MULTICA_DEFAULT_PAT= \
   bash "$REPO_ROOT/scripts/ci/materialize-production-dependencies.sh" \
     "$test_dir/test-kaneo-dependencies.env" >/dev/null
+# 五个显式空值同上：该 manifest 会经 -u 应用进 .env，仓库级
+# PROD_MULTICA_DEFAULT_* 变量若泄漏进来，会让后续期望成功的部署被
+# all-or-nothing 拒绝。
 grep -Fxq 'KANEO_WEB_URL=http://kaneo.example.invalid:8445' \
   "$test_dir/test-kaneo-dependencies.env"
 grep -Fxq 'KANEO_ADMIN_EMAIL=admin@kaneo.example.invalid' \
