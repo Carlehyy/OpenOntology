@@ -212,6 +212,7 @@ compose_environment() {
     -u MULTICA_JWT_SECRET \
     -u MULTICA_WEB_PORT \
     -u MULTICA_WEB_BIND_ADDR \
+    -u MULTICA_HTTPS_PORT \
     -u MULTICA_APP_ENV \
     -u MULTICA_FRONTEND_ORIGIN \
     -u MULTICA_APP_URL \
@@ -723,7 +724,7 @@ start_multica_default_stack() {
   log "starting the Multica default stack in a separate bounded compose invocation (before the readiness gate, so a configured multica_default check cannot deadlock on a stack that was never started)"
   local up_status=0
   COMPOSE_CALL_TIMEOUT="$start_timeout" \
-    compose --profile multica up -d multica multica-web || up_status=$?
+    compose --profile multica up -d multica multica-web multica-gateway || up_status=$?
   if [ "$up_status" -ne 0 ]; then
     if [ "$up_status" -eq 124 ]; then
       log "warning: the Multica default stack did not start within ${start_timeout}s; stopping it for this deployment (volumes are preserved and the next deployment retries)"
@@ -731,7 +732,7 @@ start_multica_default_stack() {
       log "warning: the Multica default stack failed to start (exit ${up_status}: image pull or container start); stopping it for this deployment (volumes are preserved and the next deployment retries)"
     fi
     COMPOSE_CALL_TIMEOUT="$start_timeout" \
-      compose --profile multica stop multica multica-web multica-postgres >/dev/null 2>&1 || true
+      compose --profile multica stop multica multica-web multica-gateway multica-postgres >/dev/null 2>&1 || true
     log "hint: inspect on the server with 'docker compose --profile multica logs multica multica-postgres'"
     return 0
   fi
@@ -1736,7 +1737,7 @@ configure_multica_env() {
   # 部署级默认集成（此后生产 readiness 门禁 multica_default）。PAT 由管理
   # 员在 Multica 原生界面/官方 CLI 创建后填入服务器 .env（或经受控 manifest
   # 物化）——部署绝不宣称空卷已初始化账号/PAT/workspace。
-  local current base_url web_url web_port bind_addr ws_id ws_name default_pat
+  local current base_url web_url bind_addr ws_id ws_name default_pat tls_ip https_port
   local -a updates=()
   case "$(env_value MULTICA_ENABLED)" in
     1|true|TRUE|yes|YES|"") MULTICA_INTERNAL=1 ;;
@@ -1764,6 +1765,11 @@ configure_multica_env() {
   # 不得明文公网暴露：默认只绑 loopback（SSH 隧道或同宿主 TLS 反代使用），
   # 需要反代跨机到达时才显式放开 MULTICA_WEB_BIND_ADDR（须为 IP 字面量，
   # 且必须置于 TLS 反代之后）。API 容器不发布宿主端口。
+  # bundled multica-gateway 的公开 TLS 端口（与 weknora/kaneo 网关同构，
+  # 复用 frontend_ssl_certs 证书）：公开 HTTPS origin 由该网关提供，loopback
+  # 宿主端口仍只服务 SSH 隧道/自备反代。
+  current="$(env_value MULTICA_HTTPS_PORT)"
+  [ -n "$current" ] || updates+=("MULTICA_HTTPS_PORT=8446")
   current="$(env_value MULTICA_WEB_PORT)"
   [ -n "$current" ] || updates+=("MULTICA_WEB_PORT=18100")
   bind_addr="$(env_value MULTICA_WEB_BIND_ADDR)"
@@ -1800,15 +1806,25 @@ configure_multica_env() {
       updates+=("MULTICA_DEFAULT_BASE_URL=${base_url}")
       log "configured MULTICA_DEFAULT_BASE_URL from the bundled multica service (official container contract: API on 8080)"
     fi
-    # 浏览器入口 WEB_URL 不做推导：web 宿主端口默认只绑 loopback，按
-    # PUBLIC_TLS_IP 推导出的明文 origin 既不可达也不安全。回填五值时必须
-    # 显式给出平台用户浏览器可达的 origin（通常是指向该端口的 TLS 反代
-    # HTTPS 地址），validate 会拒绝缺失/形态错误。
+    # 浏览器入口 WEB_URL：bundled multica-gateway 已提供公开 HTTPS origin
+    # （MULTICA_HTTPS_PORT，默认 8446），与 WEKNORA/KANEO_WEB_URL 同构地按
+    # PUBLIC_TLS_IP + 端口推导；PUBLIC_TLS_IP 缺失时不代写，交由 validate 的
+    # all-or-nothing fail-closed 显式报错。显式配置一律尊重（可指向自备
+    # TLS 反代或外部 Multica 的 web origin）。
     if [ -z "$web_url" ]; then
-      web_port="$(env_value MULTICA_WEB_PORT)"
-      web_port="${web_port:-18100}"
-      log "MULTICA_DEFAULT_WEB_URL is not set while the rest of the five-value default is present; set the browser-reachable Multica web origin (e.g. the HTTPS origin of your TLS reverse proxy for port ${web_port}) so the five-value default can take effect"
-      unset web_port
+      tls_ip="$(env_value PUBLIC_TLS_IP)"
+      https_port="$(env_value MULTICA_HTTPS_PORT)"
+      https_port="${https_port:-8446}"
+      if [ -n "$tls_ip" ]; then
+        case "$tls_ip" in
+          *:*) web_url="https://[${tls_ip}]:${https_port}" ;;
+          *) web_url="https://${tls_ip}:${https_port}" ;;
+        esac
+        updates+=("MULTICA_DEFAULT_WEB_URL=${web_url}")
+        log "configured MULTICA_DEFAULT_WEB_URL from PUBLIC_TLS_IP and MULTICA_HTTPS_PORT (bundled multica-gateway)"
+      else
+        log "MULTICA_DEFAULT_WEB_URL is not set and PUBLIC_TLS_IP is empty; set the browser-reachable Multica web origin explicitly so the five-value default can take effect"
+      fi
     fi
   fi
   # Multica 内网地址允许清单独立于 MCP 清单：未显式配置时按同源补齐，绝不

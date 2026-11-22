@@ -725,10 +725,9 @@ services:
     # 官方 web（Next.js standalone，容器内 3000）。浏览器只需本服务 origin：
     # API/WS 由 Next 服务端按 REMOTE_API_URL 代理，multica API 容器不发布
     # 任何宿主端口。web 自带账号体系（邮箱验证码登录/PAT 铸造），登录页
-    # 不得明文暴露公网：宿主端口默认只绑 loopback，管理员经 SSH 隧道访问
-    # （ssh -L 18100:127.0.0.1:18100），或由同宿主 TLS 反代（默认
-    # 127.0.0.1 + MULTICA_WEB_PORT）转发后再对外提供 HTTPS origin——需要
-    # 反代跨机到达时才用 MULTICA_WEB_BIND_ADDR 显式放开绑定地址。
+    # 不得明文暴露公网：宿主端口默认只绑 loopback（SSH 隧道或下方
+    # multica-gateway 使用），或由自备同宿主 TLS 反代转发；需要反代跨机
+    # 到达时才用 MULTICA_WEB_BIND_ADDR 显式放开绑定地址。
     image: ${MULTICA_WEB_IMAGE:-ghcr.io/multica-ai/multica-web@sha256:ba8fd0fda94a9ec141e15d77e591db8ee4b246720a722d6f9dffd185ee48863b}
     profiles: [multica]
     depends_on:
@@ -746,6 +745,41 @@ services:
       timeout: 10s
       retries: 20
       start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  multica-gateway:
+    # Multica web 的公开 TLS 入口（与 weknora/kaneo 网关同构）：把
+    # MULTICA_HTTPS_PORT（默认 8446）上的 HTTPS 流量反代到 multica-web，
+    # 登录/PAT 界面不经明文 HTTP 暴露。证书复用平台 frontend_ssl_certs
+    # （与前端/WeKnora/Kaneo 网关同一张证书），浏览器入口即
+    # MULTICA_DEFAULT_WEB_URL 应配置的公开 origin。API 容器不在本网关后：
+    # web 容器已按 REMOTE_API_URL 服务端代理全部 /api 与 WS。
+    image: ${NGINX_BASE_IMAGE:-nginx:1.27-alpine}
+    profiles: [multica]
+    ports:
+      - "${MULTICA_HTTPS_PORT:-8446}:443"
+    volumes:
+      - ./docker/multica/gateway.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./docker/multica/multica-proxy.inc:/etc/nginx/multica-proxy.inc:ro
+      - frontend_ssl_certs:/etc/nginx/certs:ro
+    depends_on:
+      multica-web:
+        condition: service_healthy
+      frontend_ssl_init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/healthz >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    networks:
+      - multica_internal
     logging:
       driver: json-file
       options:
