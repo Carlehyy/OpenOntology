@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.auth.models import User
 from app.super_assistant.models import SuperAssistantSkill
+from app.super_assistant.builtin_skills import seed_builtin_skills
 from app.super_assistant.schemas import (
     SkillCreate,
     SkillFileContent,
@@ -61,6 +62,9 @@ def list_skills(
     db: Session,
     current_user: User,
 ) -> list[SuperAssistantSkill]:
+    # 内置出厂 Skill 随首次列出自动补齐（幂等）；前端进入超级助手页面必先
+    # GET /skills，因此这里即可覆盖全部真实用户链路。
+    seed_builtin_skills(db, current_user.id)
     return db.query(SuperAssistantSkill).filter(
         SuperAssistantSkill.owner_id == current_user.id,
     ).order_by(SuperAssistantSkill.updated_at.desc()).all()
