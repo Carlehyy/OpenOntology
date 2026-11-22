@@ -1,1 +1,85 @@
-"# integrated CDC \u6267\u884c\u5668\u955c\u50cf\uff1abackend Python \u8fd0\u884c\u65f6 + Debezium Server \u53d1\u884c\u7248\n# \u53ca\u5176 Java 21 \u8fd0\u884c\u65f6\u3002\u53d1\u884c\u7248\u4e0e JVM \u90fd\u53d6\u81ea\u540c\u4e00\u4e2a\u56fa\u5b9a\u6458\u8981\u7684\u5b98\u65b9\u955c\u50cf\uff0c\n# \u4e0d\u5f15\u5165\u7b2c\u4e8c\u4e2a\u5916\u90e8\u4fe1\u4efb\u6e90\uff0cJVM \u7248\u672c\u5373 Debezium \u81ea\u8eab\u7684\u8fd0\u884c\u7248\u672c\u3002\n#\n# \u540c\u4e00\u955c\u50cf\u540c\u65f6\u670d\u52a1\u4e24\u4e2a\u6267\u884c\u5668\uff08\u5171\u7528 Java \u4f9d\u8d56\uff0c\u547d\u4ee4\u4e0d\u540c\uff09\uff1a\n#   - python -m app.data_channel.integrated.cdc_executor\uff08Sentinel CDC\uff09\n#   - python -m app.data_channel.integrated.replica_executor\uff08\u526f\u672c\u5feb\u7167\uff09\n# \u526f\u672c\u6267\u884c\u5668\u7684 TransportMetadata/ReadOffsets SMT \u5728 debezium \u6784\u5efa\u9636\u6bb5\u7528\n# \u8be5\u955c\u50cf\u81ea\u5e26\u7684\u5b8c\u6574 JDK \u5de5\u5177\u94fe\uff08javac/jar\uff0c\u5b9e\u6d4b\u5b58\u5728\u4e8e jre-21 \u5e03\u5c40\uff09\u79bb\u7ebf\n# \u7f16\u8bd1\u4e3a /opt/debezium/lib/replica-smt.jar\uff1b\u5bf9 CDC \u6267\u884c\u5668\u53ea\u662f classpath\n# \u4e0a\u4e00\u4e2a\u672a\u88ab\u5f15\u7528\u7684 jar\uff0c\u4e0d\u6539\u53d8\u5176\u884c\u4e3a\u3002\n#\n# \u9a8c\u6536\u53e3\u5f84\uff1a\u955c\u50cf\u9a8c\u6536\u5fc5\u987b\u5305\u542b\u771f\u5b9e\u5b8c\u6574 JVM \u542f\u52a8\uff08Debezium Server \u8d77\u5230\n# \u8fde\u63a5\u5668\u914d\u7f6e\u9636\u6bb5\uff09\uff0c`java -version` \u4e0e Class.forName \u63a2\u9488\u90fd\u4e0d\u8db3\u4ee5\u8bc1\u660e\n# JRE \u81ea\u5305\u542b\uff08canary \u5b9e\u8bc1\uff1a\u65ad\u88c2\u7b26\u53f7\u94fe\u63a5\u53ea\u5728\u5b8c\u6574\u542f\u52a8\u65f6\u66b4\u9732\uff09\u3002\n#\n# \u5e38\u89c4\u751f\u4ea7\u6784\u5efa\uff08\u4e0e backend/Dockerfile \u76f8\u540c\u7684 Python \u4f9d\u8d56\u5c42\uff09\uff1a\n#   docker build -f backend/Dockerfile.cdc backend\n# \u590d\u7528\u5df2\u6784\u5efa\u7684 backend \u8fd0\u884c\u65f6\u955c\u50cf\u3001\u8df3\u8fc7 Python \u4f9d\u8d56\u5c42\uff08\u9a8c\u6536/\u91d1\u4e1d\u96c0\uff09\uff1a\n#   docker build -f backend/Dockerfile.cdc \\\n#     --build-arg PYTHON_BASE_IMAGE=<\u5df2\u6784\u5efa\u7684 backend \u955c\u50cf> \\\n#     --build-arg CDC_PREBUILT_BACKEND=1 backend\n#\n# \u6267\u884c\u5668\u4e0d\u9700\u8981 Node \u8fd0\u884c\u65f6\u4e0e docker CLI\uff0c\u6545\u4e0d\u62f7\u5165\uff08\u6700\u5c0f\u5316\u653b\u51fb\u9762\uff09\u3002\nARG PYTHON_BASE_IMAGE=python:3.12-slim\nARG DEBEZIUM_SERVER_IMAGE=quay.io/debezium/server:3.7.1.Final@sha256:3a63d009cf935d92b10461ebde7f0dd0e6e03e1586c9fd7075a6e12242fc9109\n\nFROM ${DEBEZIUM_SERVER_IMAGE} AS debezium\n# Red Hat \u7cfb\u955c\u50cf\u7684 JRE \u643a\u5e26\u6307\u5411 donor \u6587\u4ef6\u7cfb\u7edf\u7684\u7edd\u5bf9\u7b26\u53f7\u94fe\u63a5\uff08conf/\u3001\n# lib/security/\u3001lib/tzdb.dat \u2192 /etc/java/...\u3001/usr/share/javazi/...\uff09\u3002\n# \u76f4\u63a5 COPY \u8fdb\u672c\u955c\u50cf\u540e\u94fe\u63a5\u5168\u90e8\u65ad\u88c2\uff0cJVM \u5b8c\u6574\u542f\u52a8\u4f1a\u5728\u52a0\u8f7d java.security\n# \u65f6\u4ee5 InternalError \u9000\u51fa\u3002\u5148\u5728 donor \u5185\u6574\u4f53\u89e3\u5f15\u7528\u4e3a\u81ea\u5305\u542b\u76ee\u5f55\u3002\nRUN cp -aL /usr/lib/jvm/jre-21 /tmp/portable-jre\n# \u526f\u672c SMT\uff1a\u53ea\u7528\u672c\u955c\u50cf\u7684 JDK \u4e0e /debezium/lib \u65e2\u6709 jar \u79bb\u7ebf\u7f16\u8bd1\uff0c\u6784\u5efa\n# \u5373\u81ea\u6821\u9a8c\uff08SelfTest \u968f\u6784\u5efa\u8fd0\u884c\uff0c\u5931\u8d25\u5219\u955c\u50cf\u6784\u5efa\u5931\u8d25\uff09\uff1b\u4ea7\u7269\u53ea\u53d6 jar\uff0c\n# \u7f16\u8bd1\u4e2d\u95f4\u7269\u4e0d\u8fdb\u5165\u6700\u7ec8\u955c\u50cf\u3002\u8be5\u9636\u6bb5\u4ee5\u955c\u50cf\u81ea\u5e26\u7528\u6237 jboss(185) \u8fd0\u884c\uff0c\n# \u4ea7\u7269\u76ee\u5f55\u653e /tmp\uff08\u552f\u4e00\u666e\u904d\u53ef\u5199\u6839\uff09\u3002\u90e8\u7f72\u5f52\u6863\u4ee5 umask 077 \u89e3\u5305\uff0c\n# \u56e0\u6b64\u663e\u5f0f\u8bbe\u7f6e\u6784\u5efa\u6e90\u7801\u6743\u9650\uff0c\u4fdd\u8bc1\u975e root \u7528\u6237\u53ef\u904d\u5386\u76ee\u5f55\u5e76\u8bfb\u53d6\u6e90\u7801\u3002\nCOPY --chmod=0755 integrated_runtime/replica/ /src/replica-smt/\nRUN sh /src/replica-smt/build.sh /debezium /tmp/replica-smt-artifacts \\\n && java -cp \"/tmp/replica-smt-artifacts/classes:/tmp/replica-smt-artifacts/test-classes:/debezium/lib/*\" \\\n      io.openontology.replica.SelfTest\n\nFROM ${PYTHON_BASE_IMAGE}\nARG CDC_PREBUILT_BACKEND=\n\nCOPY --from=ghcr.io/astral-sh/uv:0.11.14 /uv /uvx /bin/\n# /debezium \u7684\u5e03\u5c40\u5df2\u5bf9\u8be5\u6458\u8981\u955c\u50cf\u5b9e\u6d4b\u786e\u8ba4\uff1arunner jar\u3001config/lib\u3001\n# lib/*\uff08\u542b debezium-server-http\uff09\u3002JRE \u7528\u4e0a\u65b9\u89e3\u5f15\u7528\u540e\u7684\u81ea\u5305\u542b\u76ee\u5f55\u3002\nCOPY --from=debezium /tmp/portable-jre /opt/java/openjdk\nCOPY --from=debezium /debezium /opt/debezium\n# \u526f\u672c\u6267\u884c\u5668\u7684 SMT\uff08TransportMetadata + ReadOffsets\uff09\uff1a\u653e\u884c lib/* \u4f7f\n# DEBEZIUM_CLASSPATH\uff08lib/* \u901a\u914d\uff09\u65e0\u9700\u53d8\u66f4\u5373\u53ef\u52a0\u8f7d io.openontology.replica.*\u3002\nCOPY --from=debezium /tmp/replica-smt-artifacts/replica-smt.jar /opt/debezium/lib/replica-smt.jar\n\nWORKDIR /app\nENV JAVA_HOME=/opt/java/openjdk \\\n    UV_COMPILE_BYTECODE=1 \\\n    UV_LINK_MODE=copy \\\n    PATH=\"/opt/java/openjdk/bin:/app/.venv/bin:$PATH\"\n\nCOPY pyproject.toml uv.lock ./\nRUN if [ -z \"$CDC_PREBUILT_BACKEND\" ]; then \\\n      uv sync --frozen --no-dev --no-install-project \\\n      && uv pip install --python /app/.venv/bin/python --no-deps py-openjudge==0.2.1; \\\n    fi\n# \u4fdd\u7559\u5f52\u6863\u7684\u53d7\u9650\u6a21\u5f0f\uff0c\u7531\u8fd0\u884c UID \u62e5\u6709\u6e90\u7801\u4ee5\u4fdd\u8bc1\u76ee\u5f55\u548c\u6587\u4ef6\u53ef\u8bfb\u3002\nCOPY --chown=10001:10001 . .\n\n# \u975e root \u8fd0\u884c\uff1b\u72b6\u6001\u5377\u76ee\u5f55\u9884\u7f6e\u5c5e\u4e3b\uff08\u7a7a\u547d\u540d\u5377\u9996\u6b21\u6302\u8f7d\u4f1a\u7ee7\u627f\u955c\u50cf\u5185\u5c5e\u4e3b\uff09\u3002\n# \u4e24\u4e2a\u6267\u884c\u5668\u5404\u7528\u72ec\u7acb\u72b6\u6001\u6839\uff1aCDC /var/lib/openontology-cdc\u3001\u526f\u672c\u6267\u884c\u5668\n# /var/lib/openontology-replicas\uff0c\u4e92\u4e0d\u5171\u4eab\u504f\u79fb\u4e0e\u6a21\u5f0f\u5386\u53f2\u3002\nRUN useradd --uid 10001 --user-group --no-create-home \\\n      --shell /usr/sbin/nologin cdc \\\n && mkdir -p /var/lib/openontology-cdc /var/lib/openontology-replicas \\\n && chown -R cdc:cdc /var/lib/openontology-cdc /var/lib/openontology-replicas\nUSER 10001:10001\nVOLUME /var/lib/openontology-cdc\n\n# \u5b58\u6d3b\uff1d\u6700\u8fd1\u4e00\u62cd\u5bf9\u8d26\u5b8c\u6210\uff08\u5143\u6570\u636e\u5e93\u4e0d\u53ef\u8fbe\u65f6\u4e0d\u5237\u65b0\uff0c\u5065\u5eb7\u68c0\u67e5\u5982\u5b9e\u5931\u8d25\uff09\u3002\n# \u955c\u50cf\u9ed8\u8ba4\u5065\u5eb7\u68c0\u67e5\u662f CDC \u6267\u884c\u5668\u53e3\u5f84\uff1b\u526f\u672c\u6267\u884c\u5668\u670d\u52a1\u5728 Compose \u91cc\u4ee5\n# REPLICA_HEARTBEAT_FILE\uff08/tmp/integrated_replica_executor.heartbeat\uff09\n# \u540c\u53e3\u5f84\u8986\u76d6\u3002\nHEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \\\n  CMD [\"python\", \"-c\", \"import os,time,sys; sys.exit(0 if time.time()-os.path.getmtime('/tmp/integrated_cdc_executor.heartbeat')<30 else 1)\"]\n"
+# integrated CDC 执行器镜像：backend Python 运行时 + Debezium Server 发行版
+# 及其 Java 21 运行时。发行版与 JVM 都取自同一个固定摘要的官方镜像，
+# 不引入第二个外部信任源，JVM 版本即 Debezium 自身的运行版本。
+#
+# 同一镜像同时服务两个执行器（共用 Java 依赖，命令不同）：
+#   - python -m app.data_channel.integrated.cdc_executor（Sentinel CDC）
+#   - python -m app.data_channel.integrated.replica_executor（副本快照）
+# 副本执行器的 TransportMetadata/ReadOffsets SMT 在 debezium 构建阶段用
+# 该镜像自带的完整 JDK 工具链（javac/jar，实测存在于 jre-21 布局）离线
+# 编译为 /opt/debezium/lib/replica-smt.jar；对 CDC 执行器只是 classpath
+# 上一个未被引用的 jar，不改变其行为。
+#
+# 验收口径：镜像验收必须包含真实完整 JVM 启动（Debezium Server 起到
+# 连接器配置阶段），`java -version` 与 Class.forName 探针都不足以证明
+# JRE 自包含（canary 实证：断裂符号链接只在完整启动时暴露）。
+#
+# 常规生产构建（与 backend/Dockerfile 相同的 Python 依赖层）：
+#   docker build -f backend/Dockerfile.cdc backend
+# 复用已构建的 backend 运行时镜像、跳过 Python 依赖层（验收/金丝雀）：
+#   docker build -f backend/Dockerfile.cdc \
+#     --build-arg PYTHON_BASE_IMAGE=<已构建的 backend 镜像> \
+#     --build-arg CDC_PREBUILT_BACKEND=1 backend
+#
+# 执行器不需要 Node 运行时与 docker CLI，故不拷入（最小化攻击面）。
+ARG PYTHON_BASE_IMAGE=python:3.12-slim
+ARG DEBEZIUM_SERVER_IMAGE=quay.io/debezium/server:3.7.1.Final@sha256:3a63d009cf935d92b10461ebde7f0dd0e6e03e1586c9fd7075a6e12242fc9109
+
+FROM ${DEBEZIUM_SERVER_IMAGE} AS debezium
+# Red Hat 系镜像的 JRE 携带指向 donor 文件系统的绝对符号链接（conf/、
+# lib/security/、lib/tzdb.dat → /etc/java/...、/usr/share/javazi/...）。
+# 直接 COPY 进本镜像后链接全部断裂，JVM 完整启动会在加载 java.security
+# 时以 InternalError 退出。先在 donor 内整体解引用为自包含目录。
+RUN cp -aL /usr/lib/jvm/jre-21 /tmp/portable-jre
+# 副本 SMT：只用本镜像的 JDK 与 /debezium/lib 既有 jar 离线编译，构建
+# 即自校验（SelfTest 随构建运行，失败则镜像构建失败）；产物只取 jar，
+# 编译中间物不进入最终镜像。该阶段以镜像自带用户 jboss(185) 运行，
+# 产物目录放 /tmp（唯一普遍可写根）。部署归档以 umask 077 解包，
+# 因此显式设置构建源码权限，保证非 root 用户可遍历目录并读取源码。
+COPY --chmod=0755 integrated_runtime/replica/ /src/replica-smt/
+RUN sh /src/replica-smt/build.sh /debezium /tmp/replica-smt-artifacts \
+ && java -cp "/tmp/replica-smt-artifacts/classes:/tmp/replica-smt-artifacts/test-classes:/debezium/lib/*" \
+      io.openontology.replica.SelfTest
+
+FROM ${PYTHON_BASE_IMAGE}
+ARG CDC_PREBUILT_BACKEND=
+
+COPY --from=ghcr.io/astral-sh/uv:0.11.14 /uv /uvx /bin/
+# /debezium 的布局已对该摘要镜像实测确认：runner jar、config/lib、
+# lib/*（含 debezium-server-http）。JRE 用上方解引用后的自包含目录。
+COPY --from=debezium /tmp/portable-jre /opt/java/openjdk
+COPY --from=debezium /debezium /opt/debezium
+# 副本执行器的 SMT（TransportMetadata + ReadOffsets）：放行 lib/* 使
+# DEBEZIUM_CLASSPATH（lib/* 通配）无需变更即可加载 io.openontology.replica.*。
+COPY --from=debezium /tmp/replica-smt-artifacts/replica-smt.jar /opt/debezium/lib/replica-smt.jar
+
+WORKDIR /app
+ENV JAVA_HOME=/opt/java/openjdk \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    PATH="/opt/java/openjdk/bin:/app/.venv/bin:$PATH"
+
+COPY pyproject.toml uv.lock ./
+RUN if [ -z "$CDC_PREBUILT_BACKEND" ]; then \
+      uv sync --frozen --no-dev --no-install-project \
+      && uv pip install --python /app/.venv/bin/python --no-deps py-openjudge==0.2.1; \
+    fi
+# 保留归档的受限模式，由运行 UID 拥有源码以保证目录和文件可读。
+COPY --chown=10001:10001 . .
+
+# 非 root 运行；状态卷目录预置属主（空命名卷首次挂载会继承镜像内属主）。
+# 两个执行器各用独立状态根：CDC /var/lib/openontology-cdc、副本执行器
+# /var/lib/openontology-replicas，互不共享偏移与模式历史。
+RUN useradd --uid 10001 --user-group --no-create-home \
+      --shell /usr/sbin/nologin cdc \
+ && mkdir -p /var/lib/openontology-cdc /var/lib/openontology-replicas \
+ && chown -R cdc:cdc /var/lib/openontology-cdc /var/lib/openontology-replicas
+USER 10001:10001
+VOLUME /var/lib/openontology-cdc
+
+# 存活＝最近一拍对账完成（元数据库不可达时不刷新，健康检查如实失败）。
+# 镜像默认健康检查是 CDC 执行器口径；副本执行器服务在 Compose 里以
+# REPLICA_HEARTBEAT_FILE（/tmp/integrated_replica_executor.heartbeat）
+# 同口径覆盖。
+HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
+  CMD ["python", "-c", "import os,time,sys; sys.exit(0 if time.time()-os.path.getmtime('/tmp/integrated_cdc_executor.heartbeat')<30 else 1)"]
