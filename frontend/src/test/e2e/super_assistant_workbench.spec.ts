@@ -1,4 +1,4 @@
-import { expect, test, type Page, type Route } from '@playwright/test'
+import { expect, test, type Locator, type Page, type Route } from '@playwright/test'
 
 import { expectSameBoundingBox } from './support/geometry'
 import type {
@@ -4181,6 +4181,73 @@ test('能力拓展：multica 多 profile——添加、测试连接、选工作�
   const narrowMenu = await openChatActionsMenu(page)
   await narrowMenu.locator('[data-ctx-item="integrations"]').click()
   await expect(page.getByRole('dialog').getByRole('heading', { name: '能力拓展' })).toBeVisible()
+})
+
+test('能力拓展：长配置与操作在桌面和窄屏均不被裁切', async ({ page }) => {
+  const profileName = '客户支持与交付协作工作台'.repeat(4)
+  const serviceUrl = `https://multica.example.com/${'workspace-api-'.repeat(6)}`
+  const agentName = '客户知识库与工单处理助手'.repeat(4)
+  await seedAuth(page)
+  await mockApis(page, {
+    multicaConfig: multicaEnabledFixture,
+    multicaProfiles: [
+      multicaDefaultProfileFixture({ is_active: false, token_set: true, web_url: serviceUrl }),
+      multicaCustomProfileFixture({ name: profileName, base_url: serviceUrl, is_active: true, last_test_status: 'error' }),
+    ],
+    remoteAgents: [{
+      id: 'ra-layout', key: 'remote.customer-support-and-delivery-knowledge', label: agentName,
+      endpoint: 'https://agent.example.com/turn', description: '检索客服知识库',
+      mode: 'direct', enabled: false, token_set: true, timeout_seconds: 120, last_turn_at: null, last_seen_at: null,
+    }],
+  })
+
+  async function expectReachable(control: Locator) {
+    await control.scrollIntoViewIfNeeded()
+    await expect.poll(() => control.evaluate(el => {
+      const bounds = el.getBoundingClientRect()
+      const panel = el.closest('[role="tabpanel"]')!.getBoundingClientRect()
+      const dialog = el.closest('[role="dialog"]')!
+      const shell = dialog.getBoundingClientRect()
+      const y = (bounds.top + bounds.bottom) / 2
+      return dialog.scrollWidth <= dialog.clientWidth + 1 &&
+        bounds.left >= Math.max(0, panel.left, shell.left) &&
+        bounds.right <= Math.min(innerWidth, panel.right, shell.right) &&
+        [bounds.left + 2, (bounds.left + bounds.right) / 2, bounds.right - 2].every(x =>
+          el.contains(document.elementFromPoint(x, y)),
+        )
+    }), { message: `检查控件左右两侧和中心的点击命中：${control}` }).toBe(true)
+  }
+
+  for (const width of [1280, 390]) {
+    await test.step(`${width}px 视口`, async () => {
+      await page.setViewportSize({ width, height: 720 })
+      await page.goto('/#/super-assistant')
+      const menu = await openChatActionsMenu(page)
+      await menu.locator('[data-ctx-item="integrations"]').click()
+      const dialog = page.getByRole('dialog', { name: '能力拓展' })
+      const row = dialog.getByTestId('multica-profile-row')
+      await expect(row).toContainText('测试失败')
+      for (const text of [profileName, serviceUrl]) {
+        await expect.poll(() => row.getByText(text).evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true)
+      }
+      await expectReachable(dialog.getByTestId('multica-open-web'))
+      await expectReachable(row.getByTestId('multica-profile-open-web'))
+      await expectReachable(row.getByTestId('multica-profile-delete'))
+      await expectReachable(dialog.getByTestId('multica-profile-add-button'))
+
+      await row.getByRole('button', { name: '编辑' }).click()
+      await expectReachable(dialog.getByRole('combobox', { name: 'Multica 工作区' }))
+      await expectReachable(dialog.getByTestId('multica-profile-save-button'))
+      await dialog.getByRole('tab', { name: '远程助手' }).click()
+      await expectReachable(dialog.getByRole('button', { name: `删除 ${agentName}` }))
+      await expectReachable(dialog.getByTestId('remote-agent-invite-create'))
+      await dialog.getByRole('button', { name: '手动配置' }).click()
+      await expectReachable(dialog.getByRole('spinbutton', { name: '超时（秒）' }))
+      await expectReachable(dialog.getByTestId('remote-agent-save-button'))
+      await page.keyboard.press('Escape')
+      await expect(dialog).toHaveCount(0)
+    })
+  }
 })
 
 test('multica 多 profile：激活自定义配置与停用回默认', async ({ page }) => {

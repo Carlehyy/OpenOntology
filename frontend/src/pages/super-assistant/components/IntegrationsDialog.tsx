@@ -333,12 +333,12 @@ function RemoteAgentsPanel({ onError, onChanged }: {
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-5 [scrollbar-gutter:stable] sm:p-6">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3 [scrollbar-gutter:stable] sm:p-6">
         <section className="rounded-xl border border-[var(--color-border)] p-4">
-          <div className="flex items-start gap-2">
+          <div className="flex flex-wrap items-start gap-2">
             <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-sky-50 text-sky-700"><Bot size={16} /></div>
-            <div className="min-w-0 flex-1">
+            <div className="min-w-0 flex-1 basis-36">
               <div className="flex items-center gap-1.5">
                 <p className="text-xs font-semibold text-[var(--color-text-primary)]">远程助手</p>
                 {loaded && agents.length > 0 && (
@@ -352,7 +352,7 @@ function RemoteAgentsPanel({ onError, onChanged }: {
                 对方在内网时也能用「回连」方式接入，无需暴露端口。
               </p>
             </div>
-            <div className="flex shrink-0 items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2 [&>*]:whitespace-nowrap">
               <button
                 type="button"
                 onClick={() => setForm(form ? null : { ...EMPTY_FORM })}
@@ -430,11 +430,11 @@ function RemoteAgentsPanel({ onError, onChanged }: {
               const online = seen === '在线'
               const lastTurn = isPull ? null : lastTurnText(agent.last_turn_at)
               return (
-                <div key={agent.id} className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] px-3 py-2">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5">
-                      <p className="truncate text-xs font-medium text-[var(--color-text-primary)]">{agent.label}</p>
-                      <code className="shrink-0 rounded bg-brand-soft px-1 py-0.5 font-mono text-[10px] text-brand-ink">{agent.key}</code>
+                <div key={agent.id} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 rounded-lg border border-[var(--color-border)] px-3 py-2">
+                  <div className="min-w-0 flex-1 basis-48">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <p className="max-w-full break-words text-xs font-medium text-[var(--color-text-primary)]">{agent.label}</p>
+                      <code className="max-w-full rounded bg-brand-soft px-1 py-0.5 font-mono text-[10px] text-brand-ink [overflow-wrap:anywhere]">{agent.key}</code>
                       <Badge variant={isPull ? 'info' : 'outline'} className="shrink-0 px-1.5 py-0 text-[10px]">
                         {isPull ? '回连' : '直连'}
                       </Badge>
@@ -453,16 +453,18 @@ function RemoteAgentsPanel({ onError, onChanged }: {
                       ? <p className="mt-0.5 truncate font-mono text-[10px] text-[var(--color-text-tertiary)]">{agent.endpoint}</p>
                       : <p className="mt-0.5 truncate text-[10px] text-[var(--color-text-tertiary)]">{agent.description || '（未填写能力描述）'}</p>}
                   </div>
-                  <button type="button" onClick={() => test(agent)} disabled={testingId === agent.id}
-                    className="inline-flex min-h-9 items-center gap-1 rounded-lg px-2 text-xs text-brand-ink transition-colors hover:bg-brand-soft disabled:opacity-50">
-                    {testingId === agent.id ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />} 测试
-                  </button>
-                  <button type="button" onClick={() => startEdit(agent)}
-                    className="min-h-9 rounded-lg px-2 text-xs text-brand-ink transition-colors hover:bg-brand-soft">编辑</button>
-                  <button type="button" onClick={() => void remove(agent)} aria-label={`删除 ${agent.label}`}
-                    className="min-h-9 rounded-lg px-2 text-xs text-red-600 transition-colors hover:bg-red-50">
-                    <Trash2 size={12} />
-                  </button>
+                  <div className="flex flex-wrap items-center gap-1 [&>*]:whitespace-nowrap">
+                    <button type="button" onClick={() => test(agent)} disabled={testingId === agent.id}
+                      className="inline-flex min-h-9 items-center gap-1 rounded-lg px-2 text-xs text-brand-ink transition-colors hover:bg-brand-soft disabled:opacity-50">
+                      {testingId === agent.id ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />} 测试
+                    </button>
+                    <button type="button" onClick={() => startEdit(agent)}
+                      className="min-h-9 rounded-lg px-2 text-xs text-brand-ink transition-colors hover:bg-brand-soft">编辑</button>
+                    <button type="button" onClick={() => void remove(agent)} aria-label={`删除 ${agent.label}`}
+                      className="min-h-9 rounded-lg px-2 text-xs text-red-600 transition-colors hover:bg-red-50">
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
                 </div>
               )
             })}
@@ -475,7 +477,7 @@ function RemoteAgentsPanel({ onError, onChanged }: {
                   ? '回连助手经邀请函接入，无需端点与凭据；这里只调整名称、描述与超时。'
                   : '手动配置适合已经有现成 HTTP 服务的助手（直连）。普通 AI 助手推荐用上方邀请按钮，可按需多次邀请。'}
               </p>
-              <div className="grid gap-3 sm:grid-cols-2">
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                 <label className="block text-xs text-[var(--color-text-secondary)]">key（留空自动生成）
                   <input
                     data-testid="remote-agent-key"
@@ -536,7 +538,7 @@ function RemoteAgentsPanel({ onError, onChanged }: {
                       </pre>
                     )}
                   </div>
-                  <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                     <label className="block text-xs text-[var(--color-text-secondary)]">Bearer Token
                       <input
                         data-testid="remote-agent-token"
@@ -804,8 +806,8 @@ function MulticaProfilesPanel({ onError, onChanged, addButtonRef }: {
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-5 [scrollbar-gutter:stable] sm:p-6">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3 [scrollbar-gutter:stable] sm:p-6">
         <section data-testid="multica-config-card" className="rounded-xl border border-[var(--color-border)] p-4">
           <div className="flex items-start gap-2">
             <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-sky-50 text-sky-700"><PlugZap size={16} /></div>
@@ -824,9 +826,9 @@ function MulticaProfilesPanel({ onError, onChanged, addButtonRef }: {
           {/* 平台默认配置：只读展示（后端维护），自定义配置停用后回落到这里 */}
           {defaultProfile && (
             <div data-testid="multica-default-card" className="mt-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 py-2.5">
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex min-w-0 items-center gap-1.5">
-                  <p className="truncate text-xs font-medium text-[var(--color-text-primary)]">{defaultProfile.name}</p>
+              <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                  <p className="max-w-full break-words text-xs font-medium text-[var(--color-text-primary)]">{defaultProfile.name}</p>
                   <Badge variant="secondary" className="shrink-0 px-1.5 py-0 text-[10px]">平台默认</Badge>
                   {defaultProfile.is_active && (
                     <Badge variant="default" className="shrink-0 px-1.5 py-0 text-[10px]">当前使用</Badge>
@@ -879,11 +881,11 @@ function MulticaProfilesPanel({ onError, onChanged, addButtonRef }: {
                 <div
                   key={profile.id}
                   data-testid="multica-profile-row"
-                  className={`flex items-center gap-2 rounded-lg border px-3 py-2 ${profile.is_active ? 'border-brand/30 bg-brand-soft/40' : 'border-[var(--color-border)]'}`}
+                  className={`flex flex-wrap items-center justify-between gap-x-3 gap-y-1 rounded-lg border px-3 py-2 ${profile.is_active ? 'border-brand/30 bg-brand-soft/40' : 'border-[var(--color-border)]'}`}
                 >
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5">
-                      <p className="truncate text-xs font-medium text-[var(--color-text-primary)]">{profile.name}</p>
+                  <div className="min-w-0 flex-1 basis-48">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <p className="max-w-full break-words text-xs font-medium text-[var(--color-text-primary)]">{profile.name}</p>
                       {profile.is_active && <Badge variant="default" className="shrink-0 px-1.5 py-0 text-[10px]">当前使用</Badge>}
                       {!profile.enabled && <span className="shrink-0 rounded bg-slate-100 px-1 py-0.5 text-[9px] text-slate-400">已停用</span>}
                       {profile.token_set && <span className="shrink-0 text-[10px] text-[var(--color-text-tertiary)]">已配凭据</span>}
@@ -891,68 +893,70 @@ function MulticaProfilesPanel({ onError, onChanged, addButtonRef }: {
                         {testMeta.label}
                       </span>
                     </div>
-                    <p className="mt-0.5 truncate font-mono text-[10px] text-[var(--color-text-tertiary)]">
+                    <p className="mt-0.5 font-mono text-[10px] text-[var(--color-text-tertiary)] [overflow-wrap:anywhere]">
                       {profile.base_url || '未配置服务地址'}
                       {profile.workspace_id && ` · ${profile.workspace_name || profile.workspace_id}`}
                     </p>
                   </div>
-                  {profile.is_active ? (
+                  <div className="flex flex-wrap items-center gap-1 [&>*]:whitespace-nowrap">
+                    {profile.is_active ? (
+                      <button
+                        type="button"
+                        data-testid="multica-profile-deactivate"
+                        onClick={() => defaultProfile && void activate(defaultProfile)}
+                        disabled={!!activatingId || !defaultProfile}
+                        className="inline-flex min-h-9 items-center gap-1 rounded-lg px-2 text-xs text-brand-ink transition-colors hover:bg-brand-soft disabled:opacity-50"
+                      >
+                        {activatingId === defaultProfile?.id ? <Loader2 size={12} className="animate-spin" /> : null} 停用并回默认
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        data-testid="multica-profile-activate"
+                        onClick={() => void activate(profile)}
+                        disabled={!!activatingId}
+                        className="min-h-9 rounded-lg px-2 text-xs text-brand-ink transition-colors hover:bg-brand-soft disabled:opacity-50"
+                      >
+                        {activatingId === profile.id ? <Loader2 size={12} className="animate-spin" /> : null} 激活
+                      </button>
+                    )}
                     <button
                       type="button"
-                      data-testid="multica-profile-deactivate"
-                      onClick={() => defaultProfile && void activate(defaultProfile)}
-                      disabled={!!activatingId || !defaultProfile}
+                      onClick={() => void testRow(profile)}
+                      disabled={rowTestingId === profile.id}
                       className="inline-flex min-h-9 items-center gap-1 rounded-lg px-2 text-xs text-brand-ink transition-colors hover:bg-brand-soft disabled:opacity-50"
                     >
-                      {activatingId === defaultProfile?.id ? <Loader2 size={12} className="animate-spin" /> : null} 停用并回默认
+                      {rowTestingId === profile.id ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />} 测试
                     </button>
-                  ) : (
                     <button
                       type="button"
-                      data-testid="multica-profile-activate"
-                      onClick={() => void activate(profile)}
-                      disabled={!!activatingId}
-                      className="min-h-9 rounded-lg px-2 text-xs text-brand-ink transition-colors hover:bg-brand-soft disabled:opacity-50"
+                      onClick={() => startEdit(profile)}
+                      className="min-h-9 rounded-lg px-2 text-xs text-brand-ink transition-colors hover:bg-brand-soft"
                     >
-                      {activatingId === profile.id ? <Loader2 size={12} className="animate-spin" /> : null} 激活
+                      编辑
                     </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => void testRow(profile)}
-                    disabled={rowTestingId === profile.id}
-                    className="inline-flex min-h-9 items-center gap-1 rounded-lg px-2 text-xs text-brand-ink transition-colors hover:bg-brand-soft disabled:opacity-50"
-                  >
-                    {rowTestingId === profile.id ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />} 测试
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => startEdit(profile)}
-                    className="min-h-9 rounded-lg px-2 text-xs text-brand-ink transition-colors hover:bg-brand-soft"
-                  >
-                    编辑
-                  </button>
-                  {customWebEntry && (
-                    <a
-                      href={customWebEntry}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      aria-label={`打开 ${profile.name} 工作台`}
-                      data-testid="multica-profile-open-web"
-                      className="inline-flex min-h-9 shrink-0 items-center gap-1 rounded-lg px-2 text-xs text-brand-ink transition-colors hover:bg-brand-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    {customWebEntry && (
+                      <a
+                        href={customWebEntry}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        aria-label={`打开 ${profile.name} 工作台`}
+                        data-testid="multica-profile-open-web"
+                        className="inline-flex min-h-9 shrink-0 items-center gap-1 rounded-lg px-2 text-xs text-brand-ink transition-colors hover:bg-brand-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      >
+                        <ExternalLink size={12} /> 打开工作台
+                      </a>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setDeleting(profile)}
+                      aria-label={`删除 ${profile.name}`}
+                      data-testid="multica-profile-delete"
+                      className="min-h-9 rounded-lg px-2 text-xs text-red-600 transition-colors hover:bg-red-50"
                     >
-                      <ExternalLink size={12} /> 打开工作台
-                    </a>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => setDeleting(profile)}
-                    aria-label={`删除 ${profile.name}`}
-                    data-testid="multica-profile-delete"
-                    className="min-h-9 rounded-lg px-2 text-xs text-red-600 transition-colors hover:bg-red-50"
-                  >
-                    <Trash2 size={12} />
-                  </button>
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
                 </div>
               )
             })}
@@ -965,7 +969,7 @@ function MulticaProfilesPanel({ onError, onChanged, addButtonRef }: {
                   ? '编辑已存配置；服务地址或工作区变更后建议重新测试连接。'
                   : '接入一个 Multica 实例（可并存多个）；保存后按需激活生效。'}
               </p>
-              <div className="grid gap-3 sm:grid-cols-2">
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                 <label className="block text-xs text-[var(--color-text-secondary)]">名称 <span className="text-red-500">*</span>
                   <input
                     data-testid="multica-profile-name"
@@ -988,7 +992,7 @@ function MulticaProfilesPanel({ onError, onChanged, addButtonRef }: {
                   </span>
                 </label>
               </div>
-              <div className="grid gap-3 sm:grid-cols-2">
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                 <label className="block text-xs text-[var(--color-text-secondary)]">API Token
                   <input
                     data-testid="multica-token"
@@ -1002,7 +1006,7 @@ function MulticaProfilesPanel({ onError, onChanged, addButtonRef }: {
                     加密存储、永不回显；只用 PAT，不保存登录验证码。
                   </span>
                 </label>
-                <label className="block text-xs text-[var(--color-text-secondary)]">工作区 <span className="text-red-500">*</span>
+                <label className="block min-w-0 text-xs text-[var(--color-text-secondary)]">工作区 <span className="text-red-500">*</span>
                   <Select value={form.workspaceId} onValueChange={workspaceId => setForm({ ...form, workspaceId })}>
                     <SelectTrigger aria-label="Multica 工作区" className="mt-1.5 min-h-11 text-sm">
                       <SelectValue placeholder="连接测试后选择" />
@@ -1120,8 +1124,8 @@ export default function IntegrationsDialog({ onClose, onSaved }: {
         addButtonRef.current?.focus()
       }}
     >
-      <div className="flex min-h-0 flex-1">
-        <nav role="tablist" aria-label="集成类型" className="flex w-40 shrink-0 flex-col gap-1 border-r border-[var(--color-border)] p-2">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col md:flex-row">
+        <nav role="tablist" aria-label="集成类型" className="flex shrink-0 gap-1 border-b border-[var(--color-border)] p-2 md:w-40 md:flex-col md:border-b-0 md:border-r">
           {INTEGRATION_TABS.map(item => (
             <button
               key={item.key}
@@ -1142,7 +1146,7 @@ export default function IntegrationsDialog({ onClose, onSaved }: {
           ))}
         </nav>
         {tab === 'multica' ? (
-          <div role="tabpanel" id="integrations-panel-multica" aria-labelledby="integrations-tab-multica" className="flex min-h-0 flex-1">
+          <div role="tabpanel" id="integrations-panel-multica" aria-labelledby="integrations-tab-multica" className="flex min-h-0 min-w-0 flex-1">
             <MulticaProfilesPanel
               onError={message => setError(message)}
               onChanged={() => onSaved?.()}
@@ -1150,7 +1154,7 @@ export default function IntegrationsDialog({ onClose, onSaved }: {
             />
           </div>
         ) : tab === 'remote-agents' ? (
-          <div role="tabpanel" id="integrations-panel-remote-agents" aria-labelledby="integrations-tab-remote-agents" className="flex min-h-0 flex-1">
+          <div role="tabpanel" id="integrations-panel-remote-agents" aria-labelledby="integrations-tab-remote-agents" className="flex min-h-0 min-w-0 flex-1">
             <RemoteAgentsPanel
               onError={message => setError(message)}
               onChanged={() => onSaved?.()}
