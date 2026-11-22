@@ -885,7 +885,7 @@ services:
       # 有意不加入 depends_on：Hindsight 的 LLM 回调 backend，属循环依赖。
       HINDSIGHT_BASE_URL: ${HINDSIGHT_BASE_URL:-http://hindsight:8888}
       HINDSIGHT_API_KEY: ${HINDSIGHT_API_KEY:-}
-      HINDSIGHT_TIMEOUT_SECONDS: ${HINDSIGHT_TIMEOUT_SECONDS:-2}
+      HINDSIGHT_TIMEOUT_SECONDS: ${HINDSIGHT_TIMEOUT_SECONDS:-5}
       HINDSIGHT_NAMESPACE: ${HINDSIGHT_NAMESPACE:-openontology}
       HINDSIGHT_SERVICE_TOKEN: ${HINDSIGHT_SERVICE_TOKEN:-}
       # 可选：管理员专用的 Hindsight 原生 Web 入口（服务器 .env 值，空=未启用；
@@ -1140,7 +1140,7 @@ services:
       # 反思链路在 executor 进程内运行，与 backend 共享同一可选记忆配置。
       HINDSIGHT_BASE_URL: ${HINDSIGHT_BASE_URL:-http://hindsight:8888}
       HINDSIGHT_API_KEY: ${HINDSIGHT_API_KEY:-}
-      HINDSIGHT_TIMEOUT_SECONDS: ${HINDSIGHT_TIMEOUT_SECONDS:-2}
+      HINDSIGHT_TIMEOUT_SECONDS: ${HINDSIGHT_TIMEOUT_SECONDS:-5}
       HINDSIGHT_NAMESPACE: ${HINDSIGHT_NAMESPACE:-openontology}
       HINDSIGHT_SERVICE_TOKEN: ${HINDSIGHT_SERVICE_TOKEN:-}
       # AutoLoop 派发消费与内核执行链路在 executor 进程内调用 Multica：

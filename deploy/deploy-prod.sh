@@ -1673,8 +1673,17 @@ configure_hindsight_env() {
   fi
   updates+=("HINDSIGHT_BASE_URL=http://hindsight:8888")
   updates+=("HINDSIGHT_ENABLED=true")
+  # 召回全链（query embedding + 检索 + source_facts 生成）在真实负载下
+  # 超过旧默认 2 秒，聊天/面板召回会以「记忆服务不可用」整体失败；默认
+  # 提到 5 秒，并对仍持有旧默认值（2/2.0）的存量 .env 做一次性迁移——
+  # 运维显式写入的其它值一律保留。
   current="$(env_value HINDSIGHT_TIMEOUT_SECONDS)"
-  [ -n "$current" ] || updates+=("HINDSIGHT_TIMEOUT_SECONDS=2")
+  case "$current" in
+    ""|2|2.0)
+      updates+=("HINDSIGHT_TIMEOUT_SECONDS=5")
+      [ -n "$current" ] && log "migrated HINDSIGHT_TIMEOUT_SECONDS=5 (the recall chain needs more than the old 2s default; write your own value to override)"
+      ;;
+  esac
   current="$(env_value HINDSIGHT_NAMESPACE)"
   [ -n "$current" ] || updates+=("HINDSIGHT_NAMESPACE=openontology")
   current="$(env_value HINDSIGHT_DB_NAME)"

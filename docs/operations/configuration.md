@@ -432,7 +432,7 @@ Hindsight 1.2.0 以独立 Compose profile `hindsight` 提供超级助手长期�
 
 平台侧设置：`HINDSIGHT_BASE_URL`（容器内网固定 `http://hindsight:8888`）、
 `HINDSIGHT_API_KEY`（backend → Hindsight Bearer，镜像内 ApiKeyTenantExtension
-强校验）、`HINDSIGHT_TIMEOUT_SECONDS`（默认 2）、`HINDSIGHT_NAMESPACE`、
+强校验）、`HINDSIGHT_TIMEOUT_SECONDS`（默认 5）、`HINDSIGHT_NAMESPACE`、
 `HINDSIGHT_SERVICE_TOKEN`（Hindsight → 平台内部记忆 LLM 代理
 `/api/v2/super-assistant/internal/memory/v1` 的 service token，与容器
 `HINDSIGHT_API_LLM_API_KEY` 同值；不是真实模型 key）。

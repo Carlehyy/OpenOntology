@@ -7,7 +7,8 @@
   方 commit 后自行派发 NATS（或等待 drain_once 补发）；
 - 遗忘（forget_source）：tombstone 先落（status='forgetting'），上游
   operation 完成后由 memory_tasks 删除 document 并核实才置 forgotten；
-- 召回（recall_context/search_memories）：2 秒总预算、约 2000 token，
+- 召回（recall_context/search_memories）：总预算由 hindsight_timeout_seconds
+  控制（默认 5 秒，召回全链含 embedding/检索/source_facts）、约 2000 token，
   带来源时间、作为背景资料而非 system 指令；tombstone 来源不泄漏；
 - 状态（memory_status）与每用户设置（get_settings）。
 
@@ -636,9 +637,9 @@ def recall_context(
 ) -> tuple[str, dict]:
     """构建注入当前会话的记忆上下文（背景资料，非 system 指令）。
 
-    2 秒总预算（平台 hindsight_timeout_seconds，单次 HTTP 同预算）、约
-    2000 token；每条标注来源角色（用户/助手消息）、时间与来源 id，防止
-    把助手陈述误当用户断言。
+    总预算由平台 hindsight_timeout_seconds 控制（默认 5 秒，单次 HTTP 同
+    预算）、约 2000 token；每条标注来源角色（用户/助手消息）、时间与
+    来源 id，防止把助手陈述误当用户断言。
     """
     items, meta = _recall(db, owner_id, query_text)
     if not items:

@@ -368,7 +368,7 @@ class Settings(BaseSettings):
     hindsight_cp_access_key: str = Field(default="", repr=False)
     # backend → Hindsight 的 Bearer 凭据（默认镜像无租户鉴权时仅作请求上下文）。
     hindsight_api_key: str = Field(default="", repr=False)
-    hindsight_timeout_seconds: float = Field(default=2.0, gt=0, le=60)
+    hindsight_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
     # 记忆库命名空间前缀：bank id = <namespace>-<owner_id 哈希>；模型别名固定
     # oo-memory-default（Hindsight 1.2.0 禁止 bank 级 llm_model 覆盖）。
     hindsight_namespace: str = "openontology"
