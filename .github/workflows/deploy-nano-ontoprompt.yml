@@ -248,7 +248,12 @@ jobs:
     # （run 41319674624 两次 rerun 均 552 passed 后撞顶，部署被跳过）。
     # 提到 55 分钟覆盖实测最坏分布（37.1m + 步骤开销 + runner 方差），
     # 仍能掐断真正卡死的任务。
-    timeout-minutes: 55
+    # 2026-11-22 套件增至 700+ 例（multica 多 profile、决策铃铛、hindsight
+    # 等）后 55 分钟再度失守：dispatch 与 push 连续两次在 verify-frontend
+    # 作业 55m16s 处被取消（run 45058103186 / 45061310873），部署被跳过。
+    # 提到 70 分钟：按 553 例 37.1m 的 CI 单例耗时比例外推 700+ 例约 47m+，
+    # 加步骤开销与慢 runner 方差后 70m 覆盖最坏分布，仍能掐断真卡死。
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@v4
 
