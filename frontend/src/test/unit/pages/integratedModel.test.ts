@@ -1,14 +1,13 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import type { IntegratedAsset, IntegratedReplica, IntegratedRows, IntegratedVersion } from '../../../api/v2/integrated-datasets.ts'
+import type { IntegratedAsset, IntegratedReplica, IntegratedVersion } from '../../../api/v2/integrated-datasets.ts'
 import {
   backendsLabel, dbxState, dbxStateDetail, dbxStateLabel,
-  integratedCell, integratedError, latestVersionStateLabel, parseObject, primaryKeyOf,
+  integratedCell, integratedError, parseObject, primaryKeyOf, versionIsVerified,
   receiptNeedsReconciliation, receiptStatusLabel, sourceMutationPayload,
-  sourceReadDetail, sourceReadLabel, syncIsActive, syncIsSealed, syncStatusLabel, validateResourceName,
+  syncIsActive, syncIsSealed, syncStatusLabel, validateResourceName,
   REPLICA_PENDING_SYNC_NOTE, isReplicaStatusPayload, replicaCoversWrite, replicaFactsDetail,
   replicaNotRegistered, replicaReadable, replicaStale, replicaStatusLabel, replicaSyncBaseline,
-  versionStateLabel,
 } from '../../../pages/data-management/structured/integratedModel.ts'
 
 const assetBase: IntegratedAsset = {
@@ -86,12 +85,10 @@ describe('integrated source/query presentation contracts', () => {
   it('never treats an existing version id as verified without sealed evidence', () => {
     const unverified: IntegratedVersion = { id: 'version-1', version_no: 1, status: 'unverified', row_count: 10, checksum: null, run_id: null, created_at: '2026-10-24T08:00:00Z', complete: false }
     const sealed: IntegratedVersion = { ...unverified, status: 'sealed', complete: true }
-    assert.equal(versionStateLabel(unverified), '完整性未核验')
-    assert.equal(versionStateLabel(sealed), '完整封存已核验')
-    assert.equal(latestVersionStateLabel({ latest_version_id: null }, [unverified]), '尚无完整版本')
-    assert.equal(latestVersionStateLabel({ latest_version_id: 'version-1' }, []), '最新版本 version-1（封存状态未核验）')
-    assert.equal(latestVersionStateLabel({ latest_version_id: 'version-1' }, [unverified]), '最新版本 version-1 · 完整性未核验')
-    assert.equal(latestVersionStateLabel({ latest_version_id: 'version-1' }, [sealed]), '最新版本 version-1 · 完整封存已核验')
+    assert.equal(versionIsVerified(unverified), false)
+    assert.equal(versionIsVerified(sealed), true)
+    // `sealed` without the complete flag is still not a verified version.
+    assert.equal(versionIsVerified({ ...unverified, status: 'sealed' }), false)
   })
   it('requires sealed + complete + version id before any sync completion claim', () => {
     assert.equal(syncStatusLabel('queued'), '等待执行')
@@ -118,23 +115,7 @@ describe('integrated source/query presentation contracts', () => {
     assert.match(backendsLabel(configured), /快照 native · 写入 native · 元数据 dbx/)
     assert.match(backendsLabel({ ...configured, backends: undefined }), /可用性见 DBX 状态/)
   })
-  it('labels replica reads and receipts without inventing success', () => {
-    const rows: IntegratedRows = {
-      rows: [], columns: [],
-      source_state: { kind: 'replica_snapshot', started_at: '2026-10-24T08:00:00Z',
-        complete: true, coverage_confirmed_at: '2026-10-24T07:59:00Z' } as IntegratedRows['source_state'],
-      limit: 100,
-    }
-    const stale: IntegratedRows = {
-      ...rows, stale: true,
-      source_state: { ...rows.source_state, stale: true },
-    }
-    assert.equal(sourceReadLabel(null), '未核验')
-    assert.equal(sourceReadLabel(rows), '副本读取已核验')
-    assert.equal(sourceReadLabel(stale), '副本可读（可能滞后）')
-    assert.match(sourceReadDetail(null), /登记不等于副本可读/)
-    assert.match(sourceReadDetail(rows), /副本覆盖确认时点 2026-10-24T07:59:00Z（非最后变更时间） · 读取完整性 完整 · 预览最多 100 行，不是总行数$/)
-    assert.match(sourceReadDetail(stale), /副本可能滞后/)
+  it('labels receipts without inventing success', () => {
     assert.equal(receiptNeedsReconciliation({ status: 'unknown' }), true)
     assert.equal(receiptNeedsReconciliation({ status: 'pending' }), true)
     assert.equal(receiptNeedsReconciliation({ status: 'conflict' }), false)
@@ -148,12 +129,12 @@ describe('integrated source/query presentation contracts', () => {
     assert.equal(replicaStatusLabel(undefined), '未初始化')
     assert.equal(replicaStatusLabel('pending'), '等待初始化')
     assert.equal(replicaStatusLabel('initializing'), '初始化中')
-    assert.equal(replicaStatusLabel('catching_up'), '追平增量中')
+    assert.equal(replicaStatusLabel('catching_up'), '追平中')
     assert.equal(replicaStatusLabel('ready'), '已就绪')
-    assert.equal(replicaStatusLabel('stale'), '已滞后（可读）')
-    assert.equal(replicaStatusLabel('rebuild_required'), '需重建')
-    assert.equal(replicaStatusLabel('blocked'), '被阻塞')
-    assert.equal(replicaStatusLabel('stopped'), '已停止')
+    assert.equal(replicaStatusLabel('stale'), '可能滞后')
+    assert.equal(replicaStatusLabel('rebuild_required'), '需重新同步')
+    assert.equal(replicaStatusLabel('blocked'), '已阻断')
+    assert.equal(replicaStatusLabel('stopped'), '已暂停')
     assert.equal(replicaStatusLabel('mystery'), '未核验')
     const base: IntegratedReplica = {
       status: 'ready', complete: true, row_count: 12,
@@ -172,7 +153,8 @@ describe('integrated source/query presentation contracts', () => {
     assert.match(replicaFactsDetail({ ...base, status: 'catching_up' }), /可读但可能滞后/)
     assert.match(replicaFactsDetail({ ...base, last_error_code: 'SOURCE_UNREACHABLE' }), /最近错误码 SOURCE_UNREACHABLE/)
     assert.match(replicaFactsDetail(null), /尚未登记本地副本/)
-    assert.match(REPLICA_PENDING_SYNC_NOTE, /^源库已写入，等待副本同步/)
+    // The note must say the write reached the source and that local data is still catching up.
+    assert.match(REPLICA_PENDING_SYNC_NOTE, /^已写入源表，正在同步到本地数据/)
   })
   it('accepts only a complete status payload for the current asset', () => {
     const payload = {

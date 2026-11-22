@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { formatDateTime } from '@/utils/datetime'
 import { AlertTriangle, CheckCircle, Database, Eye, Loader2, Plus, RefreshCw, Table2 } from 'lucide-react'
@@ -34,6 +34,8 @@ export default function IntegratedDatasetsView({ focusDatasetId }: { focusDatase
   const [listError, setListError] = useState('')
   const [focusError, setFocusError] = useState('')
   const [retry, setRetry] = useState(0)
+  // Row "查看" buttons, kept so closing the dialog can hand focus back to its trigger.
+  const viewTriggers = useRef(new Map<string, HTMLButtonElement>())
   const refresh = useCallback(() => setRetry(value => value + 1), [])
 
   useEffect(() => {
@@ -206,6 +208,7 @@ export default function IntegratedDatasetsView({ focusDatasetId }: { focusDatase
                       <td className="sticky right-0 z-10 border-l border-border bg-card px-4 py-3 text-center transition-colors group-hover:bg-muted">
                         <button
                           type="button"
+                          ref={node => { if (node) viewTriggers.current.set(asset.id, node); else viewTriggers.current.delete(asset.id) }}
                           aria-label={`查看 ${asset.name}`}
                           onClick={() => select(asset.id)}
                           className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-lg border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition hover:border-brand-line hover:bg-brand-soft hover:text-brand-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -226,12 +229,22 @@ export default function IntegratedDatasetsView({ focusDatasetId }: { focusDatase
       {/* 详情以弹窗承载，open 由 ?dataset= 深链驱动；关闭即清除深链回到列表 */}
       {selected && (
         <Dialog open onOpenChange={open => { if (!open) clearSelection() }}>
-          <DialogContent className="flex h-[85vh] w-[min(96vw,1440px)] flex-col overflow-hidden p-0">
+          {/* 初始焦点落在弹窗自身，而不是碰巧排在第一位的控件；关闭后回到触发它的
+              「查看」按钮，深链打开时没有触发按钮则沿用默认行为。 */}
+          <DialogContent
+            className="flex h-[85vh] w-[min(96vw,1440px)] flex-col overflow-hidden p-0"
+            onOpenAutoFocus={event => { event.preventDefault(); (event.currentTarget as HTMLElement | null)?.focus?.() }}
+            onCloseAutoFocus={event => {
+              const trigger = selected && viewTriggers.current.get(selected.id)
+              if (trigger?.isConnected) { event.preventDefault(); trigger.focus({ preventScroll: true }) }
+            }}
+          >
             <IntegratedAssetDetail
               key={`detail-${selected.id}`}
               asset={selected}
               canManage={canManage}
               onChanged={refresh}
+              onClose={clearSelection}
               onDecommissioned={() => {
                 clearSelection()
                 window.dispatchEvent(new Event('ontoprompt:data-assets-changed'))
