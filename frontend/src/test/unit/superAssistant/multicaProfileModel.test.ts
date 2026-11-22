@@ -3,6 +3,7 @@ import { describe, it } from 'node:test'
 
 import {
   isDefaultMulticaProfile,
+  multicaCustomWebEntryUrl,
   multicaProfileSavePayload,
   multicaTestStatusMeta,
   splitMulticaProfiles,
@@ -86,6 +87,30 @@ describe('multicaTestStatusMeta', () => {
     assert.deepEqual(multicaTestStatusMeta('success'), { label: '测试成功', ok: true })
     assert.deepEqual(multicaTestStatusMeta('error'), { label: '测试失败', ok: false })
     assert.deepEqual(multicaTestStatusMeta(null), { label: '未测试', ok: null })
+  })
+})
+
+describe('multicaCustomWebEntryUrl', () => {
+  it('取 base_url 的 origin：剥掉路径与查询，保留协议+主机+端口', () => {
+    assert.equal(
+      multicaCustomWebEntryUrl(customProfile({ base_url: 'https://multica.example.com' })),
+      'https://multica.example.com',
+    )
+    assert.equal(
+      multicaCustomWebEntryUrl(customProfile({ base_url: 'https://multica.example.com/api/v1?x=1' })),
+      'https://multica.example.com',
+    )
+    assert.equal(
+      multicaCustomWebEntryUrl(customProfile({ base_url: 'http://127.0.0.1:8080' })),
+      'http://127.0.0.1:8080',
+    )
+  })
+
+  it('地址缺失、非 http(s) 或无法解析时返回 null（不渲染外链）', () => {
+    assert.equal(multicaCustomWebEntryUrl(customProfile({ base_url: '' })), null)
+    assert.equal(multicaCustomWebEntryUrl(customProfile({ base_url: 'javascript:alert(1)' })), null)
+    assert.equal(multicaCustomWebEntryUrl(customProfile({ base_url: 'ftp://multica.example.com' })), null)
+    assert.equal(multicaCustomWebEntryUrl(customProfile({ base_url: 'not a url' })), null)
   })
 })
 

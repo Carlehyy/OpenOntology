@@ -23,7 +23,7 @@ import { errorText, saveBlob } from './assistantPanelUtils'
 import { resolveNativeWebUrl } from '../webEntryUrl'
 import { DialogShell } from './AssistantConfiguration'
 import {
-  multicaProfileSavePayload, multicaTestStatusMeta, splitMulticaProfiles,
+  multicaCustomWebEntryUrl, multicaProfileSavePayload, multicaTestStatusMeta, splitMulticaProfiles,
   type MulticaProfileFormState,
 } from './multicaProfileModel'
 
@@ -874,6 +874,7 @@ function MulticaProfilesPanel({ onError, onChanged, addButtonRef }: {
             )}
             {customProfiles.map(profile => {
               const testMeta = multicaTestStatusMeta(profile.last_test_status)
+              const customWebEntry = multicaCustomWebEntryUrl(profile)
               return (
                 <div
                   key={profile.id}
@@ -931,6 +932,18 @@ function MulticaProfilesPanel({ onError, onChanged, addButtonRef }: {
                   >
                     编辑
                   </button>
+                  {customWebEntry && (
+                    <a
+                      href={customWebEntry}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      aria-label={`打开 ${profile.name} 工作台`}
+                      data-testid="multica-profile-open-web"
+                      className="inline-flex min-h-9 shrink-0 items-center gap-1 rounded-lg px-2 text-xs text-brand-ink transition-colors hover:bg-brand-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    >
+                      <ExternalLink size={12} /> 打开工作台
+                    </a>
+                  )}
                   <button
                     type="button"
                     onClick={() => setDeleting(profile)}
