@@ -198,7 +198,14 @@ export default function DecisionItemsDialog({ initialId, summary, session, onSel
   const handledAllowed = !!detail && canMarkHandled(detail)
   const counts = summary ? { pending: summary.openCount, processing: summary.pendingDispatchCount + summary.sendingCount, failed: summary.unknownCount + summary.failedCount } : null
 
-  return <DialogShell title="决策事项" description="永久保留问题、选择与逐步骤结果。处理失败或结果未知的事项仍计入未完成。" size="xwide" icon={<ListChecks size={18} />} onClose={onClose} onInteractOutside={event => event.preventDefault()} contentClassName="h-[88dvh]">
+  return <DialogShell
+    title="决策事项"
+    description="永久保留问题、选择与逐步骤结果。处理失败或结果未知的事项仍计入未完成。"
+    size="xwide"
+    icon={<ListChecks size={18} />}
+    onClose={onClose}
+    // 遮罩空白点击与右上关闭等效：直接关闭弹窗（2026-11 用户反馈，不再强制点关闭符）
+    contentClassName="h-[88dvh]">
     <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-border p-3" role="tablist" aria-label="决策分区">
       {(Object.keys(DECISION_GROUPS) as DecisionGroup[]).map(key => <Button key={key} size="sm" role="tab" aria-selected={group === key} disabled={!!busy} variant={group === key ? 'default' : 'ghost'} onClick={() => { setGroup(key); setCursor(null); setPrevious([]); select(null) }}>{DECISION_GROUPS[key].label}{counts && key !== 'history' ? ` (${counts[key]})` : ''}</Button>)}
       <Button size="icon-sm" variant="ghost" aria-label="刷新决策事项" disabled={!!busy} onClick={() => { setRevision(value => value + 1); if (selected) void loadDetail(selected); void onRefreshSummary() }}><RefreshCw size={14} /></Button>

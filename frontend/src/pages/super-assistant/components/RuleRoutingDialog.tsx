@@ -305,7 +305,15 @@ export default function RuleRoutingDialog({ initialDraft, initialEventId, schedu
   const hitsRange = summary ? `${summary.since} ~ ${summary.until}` : undefined
 
   return <>
-    <DialogShell title="规则路由" description="我的规则：处理发送给当前用户的后续事件。按匹配顺序首条命中，未命中交由助手研判。" size="xwide" icon={<Route size={18} />} onClose={() => guarded(onClose)} onInteractOutside={event => event.preventDefault()} contentClassName="h-[88dvh]">
+    <DialogShell
+      title="规则路由"
+      description="我的规则：处理发送给当前用户的后续事件。按匹配顺序首条命中，未命中交由助手研判。"
+      size="xwide"
+      icon={<Route size={18} />}
+      onClose={() => guarded(onClose)}
+      // 遮罩空白点击与右上关闭同路：guarded 先守卫脏稿（与定时任务弹窗同惯例）
+      contentClassName="h-[88dvh]"
+    >
       <div className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[auto_minmax(0,1fr)] md:grid-cols-[9.5rem_minmax(0,1fr)] md:grid-rows-[minmax(0,1fr)]">
         {/* 窄屏导航保持单行的自然高度，剩余空间留给可滚动的面板。 */}
         <nav role="tablist" aria-label="规则路由分区" className="scrollbar-none flex min-h-0 shrink-0 flex-row gap-1 overflow-x-auto border-b border-[var(--color-border)] p-2 md:flex-col md:overflow-x-visible md:border-b-0 md:border-r">

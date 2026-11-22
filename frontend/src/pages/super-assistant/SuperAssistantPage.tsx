@@ -3,7 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import { Sender } from '@ant-design/x'
 import { ConfigProvider, theme as antdTheme } from 'antd'
 import {
-  ArrowDown, Check, Cpu, Layers3, List, ListChecks, Loader2, Megaphone, Menu, Mic, Monitor, MoreHorizontal, Network, Paperclip, Pencil, Plug,
+  ArrowDown, Check, Clock, Cpu, Layers3, List, ListChecks, Loader2, Megaphone, Menu, Mic, Monitor, MoreHorizontal, Network, Paperclip, Pencil, Plug,
   ScrollText, Send, Settings2, Square, SquareKanban, X,
 } from 'lucide-react'
 
@@ -1591,7 +1591,6 @@ export default function SuperAssistantPage() {
         }}
         onSetArchived={(id, archived) => void setConversationArchived(id, archived)}
         onOpenSearch={() => setSearchOpen(true)}
-        onOpenScheduled={() => setScheduledOpen(true)}
         onOpenRuleRouting={() => {
           setRuleRoutingOpen(true)
           setSearchParams(previous => { const next = new URLSearchParams(previous); next.set('ruleRouting', '1'); return next }, { replace: true })
@@ -1746,7 +1745,19 @@ export default function SuperAssistantPage() {
             )}
           </div>
           {/* 头部五大功能入口（决策事项/会话纪要/项目管理/领域知识/能力拓展）已整体迁入
-              聊天区域右键菜单（见 main 内 ContextMenu），头部仅保留能力地图及其右侧入口 */}
+              聊天区域右键菜单（见 main 内 ContextMenu），头部保留定时任务、能力地图及其右侧入口 */}
+          {/* 定时任务入口自侧栏功能项迁至头部图标行（2026-11 用户反馈）：位于能力地图
+              左侧，弹窗本体与 ?schedule= 深链不变，样式与能力地图图标同语言；
+              窄屏收进「⋯」溢出菜单（标题优先占位），镜像项见下方 Popover */}
+          <button
+            type="button"
+            onClick={() => setScheduledOpen(true)}
+            aria-label="定时任务"
+            title="定时任务"
+            className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-brand-line bg-[var(--color-context-usage-bg)] text-brand-ink transition-colors hover:border-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:flex"
+          >
+            <Clock size={16} aria-hidden="true" />
+          </button>
           <Dialog>
             <DialogTrigger asChild>
               <button
@@ -1830,7 +1841,7 @@ export default function SuperAssistantPage() {
           >
             <Settings2 size={15} />
           </button>
-          {/* 窄屏溢出菜单：实时浏览器/助手配置收进「⋯」，标题与模型选择器优先占位 */}
+          {/* 窄屏溢出菜单：定时任务/实时浏览器/助手配置收进「⋯」，标题与模型选择器优先占位 */}
           <Popover open={headerOverflowOpen} onOpenChange={setHeaderOverflowOpen}>
             <PopoverTrigger asChild>
               <button
@@ -1844,7 +1855,15 @@ export default function SuperAssistantPage() {
             </PopoverTrigger>
             <PopoverContent align="end" side="bottom" sideOffset={8} className="w-44 p-1">
               {/* 五大功能入口（决策事项/会话纪要/项目管理/领域知识/能力拓展）已迁入聊天区域
-                  右键菜单，窄屏溢出菜单不再保留对应项 */}
+                  右键菜单，窄屏溢出菜单不再保留对应项；定时任务头部图标 <md 让位标题，镜像于此 */}
+              <button
+                type="button"
+                onClick={() => { setHeaderOverflowOpen(false); setScheduledOpen(true) }}
+                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <Clock size={15} className="shrink-0 text-brand-ink" />
+                定时任务
+              </button>
               <button
                 type="button"
                 onClick={() => { setHeaderOverflowOpen(false); void openBrowser() }}
