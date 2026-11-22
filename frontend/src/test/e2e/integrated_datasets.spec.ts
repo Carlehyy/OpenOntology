@@ -434,7 +434,8 @@ test('integrated deep link opens the asset detail and survives reload', async ({
   await expect(dialog).toBeVisible()
   await expect(detail).toContainText('订单源')
   await expect(detail.getByText('可写', { exact: true })).toBeVisible()
-  await expect(dialog).toContainText('public.orders · 连接 「PostgreSQL 测试源」')
+  // 中文引号前不留空格（线上核对时发现的排版瑕疵）。
+  await expect(dialog).toContainText('public.orders · 连接「PostgreSQL 测试源」')
   expect(requests.filter(request => request.path === '/api/v2/connections' && request.method === 'GET').length).toBeGreaterThan(0)
   // 状态条三项如实呈现；时间、代数等技术细节不进正文。
   await expect(detail.getByTestId('integrated-replica-state-value')).toHaveText('已就绪')

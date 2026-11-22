@@ -574,7 +574,8 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
   const replicaRegistered = !!replica && !replicaUnverified
   const writeLocked = outcomeUnconfirmed || pk.length === 0
   const resource = `${asset.schema_name}.${asset.table_name}`
-  const connectionLabel = connectionName ? `「${connectionName}」` : shortId(asset.connection_id)
+  // No space before the CJK corner brackets; the opaque-id fallback keeps one after 「连接」.
+  const connectionLabel = connectionName ? `连接「${connectionName}」` : `连接 ${shortId(asset.connection_id)}`
   const verifiedVersions = versions.filter(versionIsVerified).length
   const openRebuild = (trigger?: HTMLElement) => {
     rebuildTrigger.current = trigger ?? null
@@ -747,7 +748,7 @@ export default function IntegratedAssetDetail({ asset, canManage, onChanged, onD
             </Hint>
           </div>
           <DialogDescription className="mt-0.5 truncate font-mono text-xs leading-4 text-muted-foreground">
-            {resource} · 连接 {connectionLabel}
+            {resource} · {connectionLabel}
           </DialogDescription>
         </DialogHeader>
 
