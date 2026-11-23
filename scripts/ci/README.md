@@ -25,6 +25,8 @@
   全量；`--self-test` 跑 `test-classify-deploy-changes.sh`。
 - `test-classify-deploy-changes.sh`：分类器夹具，含历史 push 回放与 fail-closed
   用例。由 `test-deploy-guards.sh` 一并执行。
+- `test-deploy-workflow.mjs`：验证部署锁与前端分片接线，并用合成 Git/GitHub
+  响应覆盖分支时效、验证基线和发布状态。由 `test-deploy-guards.sh` 执行。
 - `test-deploy-guards.sh`：校验部署目录正反例，并通过
   `DEPLOY_VALIDATE_ONLY=1` 验证镜像摘要严格模式从最终 `.env` 读取、显式
   进程环境优先，同时验证当前配置来源契约、生产包白名单和 runtime source

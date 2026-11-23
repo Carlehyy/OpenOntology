@@ -9,11 +9,6 @@ on:
         required: true
         default: false
         type: boolean
-concurrency:
-  group: deploy-nano-ontoprompt
-  # A deployment may include a contract/drop migration. Queue a later push so
-  # it cannot interrupt the remote host between migration and readiness.
-  cancel-in-progress: false
 permissions:
   contents: read
   statuses: write
@@ -35,21 +30,46 @@ jobs:
         with:
           fetch-depth: 0
 
-      - id: filter
+      - name: Check previous push was released or needed no deployment
+        id: baseline
+        if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const before = context.payload.before
+            if (!/^[0-9a-f]{40}$/.test(before ?? '')) return
+            try {
+              const { data } = await github.rest.repos.getCombinedStatusForRef({
+                ...context.repo, ref: before,
+              })
+              const status = data.statuses.find(item => item.context === 'openontology/deploy')
+              if (status?.state === 'success' && [
+                'Production deployment succeeded',
+                'Verification succeeded (no deployment needed)',
+              ].includes(status.description)) {
+                core.setOutput('ready', 'true')
+              }
+            } catch (error) {
+              core.warning(`Could not confirm the previous push status (${error.status ?? 'request failed'})`)
+            }
+
+      - name: Classify deployment changes
+        id: filter
         shell: bash
+        env:
+          BEFORE: ${{ github.event.before }}
+          BASELINE_READY: ${{ steps.baseline.outputs.ready }}
         run: |
           set -Eeuo pipefail
-          if [ "${{ github.event_name }}" != "push" ]; then
+          # A concurrent or failed predecessor may leave cumulative changes
+          # outside this push's diff. Only narrow the gates on a known baseline.
+          if [[ "$BASELINE_READY" == 'true' && "$BEFORE" =~ ^[0-9a-f]{40}$ ]] \
+              && git merge-base --is-ancestor "$BEFORE" "$GITHUB_SHA"; then
+            git diff --name-only --no-renames "$BEFORE" "$GITHUB_SHA" \
+              | bash scripts/ci/classify-deploy-changes.sh --stdin
+          else
             bash scripts/ci/classify-deploy-changes.sh --full
-            exit 0
           fi
-          before="${{ github.event.before }}"
-          if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
-            bash scripts/ci/classify-deploy-changes.sh --full
-            exit 0
-          fi
-          git diff --name-only --no-renames "$before" "${{ github.sha }}" \
-            | bash scripts/ci/classify-deploy-changes.sh --stdin
 
   verify-backend:
     needs: changes
@@ -232,28 +252,14 @@ jobs:
           if-no-files-found: warn
           retention-days: 3
 
-  verify-frontend:
+  verify-frontend-static:
     needs: changes
-    if: >-
-      needs.changes.outputs.run_frontend_tests == 'true'
-      || needs.changes.outputs.run_frontend_build == 'true'
+    if: needs.changes.outputs.run_frontend_tests == 'true'
     runs-on: ubuntu-latest
-    # 15 分钟余量过薄：同一提交在快慢不同的 runner 上实测 11m39s ~ >15m，
-    # 慢机器会随机撞顶导致部署被跳过（MYW-73 首次部署即如此）。提到 25 分钟。
-    # 2026-09-25 套件增至 386 例后 25 分钟再度失守：快 runner 套件 14m26s
-    # （run 36118066551），慢 runner 22m39s 未完、连续两次撞顶取消
-    # （run 36153713911 首次与 rerun --failed 均如此，E2E 全绿但部署未推进）。
-    # 2026-11-02 套件增至 553 例后 40 分钟再度失守：E2E 单步实测 37.1m，
-    # 加依赖安装/构建/证据上传后连续两次仅差 15-20 秒被 cancelled
-    # （run 41319674624 两次 rerun 均 552 passed 后撞顶，部署被跳过）。
-    # 提到 55 分钟覆盖实测最坏分布（37.1m + 步骤开销 + runner 方差），
-    # 仍能掐断真正卡死的任务。
-    # 2026-11-22 套件增至 700+ 例（multica 多 profile、决策铃铛、hindsight
-    # 等）后 55 分钟再度失守：dispatch 与 push 连续两次在 verify-frontend
-    # 作业 55m16s 处被取消（run 45058103186 / 45061310873），部署被跳过。
-    # 提到 70 分钟：按 553 例 37.1m 的 CI 单例耗时比例外推 700+ 例约 47m+，
-    # 加步骤开销与慢 runner 方差后 70m 覆盖最坏分布，仍能掐断真卡死。
-    timeout-minutes: 70
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
     steps:
       - uses: actions/checkout@v4
 
@@ -265,44 +271,51 @@ jobs:
 
       - name: Install frontend dependencies
         run: npm ci
-        working-directory: frontend
 
       - name: Frontend unit tests
-        if: needs.changes.outputs.run_frontend_tests == 'true'
         run: npm run test:unit
-        working-directory: frontend
 
       - name: Frontend E2E classification gate
-        if: needs.changes.outputs.run_frontend_tests == 'true'
         run: npm run test:e2e:classification
-        working-directory: frontend
 
       - name: Frontend feature-boundary gate
-        if: needs.changes.outputs.run_frontend_tests == 'true'
         run: npm run check:feature-boundaries
-        working-directory: frontend
 
-      # 像素尺寸断言规范：禁止对 boundingBox 宽高做精确相等断言
-      # （CI Linux 浮点舍入差会误报，先例 6596ffa7）。
+      # 像素尺寸断言规范：禁止对 boundingBox 宽高做精确相等断言。
       - name: Frontend E2E assertion-convention gate
-        if: needs.changes.outputs.run_frontend_tests == 'true'
         run: npm run check:e2e-assertions
-        working-directory: frontend
 
       - name: Frontend component-convergence gate
-        if: needs.changes.outputs.run_frontend_tests == 'true'
         run: npm run check:component-convergence
-        working-directory: frontend
+
+      - name: Frontend color-token gate
+        run: npm run check:color-tokens
 
       - name: Frontend lint
-        if: needs.changes.outputs.run_frontend_tests == 'true'
         run: npm run lint
+
+  verify-frontend-build:
+    needs: changes
+    if: needs.changes.outputs.run_frontend_build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
         working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
 
       - name: Frontend production build
-        if: needs.changes.outputs.run_frontend_build == 'true'
         run: npm run build
-        working-directory: frontend
         env:
           # 烧入 HTTPS 入口（裸 IP 自签，缺省与 compose 的 PUBLIC_TLS_IP /
           # PUBLIC_HTTPS_PORT 兜底一致，可用仓库变量覆盖）：SPA 在同主机普通
@@ -316,29 +329,50 @@ jobs:
       # 部署镜像直接使用本 job 构建的 dist，保证上线产物与通过门禁的产物一致，
       # 服务器端不再重复执行 vite build。
       - name: Upload frontend dist for deployment
-        if: needs.changes.outputs.run_frontend_build == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: frontend-dist-${{ github.run_id }}
           path: frontend/dist
           if-no-files-found: error
           retention-days: 1
+          overwrite: true
+
+  verify-frontend-e2e:
+    needs: changes
+    if: needs.changes.outputs.run_frontend_tests == 'true'
+    runs-on: ubuntu-latest
+    # One worker per runner. Retain the existing budget while measuring shard skew.
+    timeout-minutes: 70
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
 
       - name: Install Playwright Chromium
-        if: needs.changes.outputs.run_frontend_tests == 'true'
         run: npx playwright install --with-deps chromium
-        working-directory: frontend
 
       - name: Frontend offline E2E suite
-        if: needs.changes.outputs.run_frontend_tests == 'true'
-        run: npm run test:e2e:mocked
-        working-directory: frontend
+        run: npm run test:e2e:mocked -- --shard=${{ matrix.shard }}/2
 
       - name: Upload frontend test evidence
-        if: ${{ always() && needs.changes.outputs.run_frontend_tests == 'true' }}
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: frontend-playwright-${{ github.run_id }}
+          name: frontend-playwright-${{ github.run_id }}-attempt-${{ github.run_attempt }}-shard-${{ matrix.shard }}
           path: .artifacts/playwright
           if-no-files-found: ignore
           retention-days: 14
@@ -458,10 +492,11 @@ jobs:
     # Includes the real replica PG/MySQL acceptance after the image canaries;
     # the extra wall clock is bounded by the isolated 7 GB runner.
     timeout-minutes: 45
-    # 前端镜像改为预构建形态（COPY dist），需要 verify-frontend 产出的 dist；
-    # 该依赖仍早于关键路径上的 verify-backend，不延长整体墙钟。
-    needs: [changes, verify-frontend]
-    if: always() && needs.changes.outputs.run_docker == 'true' && needs.verify-frontend.result == 'success'
+    # COPY dist 只依赖同一提交的前端构建，可与静态门禁、E2E 和后端回归并行。
+    needs: [changes, verify-frontend-build]
+    if: >-
+      !cancelled() && needs.changes.outputs.run_docker == 'true'
+      && needs.verify-frontend-build.result == 'success'
     steps:
       - uses: actions/checkout@v4
 
@@ -644,19 +679,33 @@ jobs:
           retention-days: 14
 
   deploy:
-    needs: [changes, verify-backend, verify-frontend, verify-gates, verify-docker-build]
-    # 只有分类器打开 run_deploy 才上线。被要求跑的验证 job 必须 success；
-    # 未被要求的 job 保持 skipped，不能用 skipped 冒充已验证。
+    needs: [changes, verify-backend, verify-frontend-static, verify-frontend-build, verify-frontend-e2e, verify-gates, verify-docker-build]
+    # 只有分类器打开 run_deploy 且所有要求的验证通过才上线。
     if: >-
-      always() && needs.verify-gates.result == 'success'
+      !cancelled() && needs.changes.result == 'success'
+      && needs.verify-gates.result == 'success'
       && needs.changes.outputs.run_deploy == 'true'
       && (needs.changes.outputs.run_backend != 'true'
           || needs.verify-backend.result == 'success')
-      && ((needs.changes.outputs.run_frontend_tests != 'true'
-           && needs.changes.outputs.run_frontend_build != 'true')
-          || needs.verify-frontend.result == 'success')
+      && (needs.changes.outputs.run_frontend_tests != 'true'
+          || (needs.verify-frontend-static.result == 'success'
+              && needs.verify-frontend-e2e.result == 'success'))
+      && (needs.changes.outputs.run_frontend_build != 'true'
+          || needs.verify-frontend-build.result == 'success')
       && (needs.changes.outputs.run_docker != 'true'
           || needs.verify-docker-build.result == 'success')
+    # Hold the same lock from source replacement through migrations/readiness.
+    # An older validation finishing late must not evict the current tip's job.
+    concurrency:
+      group: deploy-nano-ontoprompt
+      cancel-in-progress: false
+      queue: max
+    outputs:
+      superseded: ${{ steps.tip.outputs.superseded }}
+      release_result: ${{ steps.release.outcome }}
+    permissions:
+      actions: read
+      contents: read
     runs-on: ubuntu-latest
     # 服务器低配盘的冷构建实测约 28 分钟，服务初始化、迁移与重启另需约
     # 15 分钟；run 44684037622 在 Multica 首次启动时撞上 SSH 45 分钟上限。
@@ -665,13 +714,53 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check production branch tip under the deployment lock
+        id: tip
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const branch = 'nano-ontoprompt'
+            const ref = `refs/heads/${branch}`
+            if (context.ref !== ref) {
+              throw new Error(`Production deployment requires ${ref}`)
+            }
+            const { execFileSync } = require('node:child_process')
+            const remote = execFileSync('git', ['ls-remote', '--exit-code', 'origin', ref], {
+              encoding: 'utf8', timeout: 30000,
+            }).trim()
+            const [tip, remoteRef] = remote.split('\t')
+            if (!/^[0-9a-f]{40}$/.test(tip) || remoteRef !== ref) {
+              throw new Error('Could not confirm the production branch tip')
+            }
+            if (tip === context.sha) {
+              core.setOutput('current', 'true')
+              return
+            }
+
+            // An absent/cancelled replacement (e.g. a skip-CI push) must not
+            // turn a skipped release into a silent success.
+            const { data } = await github.rest.actions.listWorkflowRuns({
+              ...context.repo, workflow_id: 'deploy-nano-ontoprompt.yml', branch, head_sha: tip,
+            })
+            const replacement = data.workflow_runs.find(run =>
+              run.head_sha === tip && ['push', 'workflow_dispatch'].includes(run.event)
+              && (['queued', 'in_progress', 'pending', 'requested', 'waiting'].includes(run.status)
+                  || run.conclusion === 'success'))
+            if (!replacement) {
+              throw new Error(`Production branch advanced to ${tip}, with no pending or successful deployment workflow`)
+            }
+            core.notice(`Superseded by ${tip} (workflow run ${replacement.id}); no production changes made`)
+            core.setOutput('superseded', 'true')
+
       - name: Download frontend dist
+        if: steps.tip.outputs.current == 'true'
         uses: actions/download-artifact@v4
         with:
           name: frontend-dist-${{ github.run_id }}
           path: frontend/dist
 
       - name: Check deployment secrets
+        if: steps.tip.outputs.current == 'true'
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER || 'root' }}
@@ -689,12 +778,14 @@ jobs:
           echo "DEPLOY_APP_DIR validated: yes"
 
       - name: Trust deployment host
+        if: steps.tip.outputs.current == 'true'
         run: |
           mkdir -p ~/.ssh
           ssh-keyscan -T 15 -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
 
       - name: Materialize production dependency manifest
+        if: steps.tip.outputs.current == 'true'
         # 归档脚本与远端替换继续要求 deploy/production.dependencies.env 存在；
         # 在 runner 上从 Repository secrets/variables 物化，仓库本体不再携带。
         env:
@@ -751,6 +842,7 @@ jobs:
           test -s deploy/production.dependencies.env
 
       - name: Generate backend runtime source manifest
+        if: steps.tip.outputs.current == 'true'
         # The manifest is generated from Git objects at the exact workflow SHA,
         # never from an arbitrary dirty worktree. It is packaged into the
         # deployment archive below so the existing archive digest binds it.
@@ -769,6 +861,7 @@ jobs:
           echo "runtime source manifest sha256: $(sha256sum deploy/runtime-source-manifest.json | awk '{print $1}') (commit ${GITHUB_SHA})"
 
       - name: Upload source to server
+        if: steps.tip.outputs.current == 'true'
         timeout-minutes: 10
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
@@ -832,6 +925,8 @@ jobs:
           REMOTE_SOURCE_SWAP
 
       - name: Deploy over SSH
+        id: release
+        if: steps.tip.outputs.current == 'true'
         timeout-minutes: 60
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
@@ -900,7 +995,10 @@ jobs:
     # continue-on-error），且未列入 report 的结果聚合。分支推送不触发部署
     # 工作流（on.push 仅 nano-ontoprompt），PR 合并才随正常流程生效。
     needs: [changes, verify-backend]
-    if: ${{ always() && needs.changes.outputs.run_backend == 'true' && needs.verify-backend.result != 'skipped' }}
+    if: ${{ !cancelled() && needs.changes.outputs.run_backend == 'true' && needs.verify-backend.result != 'skipped' }}
+    concurrency:
+      group: deployment-test-durations-refresh
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: 10
     continue-on-error: true
@@ -965,47 +1063,52 @@ jobs:
 
   report:
     if: ${{ always() }}
-    needs: [changes, verify-backend, verify-frontend, verify-gates, verify-docker-build, deploy]
+    needs: [changes, verify-backend, verify-frontend-static, verify-frontend-build, verify-frontend-e2e, verify-gates, verify-docker-build, deploy]
     runs-on: ubuntu-latest
     steps:
       - name: Publish deployment result
         uses: actions/github-script@v7
+        env:
+          JOBS: ${{ toJSON(needs) }}
         with:
           script: |
-            const changesResult = '${{ needs.changes.result }}'
-            const runBackend = '${{ needs.changes.outputs.run_backend }}'
-            const runFrontendTests = '${{ needs.changes.outputs.run_frontend_tests }}'
-            const runFrontendBuild = '${{ needs.changes.outputs.run_frontend_build }}'
-            const runDocker = '${{ needs.changes.outputs.run_docker }}'
-            const runDeploy = '${{ needs.changes.outputs.run_deploy }}'
-            const results = {
-              'verify-backend': '${{ needs.verify-backend.result }}',
-              'verify-frontend': '${{ needs.verify-frontend.result }}',
-              'verify-gates': '${{ needs.verify-gates.result }}',
-              'verify-docker-build': '${{ needs.verify-docker-build.result }}',
-              deploy: '${{ needs.deploy.result }}',
+            const jobs = JSON.parse(process.env.JOBS)
+            const flags = jobs.changes.outputs ?? {}
+            const required = {
+              'verify-gates': true,
+              'verify-backend': flags.run_backend === 'true',
+              'verify-frontend-static': flags.run_frontend_tests === 'true',
+              'verify-frontend-build': flags.run_frontend_build === 'true',
+              'verify-frontend-e2e': flags.run_frontend_tests === 'true',
+              'verify-docker-build': flags.run_docker === 'true',
             }
-            const frontendNeeded = runFrontendTests === 'true' || runFrontendBuild === 'true'
-            const succeeded = changesResult === 'success'
-              && results['verify-gates'] === 'success'
-              && (runBackend !== 'true' || results['verify-backend'] === 'success')
-              && (!frontendNeeded || results['verify-frontend'] === 'success')
-              && (runDocker !== 'true' || results['verify-docker-build'] === 'success')
-              && (runDeploy === 'true'
-                ? results.deploy === 'success'
-                : results.deploy === 'skipped')
-            const summary = Object.entries(results).map(([k, v]) => `${k}=${v}`).join(', ')
+            const verified = jobs.changes.result === 'success'
+              && ['run_backend', 'run_frontend_tests', 'run_frontend_build', 'run_docker', 'run_deploy']
+                .every(flag => ['true', 'false'].includes(flags[flag]))
+              && Object.entries(required).every(([id, needed]) => !needed || jobs[id].result === 'success')
+            const deploy = jobs.deploy
+            let description
+            if (verified && flags.run_deploy === 'false' && deploy.result === 'skipped') {
+              description = 'Verification succeeded (no deployment needed)'
+            } else if (verified && flags.run_deploy === 'true' && deploy.result === 'success') {
+              if (deploy.outputs.release_result === 'success') {
+                description = 'Production deployment succeeded'
+              } else if (deploy.outputs.superseded === 'true') {
+                description = 'Verification succeeded (superseded; not deployed)'
+              }
+            }
+            const summary = Object.entries(jobs).map(([id, job]) => `${id}=${job.result}`).join(', ')
+            const failing = Object.entries(jobs)
+              .filter(([id, job]) => job.result !== 'success' && (id in required ? required[id] : true))
+              .map(([id, job]) => `${id}=${job.result}`)
+              .join(', ')
             await github.rest.repos.createCommitStatus({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
+              ...context.repo,
               sha: context.sha,
-              state: succeeded ? 'success' : 'failure',
+              state: description ? 'success' : 'failure',
               context: 'openontology/deploy',
-              description: succeeded
-                ? 'Verification and deployment succeeded'
-                : summary.slice(0, 140),
+              description: description || (failing || 'No release result recorded').slice(0, 140),
               target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
             })
-            if (!succeeded) {
-              core.setFailed(summary)
-            }
+            if (description) core.notice(description)
+            else core.setFailed(summary)

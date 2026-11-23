@@ -5,21 +5,25 @@
 当前生产部署由 `.github/workflows/deploy-nano-ontoprompt.yml` 管理：
 
 - push 到 `nano-ontoprompt`；
-- 手工 `workflow_dispatch`。只有已证明所有持久存储为空的首次安装，才勾选
-  `bootstrap_production_env`；普通发布保持未勾选。
+- 在 `nano-ontoprompt` 上手工执行 `workflow_dispatch`。只有已证明所有持久存储为空的
+  首次安装，才勾选 `bootstrap_production_env`；普通发布保持未勾选。
 
 目录治理和功能开发必须通过功能分支与 PR，不得直接向该分支试错。
 
 ## 当前流程
 
-改动先经 `changes` 作业按家族分类（`scripts/ci/classify-deploy-changes.sh`）。
-这是粗粒度、不确定则全量的分流，不是按文件增量跑单测。手工触发、空
-diff、未知路径、rename 源路径，以及改到分类器或本工作流时始终全量。文档
-与配置中心只跑卫生门禁；纯测试源码跑对应测试但不上线；时长表跑后端回归
-但不上线。Compose、`deploy-prod.sh` 和物化脚本与 `.env.example` 一样会跑
-后端生产配置回归并部署。只改后端产品代码时仍构建前端 `dist` 并部署，但
-跳过离线 Playwright；只改前端产品代码时跳过后端六分片。文档/卫生门禁始终
-运行：
+`changes` 作业使用 `scripts/ci/classify-deploy-changes.sh` 按改动家族选择门禁。
+只有上一笔推送已确认部署成功或确认无需部署时，才按本次推送的 diff 分流。
+上一笔仍在验证、失败、被取代，或者状态无法确认时，执行全量验证，覆盖尚未发布
+的变更。手工触发、空 diff、未知路径及分类器或部署工作流有变动时同样全量。
+路径改名同时检查源路径和目标路径。
+
+基线已确认时，文档与配置中心只跑公共门禁；纯测试源码与时长表跑对应测试，
+不上线。后端和部署基础设施改动走后端回归，前端产品改动走前端回归，两条路径
+都会产出前端 `dist` 并部署。不同推送的验证可以同时执行。通过全部适用门禁后，
+部署作业进入独立队列，正在运行的部署不会被新推送取消。获得锁后，作业核对
+`nano-ontoprompt` 最新提交。已被新运行取代的提交会明确标为未发布，分支状态
+无法确认时发布失败。文档与仓库卫生门禁始终运行。
 
 1. 使用 Python 3.12 和各自 `uv.lock` 并行执行后端（pytest-xdist 多进程 +
    pytest-split 按已记录时长均衡分片，分片数以该 workflow 的 matrix 定义
@@ -29,9 +33,9 @@ diff、未知路径、rename 源路径，以及改到分类器或本工作流时
 3. 使用从 Repository secrets/variables 物化的生产依赖清单验证
    PostgreSQL、Redis、Neo4j、MinIO、n8n 和 Chromium CDP 配置；
 4. 执行文档链接、目录索引与仓库卫生守卫；
-5. 执行前端单元测试、feature boundary、E2E 分类、lint、生产构建和离线
-   Playwright 回归；通过门禁的 `frontend/dist` 作为本次部署的静态产物
-   上传。生产构建同时烧入 HTTPS 入口（`VITE_HTTPS_UPGRADE_HOST/PORT`，
+5. 前端静态门禁和两个独立的 mocked Playwright 分片与生产构建并行。每个
+   分片在独立 runner 上以单 worker 执行，并上传自己的测试证据。生产构建
+   上传同一提交的 `frontend/dist`，同时烧入 HTTPS 入口（`VITE_HTTPS_UPGRADE_HOST/PORT`，
    取自 `PROD_PUBLIC_TLS_IP` / `PROD_PUBLIC_HTTPS_PORT` 变量，缺省
    64.83.14.139:8443）：SPA 在同主机普通 HTTP 页面启动时自动跳转到该
    入口，解锁麦克风等浏览器安全上下文能力；localhost、局域网 IP 与

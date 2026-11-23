@@ -47,10 +47,7 @@ if grep -q 'StrictHostKeyChecking=no' "$DEPLOY_WORKFLOW"; then
   printf 'deployment workflow must not bypass SSH host-key verification\n' >&2
   exit 1
 fi
-if ! grep -Fq 'cancel-in-progress: false' "$DEPLOY_WORKFLOW"; then
-  printf 'deployment workflow must queue rather than cancel an in-flight migration\n' >&2
-  exit 1
-fi
+node "$SCRIPT_DIR/test-deploy-workflow.mjs"
 if ! grep -Fq 'bash scripts/ci/classify-deploy-changes.sh --stdin' "$DEPLOY_WORKFLOW" \
   || ! grep -Fq 'bash scripts/ci/classify-deploy-changes.sh --full' "$DEPLOY_WORKFLOW"; then
   printf 'deployment workflow must classify push paths with the tested script\n' >&2
