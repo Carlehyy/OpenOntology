@@ -532,17 +532,18 @@ Multica 是超级助手的外部任务/智能体集成（每用户自配模式�
   http(s) origin 且浏览器可达公网 host（后端启动校验拒绝 loopback/
   localhost）；`MULTICA_DEFAULT_BASE_URL` 允许内网 origin（bundled 部署
   即 compose 内网地址）。WEB_URL 的取值按默认集指向的 Multica 分两种
-  契约（与 `KANEO_WEB_URL` 必须等于 `PUBLIC_TLS_IP` + `KANEO_HTTPS_PORT`
-  同构）：
+  契约：
   - **bundled 栈**（BASE_URL 为推导值或显式的 `http://multica:8080`）：
-    本部署对它发布的公开 Web 入口只有 multica-gateway，因此 WEB_URL
-    **始终**是 `PUBLIC_TLS_IP` + `MULTICA_HTTPS_PORT`（默认 8446）的推导
-    origin。服务器 `.env` 里与推导值不一致的存量值（手工填错或迁移遗留）
-    会在部署时被纠正并记一行 `replaced MULTICA_DEFAULT_WEB_URL ...` 日志
-    ——否则平台默认卡的入口会一直指向不可达主机。
+    WEB_URL 留空时推导为 multica-gateway 的公开 origin，即
+    `PUBLIC_TLS_IP` + `MULTICA_HTTPS_PORT`（默认 8446）——与
+    `WEKNORA_WEB_URL`/`KANEO_WEB_URL` 的推导同构，也是本部署对 bundled
+    栈发布的公开 Web 入口。显式值一律保留（清单下发的值必须原样落到
+    `.env`；自备反代的部署靠它保留自己的 origin）；与网关 origin 不一致
+    时部署日志记一行 `warning: MULTICA_DEFAULT_WEB_URL differs ...`，
+    提醒核对该入口是否可达（平台默认卡的链接指向它）。
   - **外部 Multica**（BASE_URL 指向别处）：平台无从推导其 Web 入口，
-    显式 WEB_URL 原样保留；缺失时不代写，由 all-or-nothing 校验以 4/5
-    拒绝。
+    显式 WEB_URL 原样保留；缺失时不代写（更不会套用 bundled 网关地址），
+    由 all-or-nothing 校验以 4/5 拒绝。
 
 bundled 官方栈（`MULTICA_ENABLED` 留空/true 均启用，默认；仅显式 `false`
 关闭，关闭只停 bundled 容器、不删卷，外部 Multica 仍可配合五项默认值使用）：
