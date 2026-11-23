@@ -90,6 +90,7 @@ def _create_custom(session, **overrides):
     body = MulticaProfileCreate(
         name=overrides.get("name", "团队实例"),
         base_url=overrides.get("base_url", "http://127.0.0.1:8080"),
+        web_url=overrides.get("web_url", "http://127.0.0.1:18100"),
         workspace_id=overrides.get("workspace_id", "ws-1"),
         workspace_name=overrides.get("workspace_name", "My Workspace"),
         token=overrides.get("token", "mul-token"),
@@ -127,6 +128,7 @@ def test_create_profile_is_inactive_revision_one_and_never_echoes_token(session)
     assert view.kind == "custom" and view.is_active is False
     assert view.revision == 1 and view.token_set is True
     assert view.enabled is True and view.base_url == "http://127.0.0.1:8080"
+    assert view.web_url == "http://127.0.0.1:18100"
     payload = view.model_dump()
     assert "token" not in payload and "token_encrypted" not in payload
 
@@ -136,6 +138,20 @@ def test_create_profile_requires_token_to_enable_and_validates_url(session):
         _create_custom(session, token=None, enabled=True)
     with pytest.raises(multica_client.MulticaClientError):
         _create_custom(session, base_url="ftp://multica.local")
+
+
+def test_update_profile_web_url_is_display_only_and_validated(session):
+    profile = _create_custom(session)
+    revision = _current_revision(session, profile.id)
+    updated = multica_service.update_profile(session, "user-1", profile.id, MulticaProfileUpdate(
+        web_url="https://multica.example.com:8446/",
+    ))
+    assert updated.web_url == "https://multica.example.com:8446"
+    assert _current_revision(session, profile.id).id == revision.id
+    with pytest.raises(multica_client.MulticaClientError, match="工作台地址"):
+        multica_service.update_profile(session, "user-1", profile.id, MulticaProfileUpdate(
+            web_url="javascript:alert(1)",
+        ))
 
 
 def test_update_profile_appends_immutable_revision_and_keeps_blank_token(session):

@@ -602,6 +602,8 @@ class MulticaConfigUpdate(BaseModel):
 class MulticaProfileCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     base_url: str = Field(min_length=1, max_length=500)
+    # 浏览器可达的原生 Multica Web origin；可以与 API 地址不同
+    web_url: str | None = Field(default=None, max_length=500)
     workspace_id: str = Field(min_length=1, max_length=100)
     # 工作区显示名（纯展示用途，测试连接时自动回填）
     workspace_name: str | None = Field(default=None, max_length=200)
@@ -621,10 +623,12 @@ class MulticaProfileCreate(BaseModel):
 
 
 class MulticaProfileUpdate(BaseModel):
-    # 全部可选：缺省/None 表示不修改；token 留空/缺省表示保留已存凭据
-    # （永不回显）；内容变化追加新 revision，旧 revision 不可变
+    # 缺省表示不修改；token 留空表示保留已存凭据（永不回显）。
+    # API 地址、工作区、凭据或启用状态变化时追加不可变 revision。
     name: str | None = Field(default=None, min_length=1, max_length=100)
     base_url: str | None = Field(default=None, min_length=1, max_length=500)
+    # None 只在请求显式提供时清除已保存的 Web origin
+    web_url: str | None = Field(default=None, max_length=500)
     workspace_id: str | None = Field(default=None, min_length=1, max_length=100)
     workspace_name: str | None = Field(default=None, max_length=200)
     token: str | None = Field(default=None, max_length=500)
@@ -635,7 +639,7 @@ class MulticaProfileUpdate(BaseModel):
     def strip_required_fields(cls, value: str | None) -> str | None:
         return None if value is None else str(value).strip()
 
-    @field_validator("name", "token", "workspace_name", mode="before")
+    @field_validator("name", "token", "workspace_name", "web_url", mode="before")
     @classmethod
     def strip_optional_fields(cls, value: str | None) -> str | None:
         return None if value is None else str(value).strip() or None

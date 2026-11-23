@@ -512,6 +512,9 @@ class SuperAssistantMulticaProfile(Base):
     # custom | platform_default
     kind: Mapped[str] = mapped_column(String(20), nullable=False, default="custom")
     builtin_key: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # Browser-reachable Multica Web origin. Display-only: it is deliberately
+    # outside immutable revisions and execution source digests.
+    web_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)

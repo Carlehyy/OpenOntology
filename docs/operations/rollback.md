@@ -55,6 +55,12 @@ Multica 原生管理界面吊销凭据。
 未决调用时，降级会拒绝而非丢弃数据。已正常使用新配置后，回退到迁移前版本
 应恢复升级前的平台 PostgreSQL 与对应加密密钥，并核对上游任务和 PAT 状态。
 
+迁移 `0155_multica_profile_web_url` 为自定义 Multica 配置增加独立的工作台地址
+（`web_url`，仅用于浏览器入口，不进入 revision 或任务来源）。降级直接删除该列：
+管理员手填的、与 API origin 不同的工作台地址会丢失且无法再推导，重新升级只回填
+得出 API origin 的行；回退到该迁移之前的版本前，如需保留这些地址，请先在
+「能力拓展」中记录各配置的工作台地址。
+
 Grafana 是平台 fail-closed 强依赖（随平台 Compose 启动，无独立公网入口）：
 回滚目标是本接入版本时，部署会先确认 Grafana 在本次部署前是否已运行
 （`compose ps --status running -q grafana`；查询失败即部署非零退出，不把

@@ -285,6 +285,79 @@ def test_upgrade_backfills_legacy_rows_and_keeps_disabled_data(tmp_path, monkeyp
     assert legacy_by_owner["user-3"][1] is None
 
 
+def test_web_url_migration_adds_column_and_backfills_current_origin(tmp_path, monkeypatch):
+    db_path = tmp_path / "multica-profile-web-url.db"
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    cfg = _alembic_config(_backend(), db_path)
+    _create_users_table(db_path)
+    _create_legacy_config_table(db_path)
+    _seed_legacy_row(db_path, "user-1", base_url="http://api.example.com:8080/v1",
+                     workspace_id="ws-1", token_encrypted="cipher-1", enabled=True)
+    command.stamp(cfg, "0153_weknora_operations_merge")
+    command.upgrade(cfg, "0154_multica_profiles")
+    command.upgrade(cfg, "0155_multica_profile_web_url")
+
+    assert "web_url" in _columns(db_path, _PROFILES)
+    assert _query(
+        "SELECT web_url FROM super_assistant_multica_profiles WHERE owner_id = 'user-1'",
+        db_path,
+    ) == [("http://api.example.com:8080",)]
+
+
+def test_web_url_migration_rerun_and_round_trip(tmp_path, monkeypatch):
+    db_path = tmp_path / "multica-profile-web-url-round-trip.db"
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    cfg = _alembic_config(_backend(), db_path)
+    _create_users_table(db_path)
+    _create_legacy_config_table(db_path)
+    _seed_legacy_row(db_path, "user-1", base_url="http://api.example.com:8080/v1",
+                     workspace_id="ws-1", token_encrypted="cipher-1", enabled=True)
+    command.stamp(cfg, "0153_weknora_operations_merge")
+    command.upgrade(cfg, "0154_multica_profiles")
+    command.upgrade(cfg, "0155_multica_profile_web_url")
+    # 管理员改过的入口，以及一条 API 地址解析不出 origin 的自定义配置
+    _execute(
+        "UPDATE super_assistant_multica_profiles SET web_url ="
+        " 'https://web.example.test:9443' WHERE owner_id = 'user-1'",
+        db_path,
+    )
+    _mutation_extra_profile(db_path)
+    _execute(
+        "INSERT INTO super_assistant_multica_profile_revisions"
+        " (id, profile_id, revision_no, base_url, workspace_id, workspace_name,"
+        " enabled, created_at)"
+        " VALUES ('revision-unparseable', 'profile-extra', 1, 'not a url',"
+        " 'ws-2', 'Extra', 1, '2026-11-18 00:00:00')",
+        db_path,
+    )
+
+    def web_urls() -> list[tuple[str, str | None]]:
+        return _query(
+            "SELECT r.base_url, p.web_url FROM super_assistant_multica_profiles p"
+            " JOIN super_assistant_multica_profile_revisions r"
+            " ON r.profile_id = p.id AND r.retired_at IS NULL"
+            " ORDER BY r.base_url",
+            db_path,
+        )
+
+    # 重复执行：已保存的值不被覆盖，解析不出的行保持 NULL 且迁移不中止
+    command.upgrade(cfg, "head")
+    assert web_urls() == [
+        ("http://api.example.com:8080/v1", "https://web.example.test:9443"),
+        ("not a url", None),
+    ]
+
+    # 降级丢弃手填值；再次升级只回填得出 origin 的行
+    command.downgrade(cfg, "0154_multica_profiles")
+    assert "web_url" not in _columns(db_path, _PROFILES)
+    command.upgrade(cfg, "head")
+    assert _version(db_path) == "0155_multica_profile_web_url"
+    assert web_urls() == [
+        ("http://api.example.com:8080/v1", "http://api.example.com:8080"),
+        ("not a url", None),
+    ]
+
+
 def test_upgrade_is_idempotent_with_real_backfilled_row(tmp_path, monkeypatch):
     db_path = tmp_path / "multica-profiles-idempotent.db"
     monkeypatch.delenv("DATABASE_URL", raising=False)
@@ -526,9 +599,9 @@ def test_downgrade_rejects_unrepresentable_state_without_ddl(
     assert _version(db_path) == "0154_multica_profiles"
 
 
-def test_latest_head_remains_0154(tmp_path, monkeypatch):
+def test_latest_head_is_0155(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     cfg = _alembic_config(_backend(), tmp_path / "head-check.db")
     heads = ScriptDirectory.from_config(cfg).get_heads()
     assert heads == [LATEST_HEAD]
-    assert LATEST_HEAD == "0154_multica_profiles"
+    assert LATEST_HEAD == "0155_multica_profile_web_url"
