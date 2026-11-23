@@ -48,15 +48,59 @@ export function Modal({
 }: ModalProps) {
   const titleId = React.useId()
   const descriptionId = React.useId()
+  const panelRef = React.useRef<HTMLElement | null>(null)
+  // 关闭回调与禁关闭态经 ref 读取：父组件重渲染传入新的内联函数时，
+  // 不应重新执行焦点/滚动锁 effect（否则会把焦点拉回弹窗首控件）。
+  const onCloseRef = React.useRef(onClose)
+  const disableCloseRef = React.useRef(disableClose)
+  React.useEffect(() => {
+    onCloseRef.current = onClose
+    disableCloseRef.current = disableClose
+  })
 
+  // 焦点管理：打开时初始焦点落入弹窗（[data-autofocus] 优先，否则首个
+  // 可聚焦元素），Tab 在弹窗内循环，Esc 关闭；关闭后焦点归还触发元素。
+  // 打开期间锁定背景滚动。仅在开合时执行。
   React.useEffect(() => {
     if (!open) return undefined
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const panel = panelRef.current
+    const focusables = () => Array.from(
+      panel?.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ) ?? [],
+    ).filter(element => element.offsetParent !== null || element === document.activeElement)
+    const initial = panel?.querySelector<HTMLElement>('[data-autofocus]') ?? focusables()[0]
+    if (initial) initial.focus()
+    else panel?.focus()
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !disableClose) onClose()
+      if (event.key === 'Escape' && !disableCloseRef.current) {
+        onCloseRef.current()
+        return
+      }
+      if (event.key !== 'Tab') return
+      const items = focusables()
+      if (!items.length) return
+      const first = items[0]
+      const last = items[items.length - 1]
+      const active = document.activeElement
+      if (event.shiftKey && (active === first || !panel?.contains(active))) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault()
+        first.focus()
+      }
     }
     window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [disableClose, onClose, open])
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      document.body.style.overflow = previousOverflow
+      previouslyFocused?.focus()
+    }
+  }, [open])
 
   if (!open) return null
 
@@ -71,6 +115,7 @@ export function Modal({
         aria-hidden="true"
       />
       <section
+        ref={panelRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby={title ? titleId : undefined}
@@ -169,7 +214,7 @@ export function ConfirmModal({
       headerIcon={danger
         ? <AlertTriangle size={19} className="text-[var(--color-danger)]" />
         : warning
-          ? <AlertTriangle size={19} className="text-amber-600" />
+          ? <AlertTriangle size={19} className="text-[var(--color-warning)]" />
           : <Info size={19} className="text-[var(--color-nav-bg)]" />}
       footer={(
         <>
@@ -178,7 +223,6 @@ export function ConfirmModal({
             variant={danger ? 'danger' : 'default'}
             onClick={onConfirm}
             loading={loading}
-            className={danger ? 'shadow-sm shadow-red-900/10' : undefined}
           >
             {confirmText}
           </Button>
@@ -191,7 +235,7 @@ export function ConfirmModal({
           danger
             ? 'border-[var(--color-danger-bg)] bg-[var(--color-danger-bg)] text-[var(--color-danger)]'
             : warning
-              ? 'border-amber-200 bg-amber-50 text-amber-800'
+              ? 'border-[var(--color-warning-bg)] bg-[var(--color-warning-bg)] text-[var(--color-warning)]'
               : 'border-[var(--color-nav-light)] bg-[var(--color-nav-light)] text-[var(--color-text-secondary)]',
         )}>
           {description}
