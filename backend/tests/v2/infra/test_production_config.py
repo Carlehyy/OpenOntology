@@ -1496,19 +1496,35 @@ def test_deploy_derives_bundled_redis_requirepass_from_client_url(tmp_path):
     assert password not in result.stdout + result.stderr
 
 
-def test_deploy_derives_multica_default_web_url_from_public_tls_ip(tmp_path):
-    """五值默认集只缺 WEB_URL 时按 PUBLIC_TLS_IP + MULTICA_HTTPS_PORT 推导
-    bundled multica-gateway 的公开 TLS origin（与 WEKNORA/KANEO 同构）。"""
+_MULTICA_DEFAULT_VALUES = (
+    "MULTICA_DEFAULT_WORKSPACE_ID=11111111-1111-1111-1111-111111111111\n"
+    "MULTICA_DEFAULT_WORKSPACE_NAME=平台默认工作区\n"
+    "MULTICA_DEFAULT_PAT=synthetic-multica-pat-0123456789\n"
+)
+
+
+def _write_multica_default_env(tmp_path, *assignments: str) -> None:
+    """以 .env.example 为底写入默认集输入。`KEY=VALUE` 就地替换同名行（模板
+    已有该键时），保证 .env 每个键只有一行——脚本按键更新首个匹配行，
+    追加重复键会让读回结果与脚本实际读到的值不一致。"""
     shutil.copy(ROOT / ".env.example", tmp_path / ".env.example")
-    shutil.copy(ROOT / ".env.example", tmp_path / ".env")
-    (tmp_path / ".env").write_text(
-        (tmp_path / ".env").read_text(encoding="utf-8")
-        + "PUBLIC_TLS_IP=203.0.113.10\n"
-        + "MULTICA_DEFAULT_WORKSPACE_ID=11111111-1111-1111-1111-111111111111\n"
-        + "MULTICA_DEFAULT_WORKSPACE_NAME=平台默认工作区\n"
-        + "MULTICA_DEFAULT_PAT=synthetic-multica-pat-0123456789\n",
-        encoding="utf-8",
-    )
+    lines = (ROOT / ".env.example").read_text(encoding="utf-8").splitlines()
+    for assignment in ("PUBLIC_TLS_IP=203.0.113.10",
+                       *_MULTICA_DEFAULT_VALUES.splitlines(), *assignments):
+        key = assignment.split("=", 1)[0]
+        index = next((i for i, line in enumerate(lines)
+                      if line.startswith(f"{key}=")), None)
+        if index is None:
+            lines.append(assignment)
+        else:
+            lines[index] = assignment
+    (tmp_path / ".env").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_deploy_derives_multica_default_web_url_from_public_tls_ip(tmp_path):
+    """bundled 默认集只缺 WEB_URL 时按 PUBLIC_TLS_IP + MULTICA_HTTPS_PORT 推导
+    multica-gateway 的公开 TLS origin（与 WEKNORA/KANEO 同构）。"""
+    _write_multica_default_env(tmp_path)
 
     result = _run_deploy_validation(tmp_path)
 
@@ -1522,18 +1538,34 @@ def test_deploy_derives_multica_default_web_url_from_public_tls_ip(tmp_path):
     )
 
 
-def test_deploy_preserves_explicit_multica_default_web_url(tmp_path):
-    """显式 WEB_URL 一律尊重：不按 PUBLIC_TLS_IP 改写运维已给的 origin。"""
-    shutil.copy(ROOT / ".env.example", tmp_path / ".env.example")
-    shutil.copy(ROOT / ".env.example", tmp_path / ".env")
-    (tmp_path / ".env").write_text(
-        (tmp_path / ".env").read_text(encoding="utf-8")
-        + "PUBLIC_TLS_IP=203.0.113.10\n"
-        + "MULTICA_DEFAULT_WEB_URL=https://multica.example.com\n"
-        + "MULTICA_DEFAULT_WORKSPACE_ID=11111111-1111-1111-1111-111111111111\n"
-        + "MULTICA_DEFAULT_WORKSPACE_NAME=平台默认工作区\n"
-        + "MULTICA_DEFAULT_PAT=synthetic-multica-pat-0123456789\n",
-        encoding="utf-8",
+def test_deploy_replaces_stale_multica_default_web_url_for_bundled_stack(
+    tmp_path,
+):
+    """bundled 栈只经 multica-gateway 对外发布：服务器 .env 里遗留的、与推导
+    origin 不一致的 WEB_URL（手工填错或迁移遗留）必须被纠正，而不是因为
+    “已有值”而永久保留——否则平台默认卡的入口持续指向不可达主机。"""
+    _write_multica_default_env(
+        tmp_path, "MULTICA_DEFAULT_WEB_URL=https://multica.stale.example")
+
+    result = _run_deploy_validation(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    generated = _read_env(tmp_path / ".env")
+    assert generated["MULTICA_DEFAULT_WEB_URL"] == "https://203.0.113.10:8446"
+    assert "replaced MULTICA_DEFAULT_WEB_URL with the bundled multica-gateway" in (
+        result.stdout
+    )
+
+
+def test_deploy_preserves_explicit_multica_default_web_url_for_external_stack(
+    tmp_path,
+):
+    """默认集指向外部 Multica 时平台无从推导其 Web 入口：显式 WEB_URL 原样
+    保留，不按 PUBLIC_TLS_IP 改写。"""
+    _write_multica_default_env(
+        tmp_path,
+        "MULTICA_DEFAULT_BASE_URL=https://multica.example.com",
+        "MULTICA_DEFAULT_WEB_URL=https://multica.example.com",
     )
 
     result = _run_deploy_validation(tmp_path)
@@ -1545,6 +1577,27 @@ def test_deploy_preserves_explicit_multica_default_web_url(tmp_path):
         "configured MULTICA_DEFAULT_WEB_URL from PUBLIC_TLS_IP"
         not in result.stdout
     )
+    assert "replaced MULTICA_DEFAULT_WEB_URL" not in result.stdout
+
+
+def test_deploy_requires_explicit_web_url_for_external_multica_default(
+    tmp_path,
+):
+    """外部 Multica 缺 WEB_URL 时不得拿 bundled 网关地址顶替：保持 4/5 并由
+    all-or-nothing 校验显式拒绝。"""
+    _write_multica_default_env(
+        tmp_path, "MULTICA_DEFAULT_BASE_URL=https://multica.example.com")
+
+    result = _run_deploy_validation(tmp_path)
+
+    assert result.returncode != 0
+    output = result.stdout + result.stderr
+    assert "MULTICA_DEFAULT_WEB_URL is required when the default points at" in (
+        output
+    )
+    assert "MULTICA_DEFAULT_* must be all set or all empty (found 4/5)" in output
+    # 不得留下推导值：外部 Multica 的 Web 入口只能由运维显式给出。
+    assert _read_env(tmp_path / ".env")["MULTICA_DEFAULT_WEB_URL"] == ""
 
 
 def test_deploy_preserves_external_redis_url_without_binding_local_password(

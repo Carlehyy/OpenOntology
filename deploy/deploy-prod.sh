@@ -1819,25 +1819,39 @@ configure_multica_env() {
       updates+=("MULTICA_DEFAULT_BASE_URL=${base_url}")
       log "configured MULTICA_DEFAULT_BASE_URL from the bundled multica service (official container contract: API on 8080)"
     fi
-    # 浏览器入口 WEB_URL：bundled multica-gateway 已提供公开 HTTPS origin
-    # （MULTICA_HTTPS_PORT，默认 8446），与 WEKNORA/KANEO_WEB_URL 同构地按
-    # PUBLIC_TLS_IP + 端口推导；PUBLIC_TLS_IP 缺失时不代写，交由 validate 的
-    # all-or-nothing fail-closed 显式报错。显式配置一律尊重（可指向自备
-    # TLS 反代或外部 Multica 的 web origin）。
-    if [ -z "$web_url" ]; then
+    # 浏览器入口 WEB_URL 按默认集指向的 Multica 分两种契约（与 KANEO_WEB_URL
+    # 必须等于 PUBLIC_TLS_IP + KANEO_HTTPS_PORT 的规则同构）：
+    #  - bundled 栈（BASE_URL 为推导值或显式的官方内网 origin）：本部署对它
+    #    发布的公开 Web 入口只有 multica-gateway，因此 WEB_URL 始终取
+    #    PUBLIC_TLS_IP + MULTICA_HTTPS_PORT 的推导值。已存在的不同取值（手工
+    #    填错或迁移遗留的地址）一并纠正，不再“为空才推导”——否则旧地址会
+    #    永久留在服务器 .env 里，平台默认卡的入口持续指向不可达主机。
+    #  - 外部 Multica（BASE_URL 指向别处）：平台无从得知其 Web 入口，显式值
+    #    一律尊重；缺失时不代写，交由 validate 的 all-or-nothing 拒绝。
+    bundled_web_origin=""
+    if [ "${base_url%/}" = "http://multica:8080" ]; then
       tls_ip="$(env_value PUBLIC_TLS_IP)"
       https_port="$(env_value MULTICA_HTTPS_PORT)"
       https_port="${https_port:-8446}"
       if [ -n "$tls_ip" ]; then
         case "$tls_ip" in
-          *:*) web_url="https://[${tls_ip}]:${https_port}" ;;
-          *) web_url="https://${tls_ip}:${https_port}" ;;
+          *:*) bundled_web_origin="https://[${tls_ip}]:${https_port}" ;;
+          *) bundled_web_origin="https://${tls_ip}:${https_port}" ;;
         esac
-        updates+=("MULTICA_DEFAULT_WEB_URL=${web_url}")
-        log "configured MULTICA_DEFAULT_WEB_URL from PUBLIC_TLS_IP and MULTICA_HTTPS_PORT (bundled multica-gateway)"
-      else
-        log "MULTICA_DEFAULT_WEB_URL is not set and PUBLIC_TLS_IP is empty; set the browser-reachable Multica web origin explicitly so the five-value default can take effect"
       fi
+    fi
+    if [ -n "$bundled_web_origin" ]; then
+      if [ "${web_url%/}" != "$bundled_web_origin" ]; then
+        updates+=("MULTICA_DEFAULT_WEB_URL=${bundled_web_origin}")
+        if [ -n "$web_url" ]; then
+          log "replaced MULTICA_DEFAULT_WEB_URL with the bundled multica-gateway origin derived from PUBLIC_TLS_IP and MULTICA_HTTPS_PORT (the stored value did not match the only public entry this deployment publishes for the bundled stack)"
+        else
+          log "configured MULTICA_DEFAULT_WEB_URL from PUBLIC_TLS_IP and MULTICA_HTTPS_PORT (bundled multica-gateway)"
+        fi
+      fi
+      web_url="$bundled_web_origin"
+    elif [ -z "$web_url" ]; then
+      log "MULTICA_DEFAULT_WEB_URL is required when the default points at an external Multica; set its browser-reachable web origin explicitly so the five-value default can take effect"
     fi
   fi
   # Multica 内网地址允许清单独立于 MCP 清单：未显式配置时按同源补齐，绝不

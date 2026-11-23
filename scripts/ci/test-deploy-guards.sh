@@ -3757,6 +3757,29 @@ grep -Fq 'configured MULTICA_DEFAULT_WEB_URL from PUBLIC_TLS_IP and MULTICA_HTTP
   "$test_dir/multica-missing-web-url.log"
 grep -Fq 'configured MULTICA_DEFAULT_BASE_URL from the bundled multica service' \
   "$test_dir/multica-missing-web-url.log"
+# A stored WEB_URL that does not match the bundled gateway origin (hand-typed
+# or left over from an earlier deployment) is corrected, not preserved: the
+# bundled stack is published only through multica-gateway, so "derive only
+# when empty" would leave an unreachable entry in the default card forever.
+set_test_env_value MULTICA_DEFAULT_WEB_URL https://multica.stale.example.invalid
+if (
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT"
+) >"$test_dir/multica-stale-web-url.log" 2>&1; then
+  :
+else
+  printf 'a stale stored WEB_URL on the bundled default must be corrected, not fail the deployment; log follows\n' >&2
+  cat "$test_dir/multica-stale-web-url.log" >&2
+  exit 1
+fi
+grep -Fq 'replaced MULTICA_DEFAULT_WEB_URL with the bundled multica-gateway origin' \
+  "$test_dir/multica-stale-web-url.log"
+grep -Fxq 'MULTICA_DEFAULT_WEB_URL=https://64.83.14.139:8446' "$test_dir/.env"
 set_test_env_value MULTICA_DEFAULT_WORKSPACE_NAME ""
 set_test_env_value MULTICA_DEFAULT_PAT ""
 set_test_env_value MULTICA_DEFAULT_WORKSPACE_ID ""
@@ -3856,12 +3879,14 @@ if [ -z "$multica_start_msg_line" ] || [ -z "$multica_readiness_msg_line" ] \
   exit 1
 fi
 # bundled 默认地址与独立允许清单按官方 8080 契约推导落 .env；digest pin、
-# loopback 绑定与自动生成的栈密钥一并持久化。
+# loopback 绑定与自动生成的栈密钥一并持久化。WEB_URL 对 bundled 栈始终是
+# multica-gateway 的推导 origin：上面预置的显式值会被纠正（同
+# multica-stale-web-url 场景），不随手工填写保留。
 grep -Fxq 'MULTICA_DEFAULT_BASE_URL=http://multica:8080' "$test_dir/.env"
 grep -Fxq \
   'SUPER_ASSISTANT_MULTICA_INTERNAL_BASE_URLS=http://multica:8080' \
   "$test_dir/.env"
-grep -Fxq 'MULTICA_DEFAULT_WEB_URL=https://multica.example.invalid' "$test_dir/.env"
+grep -Fxq 'MULTICA_DEFAULT_WEB_URL=https://64.83.14.139:8446' "$test_dir/.env"
 multica_core_up_line="$(
   grep -nF 'up -d --remove-orphans' "$multica_success_log.docker" \
     | tail -n1 | cut -d: -f1
