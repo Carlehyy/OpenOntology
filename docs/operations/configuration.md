@@ -531,11 +531,18 @@ Multica 是超级助手的外部任务/智能体集成（每用户自配模式�
 - 生产 `MULTICA_DEFAULT_WEB_URL`（设置时）必须是无凭据/路径/查询的绝对
   http(s) origin 且浏览器可达公网 host（后端启动校验拒绝 loopback/
   localhost）；`MULTICA_DEFAULT_BASE_URL` 允许内网 origin（bundled 部署
-  即 compose 内网地址）。WEB_URL 缺省而其余四值已齐时，部署脚本按
-  `PUBLIC_TLS_IP` + `MULTICA_HTTPS_PORT`（bundled multica-gateway 的公开
-  TLS origin，默认 8446）推导——与 `WEKNORA_WEB_URL`/`KANEO_WEB_URL`
-  同构；`PUBLIC_TLS_IP` 缺失时不代写，由 all-or-nothing 校验显式报错。
-  显式配置一律尊重（可指向自备 TLS 反代或外部 Multica 的 web origin）。
+  即 compose 内网地址）。WEB_URL 的取值按默认集指向的 Multica 分两种
+  契约（与 `KANEO_WEB_URL` 必须等于 `PUBLIC_TLS_IP` + `KANEO_HTTPS_PORT`
+  同构）：
+  - **bundled 栈**（BASE_URL 为推导值或显式的 `http://multica:8080`）：
+    本部署对它发布的公开 Web 入口只有 multica-gateway，因此 WEB_URL
+    **始终**是 `PUBLIC_TLS_IP` + `MULTICA_HTTPS_PORT`（默认 8446）的推导
+    origin。服务器 `.env` 里与推导值不一致的存量值（手工填错或迁移遗留）
+    会在部署时被纠正并记一行 `replaced MULTICA_DEFAULT_WEB_URL ...` 日志
+    ——否则平台默认卡的入口会一直指向不可达主机。
+  - **外部 Multica**（BASE_URL 指向别处）：平台无从推导其 Web 入口，
+    显式 WEB_URL 原样保留；缺失时不代写，由 all-or-nothing 校验以 4/5
+    拒绝。
 
 bundled 官方栈（`MULTICA_ENABLED` 留空/true 均启用，默认；仅显式 `false`
 关闭，关闭只停 bundled 容器、不删卷，外部 Multica 仍可配合五项默认值使用）：
@@ -612,21 +619,26 @@ compose 提供上游 multica-ai/multica **v0.11.0**（commit
 自动播种——默认启用的 bundled 栈是"自动启动、手动初始化"，不是零配置
 可用。管理员手动步骤：
 
-1. 首启后打开 web 入口（生产先建 SSH 隧道或配好 TLS 反代，本地直接
-   `http://localhost:18100`），用邮箱注册首个账号——未配置 RESEND/
-   SMTP 时，验证码打印在 API 容器日志（`docker compose --profile
-   multica logs multica` 中的 `[DEV] Verification code` 行）；生产建议
-   配置邮件后再开放注册并收紧 `MULTICA_ALLOW_SIGNUP`。
+1. 首启后打开 web 入口，用邮箱注册首个账号——生产直接访问
+   multica-gateway（`https://<PUBLIC_TLS_IP>:<MULTICA_HTTPS_PORT>`，默认
+   8446；自签证书需在浏览器信任一次），或建 SSH 隧道走
+   `http://localhost:18100`，本地 compose 直接 `http://localhost:18100`。
+   未配置 RESEND/SMTP 时，验证码打印在 API 容器日志
+   （`docker compose --profile multica logs multica` 中的
+   `[DEV] Verification code` 行）；生产建议配置邮件后再开放注册并收紧
+   `MULTICA_ALLOW_SIGNUP`。
 2. 在 Multica 内创建/选定 workspace，记下其 ID 与名称。
 3. 用该账号铸造 PAT：Multica 原生界面/API（`POST /api/tokens`），或
    官方 CLI `multica login` 指向本部署（浏览器登录流自动 mint PAT）。
-4. 把五项默认值回填服务器 `.env`（或经受控 manifest 物化：vars
-   `PROD_MULTICA_DEFAULT_BASE_URL` / `PROD_MULTICA_DEFAULT_WEB_URL` /
+4. 回填默认值。bundled 部署只需给出 `MULTICA_DEFAULT_WORKSPACE_ID` /
+   `MULTICA_DEFAULT_WORKSPACE_NAME` / `MULTICA_DEFAULT_PAT` 三项（直接写
+   服务器 `.env`，或经受控 manifest 物化：vars
    `PROD_MULTICA_DEFAULT_WORKSPACE_ID` / `PROD_MULTICA_DEFAULT_WORKSPACE_NAME`
-   与 secret `PROD_MULTICA_DEFAULT_PAT`，同样 all-or-nothing）。bundled
-   部署的 `MULTICA_DEFAULT_BASE_URL` 缺省推导为 `http://multica:8080`，
-   `MULTICA_DEFAULT_WEB_URL` 必须显式给出（通常是 TLS 反代的 HTTPS
-   origin）。回填后下一次部署起生产 readiness 门禁 `multica_default`。
+   与 secret `PROD_MULTICA_DEFAULT_PAT`）；
+   `MULTICA_DEFAULT_BASE_URL` 推导为 `http://multica:8080`，
+   `MULTICA_DEFAULT_WEB_URL` 推导为 multica-gateway origin（见上）。指向
+   外部 Multica 时五项都要显式给出。回填后下一次部署起生产 readiness
+   门禁 `multica_default`。
 
 部署脚本启用时校验：三个镜像 digest、JWT/DB 密钥非空且非开发兜底、
 五值 all-or-nothing、PAT ≥8 位且无空白、`MULTICA_WEB_PORT` 端口范围、

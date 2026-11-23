@@ -43,11 +43,13 @@ export function multicaTestStatusMeta(status: MulticaProfile['last_test_status']
   return { label: '未测试', ok: null }
 }
 
-/** 自定义 profile 的 Web 工作台入口：官方自托管栈单源发布，web 容器把
- *  /api/* 服务端代理到后端，服务地址（base_url）的 origin 即浏览器可达的
- *  Web 入口，因此入口 = origin(base_url)，剥掉路径只留协议+主机+端口。
+/** 自定义 profile 的 Web 工作台入口 = 服务地址（base_url）的 origin，剥掉
+ *  路径只留协议+主机+端口。前提是该实例的 Web 与 API 同源（平台 bundled
+ *  multica-gateway、或自建的同源反代：web 容器把 /api/* 服务端代理到后端）；
+ *  按官方默认分端口发布（API 8080 / Web 3000）的实例，这里打开的是 API 端口
+ *  而不是 Web 界面——已知局限，profile 目前没有独立的 Web 入口字段。
  *  仅接受 http(s)；地址缺失或非法返回 null（不渲染外链，不猜测入口）。
- *  平台默认 profile 不走此推导（web_url 由部署显式下发，契约不做推导）。 */
+ *  平台默认 profile 不走此推导（web_url 由部署下发）。 */
 export function multicaCustomWebEntryUrl(profile: Pick<MulticaProfile, 'base_url'>): string | null {
   if (!profile.base_url) return null
   try {
