@@ -1538,12 +1538,12 @@ def test_deploy_derives_multica_default_web_url_from_public_tls_ip(tmp_path):
     )
 
 
-def test_deploy_replaces_stale_multica_default_web_url_for_bundled_stack(
+def test_deploy_keeps_mismatched_multica_default_web_url_for_bundled_stack(
     tmp_path,
 ):
-    """bundled 栈只经 multica-gateway 对外发布：服务器 .env 里遗留的、与推导
-    origin 不一致的 WEB_URL（手工填错或迁移遗留）必须被纠正，而不是因为
-    “已有值”而永久保留——否则平台默认卡的入口持续指向不可达主机。"""
+    """显式值优先于推导：bundled 栈的 WEB_URL 已有显式取值（清单下发或自备
+    反代）时原样保留——清单里的每个值都必须原样落到 .env。与 multica-gateway
+    origin 不一致只在部署日志里告警，提醒核对入口是否可达，不改写。"""
     _write_multica_default_env(
         tmp_path, "MULTICA_DEFAULT_WEB_URL=https://multica.stale.example")
 
@@ -1551,8 +1551,11 @@ def test_deploy_replaces_stale_multica_default_web_url_for_bundled_stack(
 
     assert result.returncode == 0, result.stdout + result.stderr
     generated = _read_env(tmp_path / ".env")
-    assert generated["MULTICA_DEFAULT_WEB_URL"] == "https://203.0.113.10:8446"
-    assert "replaced MULTICA_DEFAULT_WEB_URL with the bundled multica-gateway" in (
+    assert generated["MULTICA_DEFAULT_WEB_URL"] == "https://multica.stale.example"
+    assert "warning: MULTICA_DEFAULT_WEB_URL differs from the bundled multica-gateway origin (https://203.0.113.10:8446)" in (
+        result.stdout
+    )
+    assert "configured MULTICA_DEFAULT_WEB_URL from PUBLIC_TLS_IP" not in (
         result.stdout
     )
 
@@ -1577,7 +1580,7 @@ def test_deploy_preserves_explicit_multica_default_web_url_for_external_stack(
         "configured MULTICA_DEFAULT_WEB_URL from PUBLIC_TLS_IP"
         not in result.stdout
     )
-    assert "replaced MULTICA_DEFAULT_WEB_URL" not in result.stdout
+    assert "warning: MULTICA_DEFAULT_WEB_URL differs" not in result.stdout
 
 
 def test_deploy_requires_explicit_web_url_for_external_multica_default(
