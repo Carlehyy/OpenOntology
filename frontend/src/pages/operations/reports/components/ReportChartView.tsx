@@ -120,7 +120,7 @@ export default function ReportChartView({ config, result }: {
   ]
 
   return (
-    <figure className="my-4 rounded-xl border border-border bg-card p-4" data-testid="report-chart-block">
+    <figure className="rounded-lg border border-[var(--color-border)] bg-card p-4" data-testid="report-chart-block">
       {config.title && (
         <figcaption className="mb-2 text-[13px] font-semibold text-foreground">{config.title}</figcaption>
       )}

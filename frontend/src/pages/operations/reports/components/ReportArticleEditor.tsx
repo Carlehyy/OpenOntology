@@ -85,8 +85,9 @@ export default function ReportArticleEditor({ reportId, article, schema, saving,
   }
 
   return (
-    <section className="flex min-h-0 min-w-0 flex-1 flex-col gap-3" data-testid="report-article-editor" aria-label={'编辑 ' + baseline.title}>
-      <div className="flex flex-wrap items-center gap-2">
+    <section className="flex min-h-0 min-w-0 flex-1 flex-col" data-testid="report-article-editor" aria-label={'编辑 ' + baseline.title}>
+      {/* 头部与接口管理右卡同构：名称、状态、保存与返回；固定不随正文滚动 */}
+      <div className="flex min-h-16 shrink-0 flex-wrap items-center gap-2 border-b border-[var(--color-border)] px-4 py-3">
         <input
           value={title}
           maxLength={240}
@@ -94,12 +95,14 @@ export default function ReportArticleEditor({ reportId, article, schema, saving,
           onChange={event => setTitle(event.target.value)}
           aria-label="文章标题"
           placeholder="文章标题"
-          className="h-9 min-w-48 flex-1 rounded-lg border border-border bg-card px-3 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="h-8 min-w-[180px] max-w-md flex-1 rounded-md border border-[var(--color-border)] bg-card px-3 text-sm font-semibold text-foreground outline-none transition-colors placeholder:text-[var(--color-text-tertiary)] focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
         />
-        <span className="text-xs text-muted-foreground">数据集 {baseline.dataset_name || '—'}</span>
-        <span className={'text-[11px] ' + (dirty ? 'text-[var(--color-warning)]' : 'text-muted-foreground')} aria-live="polite">
-          {dirty ? '有未保存修改' : '已与最新版本一致'}
-        </span>
+        <span className="hidden text-xs text-muted-foreground md:inline">数据来源 <span className="font-mono">{baseline.dataset_name || '—'}</span></span>
+        {dirty ? (
+          <span className="shrink-0 rounded bg-[var(--color-warning-bg)] px-2 py-1 text-xs font-medium text-[var(--color-warning)]" aria-live="polite">有未保存修改</span>
+        ) : (
+          <span className="shrink-0 text-xs text-muted-foreground" aria-live="polite">已与最新版本一致</span>
+        )}
         <Button
           size="sm"
           onClick={() => void save()}
@@ -112,7 +115,7 @@ export default function ReportArticleEditor({ reportId, article, schema, saving,
         <Button size="sm" variant="ghost" disabled={saving} onClick={onCancel} data-testid="report-editor-cancel"><X size={13} /> 返回阅读</Button>
       </div>
 
-      <div className="flex flex-wrap items-center gap-2 border-b border-border pb-3">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--color-border)] px-4 py-2">
         {plan && (
           <Button
             size="sm"
@@ -149,42 +152,53 @@ export default function ReportArticleEditor({ reportId, article, schema, saving,
 
       {mode === 'plan' && plan ? (
         <>
-          {!schema && <Alert variant="info">正在加载资产字段…</Alert>}
-          {aiOpen && schema && (
-            <ReportAIPanel reportId={reportId} datasetId={baseline.dataset_id} datasetName={baseline.dataset_name} columns={schema.columns} plan={plan} onAccept={setPlan} />
-          )}
-          <div className="grid min-w-0 items-start gap-4 xl:grid-cols-2">
-            <ReportPlanEditor plan={plan} columns={schema?.columns ?? []} onChange={setPlan} readOnly={saving || !schema} />
-            <div className="min-w-0 space-y-2 xl:sticky xl:top-3">
-              <p className="text-xs text-muted-foreground">修改后自动试跑；核对结果后点击保存草稿。</p>
-              {previewPlan && (
-                <ReportPlanPreview
-                  reportId={reportId}
-                  datasetId={baseline.dataset_id}
-                  datasetName={baseline.dataset_name}
-                  plan={previewPlan}
-                  autoRun
-                  onSuccess={generated => { setTestedPlan(JSON.stringify(previewPlan)); setGeneratedMarkdown(generated) }}
-                  onInvalidate={() => setTestedPlan('')}
-                />
-              )}
+          <div className="max-h-[45%] shrink-0 space-y-2 overflow-y-auto px-4 pt-3">
+            {!schema && <Alert variant="info">正在加载资产字段…</Alert>}
+            {aiOpen && schema && (
+              <ReportAIPanel reportId={reportId} datasetId={baseline.dataset_id} datasetName={baseline.dataset_name} columns={schema.columns} plan={plan} onAccept={setPlan} />
+            )}
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+            <div className="grid min-w-0 items-start gap-4 xl:grid-cols-2">
+              <ReportPlanEditor plan={plan} columns={schema?.columns ?? []} onChange={setPlan} readOnly={saving || !schema} />
+              <div className="min-w-0 space-y-2 xl:sticky xl:top-0">
+                <p className="text-xs text-muted-foreground">修改后自动试跑；核对结果后即可保存。</p>
+                {previewPlan && (
+                  <ReportPlanPreview
+                    reportId={reportId}
+                    datasetId={baseline.dataset_id}
+                    datasetName={baseline.dataset_name}
+                    plan={previewPlan}
+                    autoRun
+                    onSuccess={generated => { setTestedPlan(JSON.stringify(previewPlan)); setGeneratedMarkdown(generated) }}
+                    onInvalidate={() => setTestedPlan('')}
+                  />
+                )}
+              </div>
             </div>
           </div>
         </>
       ) : (
         <>
-          {plan && <Alert variant="info">保存 Markdown 后，本篇文章将使用高级模式。手动改动正文后无法直接返回可视化搭建。</Alert>}
+          {plan && <div className="shrink-0 px-4 pt-3"><Alert variant="info">保存 Markdown 后，本篇文章将使用高级模式。手动改动正文后无法直接返回可视化搭建。</Alert></div>}
           {preview ? (
-            <div className="min-h-0 flex-1 overflow-y-auto rounded-xl border border-border bg-card px-6 py-4">
+            <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 lg:px-6" data-testid="report-preview-pane">
               <ReportArticleReader reportId={reportId} articleId={baseline.id} title={title.trim() || '（未命名）'} datasetName={baseline.dataset_name} markdown={markdown} preview />
             </div>
           ) : (
-            <>
-              <div className="min-h-[420px] flex-1 overflow-hidden rounded-xl border border-border bg-card" data-testid="report-markdown-editor-shell">
+            // 编辑器撑满右卡剩余高度并内滚：外壳是纵向 flex，CodeMirror 包裹层的
+            // flex-1 才会生效（块级外壳下它只按内容高度展开）。SQL 试跑面板展开时
+            // 在其下方，高度不足则本区整体滚动。
+            <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-4 py-3">
+              <div className="flex min-h-[360px] flex-1 flex-col overflow-hidden rounded-lg border border-[var(--color-border)]" data-testid="report-markdown-editor-shell">
                 <ReportMarkdownEditor value={markdown} onChange={setMarkdown} ariaLabel="报告正文 Markdown 编辑器" />
               </div>
-              {trialOpen && <ReportSqlTrialPanel reportId={reportId} article={baseline} markdown={markdown} schema={schema} onApplyToMarkdown={setMarkdown} />}
-            </>
+              {trialOpen && (
+                <div className="shrink-0">
+                  <ReportSqlTrialPanel reportId={reportId} article={baseline} markdown={markdown} schema={schema} onApplyToMarkdown={setMarkdown} />
+                </div>
+              )}
+            </div>
           )}
         </>
       )}

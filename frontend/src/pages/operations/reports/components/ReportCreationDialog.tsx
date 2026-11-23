@@ -157,7 +157,7 @@ export default function ReportCreationDialog({ reportId, saving, error, onCreate
               <div className="grid items-start gap-4 lg:grid-cols-2">
                 <ReportPlanEditor plan={plan} columns={columns} onChange={setPlan} readOnly={saving} />
                 <div className="min-w-0 space-y-2">
-                  <p className="text-xs text-muted-foreground">点击“查询”预览当前计划，通过后可确认创建。</p>
+                  <p className="text-xs text-muted-foreground">先试跑查询，核对结果后即可创建。</p>
                   <ReportPlanPreview reportId={reportId} datasetId={datasetId} datasetName={selected.name} plan={plan} onSuccess={() => setTestedPlan(fingerprint)} onInvalidate={() => setTestedPlan('')} />
                 </div>
               </div>
