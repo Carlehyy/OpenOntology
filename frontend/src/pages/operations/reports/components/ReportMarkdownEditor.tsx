@@ -30,6 +30,9 @@ export default function ReportMarkdownEditor({ value, onChange, ariaLabel }: {
       value={value}
       onChange={onChange}
       aria-label={ariaLabel}
+      // 不用组件库默认的浅色主题：它写死白底，会盖过 reportEditorTheme 里
+      // 随主题翻转的语义令牌底色，深色模式下变成白底浅字。
+      theme="none"
       extensions={[
         EditorView.lineWrapping,
         keymap.of([indentWithTab]),

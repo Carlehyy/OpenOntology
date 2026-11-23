@@ -34,6 +34,8 @@ export default function ReportSqlEditor({ value, onChange, schema, ariaLabel }: 
       value={value}
       onChange={onChange}
       aria-label={ariaLabel}
+      // 同 ReportMarkdownEditor：禁用组件库写死白底的默认主题，底色交给语义令牌
+      theme="none"
       extensions={[
         EditorView.lineWrapping,
         keymap.of([indentWithTab]),

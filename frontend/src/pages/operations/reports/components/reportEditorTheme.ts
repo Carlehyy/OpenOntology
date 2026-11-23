@@ -4,6 +4,9 @@
  * 取色只用全局语义变量（tokens.css，随 html.dark 翻转）与 CodeMirror
  * GitHub light 观感常量位（--code-syntax-*），不新增硬编码色值；
  * 注释不用斜体（中文字形防糊，与仓库其他编辑器口径一致）。
+ *
+ * 本域编辑器的底色随主题翻转（底色为 var(--card)，CodeMirror 组件须传
+ * theme="none"，否则组件库默认主题写死的白底会盖过来）。
  */
 import { EditorView } from '@codemirror/view'
 import { HighlightStyle, syntaxHighlighting } from '@codemirror/language'
@@ -29,6 +32,15 @@ export const reportEditorTheme = EditorView.theme({
   },
   '.cm-selectionBackground': { backgroundColor: 'var(--accent)' },
   '.cm-cursor': { borderLeftColor: 'var(--ring)' },
+  // 深色模式：--code-syntax-* 是全局的浅色观感常量位，深色下取值不变，落在
+  // 深底上过暗。本域编辑器在 html.dark 下改用随主题翻转的语义令牌——只作用于
+  // 自己的编辑器，不改全局令牌（其它页面的编辑器深色下仍是浅底）。
+  'html.dark &': {
+    '--code-syntax-string': 'var(--color-info)',
+    '--code-syntax-number': 'var(--color-warning)',
+    '--code-syntax-property': 'var(--color-success)',
+    '--code-syntax-comment': 'var(--muted-foreground)',
+  },
 })
 
 export const reportEditorHighlight = syntaxHighlighting(HighlightStyle.define([
