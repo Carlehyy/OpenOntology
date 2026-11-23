@@ -967,10 +967,11 @@ test('智能运营：新建报告册提交真实载荷，自动进入第一篇�
   await expect(page.getByRole('heading', { name: '2026 Q4 平台运营报告', exact: true })).toBeVisible()
   await expect(page.getByRole('dialog')).toHaveCount(0)
 
-  // 返回列表：新报告册卡片出现（真实回读而非假成功）
-  await page.getByTestId('operations-report-book').getByRole('link', { name: '运营报告', exact: true }).click()
+  // 返回列表：新报告册卡片出现（真实回读而非假成功）。限定在列表页内断言——
+  // 路由切换的过渡帧里上一页的标题仍在 DOM 中，全页文本匹配会假通过。
+  await page.getByTestId('operations-report-book').getByRole('link', { name: '返回运营报告列表' }).click()
   await expect(page).toHaveURL(/#\/operations\/reports$/)
-  await expect(page.getByText('2026 Q4 平台运营报告', { exact: true })).toBeVisible()
+  await expect(page.getByTestId('operations-report-list').getByText('2026 Q4 平台运营报告', { exact: true })).toBeVisible()
 })
 
 test('智能运营：多文章目录深链与切换', async ({ page }) => {
@@ -1225,11 +1226,288 @@ test('智能运营：脏稿退出有确认与几何命中，失败保留草稿',
   await markdownEditor.click()
   await page.keyboard.press('ControlOrMeta+End')
   await page.keyboard.type('\n\ndirty again')
-  await page.getByTestId('operations-report-book').getByRole('link', { name: '运营报告', exact: true }).click()
+  await page.getByTestId('operations-report-book').getByRole('link', { name: '返回运营报告列表' }).click()
   await expect(page.getByRole('dialog').filter({ hasText: '放弃未保存的修改？' })).toBeVisible()
-  await page.getByRole('button', { name: '放弃修改' }).click()
+  await page.getByRole('button', { name: '放弃并返回' }).click()
   await expect(page).toHaveURL(/#\/operations\/reports$/)
   expect(records.patchCalls).toHaveLength(0)
+})
+
+test('智能运营：脏稿切换文章先确认，取消保留编辑、确认后真正切换', async ({ page }) => {
+  await mockSession(page, admin)
+  const records = emptyRecords()
+  await mockOperationsReports(page, records)
+  await page.setViewportSize({ width: 1440, height: 900 })
+
+  await page.goto(`/#/operations/reports/${reportId}?article=${article2Id}`)
+  await page.getByTestId('report-edit-article').click()
+  const markdownEditor = page.locator('[data-testid="report-markdown-editor"] .cm-content')
+  await markdownEditor.click()
+  await page.keyboard.press('ControlOrMeta+End')
+  await page.keyboard.type('\n\ndirty switch draft')
+  await expect(page.getByText('有未保存修改')).toBeVisible()
+
+  // 脏稿时其他文章仍可点击，但先弹确认；「继续编辑」留在编辑器
+  await page.getByRole('button', { name: '第 47 周订单趋势', exact: true }).click()
+  const confirmDialog = page.getByRole('dialog').filter({ hasText: '放弃未保存的修改？' })
+  await expect(confirmDialog).toBeVisible()
+  await expect(confirmDialog).toContainText('切换到另一篇文章后，本次修改将丢失。')
+  await confirmDialog.getByRole('button', { name: '继续编辑' }).click()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await expect(page.getByTestId('report-article-editor')).toBeVisible()
+  await expect(markdownEditor).toContainText('dirty switch draft')
+
+  // 再次点击并确认：真正切换到目标文章，未产生任何保存
+  await page.getByRole('button', { name: '第 47 周订单趋势', exact: true }).click()
+  await expect(confirmDialog).toBeVisible()
+  await confirmDialog.getByRole('button', { name: '放弃并切换' }).click()
+  await expect(page.getByTestId('report-article-editor')).toHaveCount(0)
+  await expect(page.getByRole('heading', { name: '第 47 周订单趋势' })).toBeVisible()
+  await expect(page).toHaveURL(new RegExp(`article=${article1Id}$`))
+  expect(records.patchCalls).toHaveLength(0)
+})
+
+test('智能运营：目录搜索过滤文章并一键清除恢复', async ({ page }) => {
+  await mockSession(page, admin)
+  const records = emptyRecords()
+  await mockOperationsReports(page, records)
+  await page.setViewportSize({ width: 1440, height: 900 })
+
+  await page.goto(`/#/operations/reports/${reportId}`)
+  await expect(page.getByTestId('operations-report-book')).toBeVisible()
+  const search = page.getByTestId('report-article-search')
+  await expect(search).toBeVisible()
+
+  // 关键字过滤：目录只剩匹配项，当前阅读不受影响
+  await search.fill('区域')
+  await expect(page.getByRole('button', { name: '区域分布明细', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: '第 47 周订单趋势', exact: true })).toBeHidden()
+  await expect(page.getByRole('button', { name: '失败演示', exact: true })).toBeHidden()
+
+  // 无匹配：显式空态，不静默留白
+  await search.fill('不存在的文章')
+  await expect(page.getByTestId('report-article-search-empty')).toBeVisible()
+  await expect(page.getByText('没有找到匹配的文章')).toBeVisible()
+
+  // 清除搜索：全部恢复
+  await page.getByLabel('清除搜索').click()
+  await expect(search).toHaveValue('')
+  await expect(page.getByRole('button', { name: '第 47 周订单趋势', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: '失败演示', exact: true })).toBeVisible()
+})
+
+test('智能运营：窄屏文章目录抽屉可切换并保持深链', async ({ page }) => {
+  await mockSession(page, admin)
+  const records = emptyRecords()
+  await mockOperationsReports(page, records)
+  await page.setViewportSize({ width: 390, height: 844 })
+
+  await page.goto(`/#/operations/reports/${reportId}`)
+  await expect(page.getByRole('heading', { name: '第 47 周订单趋势' })).toBeVisible()
+  // 窄屏：桌面侧栏隐藏，正文上方提供「文章目录」入口
+  await expect(page.getByTestId('report-article-search')).toBeHidden()
+  const trigger = page.getByTestId('report-article-drawer-trigger')
+  await expect(trigger).toBeVisible()
+
+  await trigger.click()
+  const drawer = page.getByRole('dialog').filter({ hasText: '文章目录' })
+  await expect(drawer).toBeVisible()
+  const second = drawer.getByRole('button', { name: '区域分布明细', exact: true })
+  await expect(second).toBeVisible()
+  await expectTopmost(second)
+
+  // 抽屉内切换：深链更新、抽屉关闭、正文切换成功
+  await second.click()
+  await expect(page.getByRole('heading', { name: '区域分布明细' })).toBeVisible()
+  await expect(page).toHaveURL(new RegExp(`article=${article2Id}$`))
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+})
+
+/** 纯正文长文（无查询）：把右卡正文撑到需要滚动，用于验证贴边全高布局。 */
+function longProseMarkdown() {
+  const sentence = '这是一段用于撑高正文的示例文字，用来验证贴边全高布局下右卡正文区自己滚动。'
+  const sections = ['概述', '区域表现', '渠道结构', '结论与建议'].map((title, index) => [
+    `## ${title}`,
+    '',
+    ...Array.from({ length: 6 }, (_, n) => `${sentence}（第 ${index + 1} 节第 ${n + 1} 段）`),
+    '',
+    ...Array.from({ length: 6 }, (_, n) => `- 要点 ${n + 1}：${sentence}`),
+    '',
+  ].join('\n'))
+  return ['# 长报告', '', ...sections].join('\n')
+}
+
+/** 覆盖单篇文章的正文（GET 回读），其余方法回落到报告域 mock。 */
+async function overrideArticleMarkdown(page: Page, articleId: string, markdown: string) {
+  await page.route(`**/api/v2/operations/reports/${reportId}/articles/${articleId}`, route => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    return json(route, articleFixture(articleId, markdown))
+  })
+}
+
+test('智能运营：贴边全高双卡撑满视口，小节目录只滚动右卡正文', async ({ page }) => {
+  await mockSession(page, admin)
+  const records = emptyRecords()
+  await mockOperationsReports(page, records)
+  await overrideArticleMarkdown(page, article1Id, longProseMarkdown())
+  await page.setViewportSize({ width: 1440, height: 900 })
+
+  await page.goto(`/#/operations/reports/${reportId}`)
+  await expect(page.getByRole('heading', { name: '第 47 周订单趋势' })).toBeVisible()
+
+  // 两卡等高：顶边对齐、底边都落在视口底部附近（容器只留 4px 外边距）；
+  // 正文超出部分由右卡内部滚动承担，而不是把页面撑长。
+  const geometry = await page.evaluate(() => {
+    const rect = (element: Element) => element.getBoundingClientRect()
+    const aside = document.querySelector('aside[aria-label="文章目录"]')!
+    const scroller = document.querySelector('[data-testid="report-article-scroll"]')!
+    return {
+      viewportHeight: window.innerHeight,
+      asideTop: rect(aside).top,
+      asideBottom: rect(aside).bottom,
+      panelTop: rect(scroller.closest('section')!).top,
+      panelBottom: rect(scroller.closest('section')!).bottom,
+      scrollHeight: scroller.scrollHeight,
+      clientHeight: scroller.clientHeight,
+    }
+  })
+  expect(geometry.scrollHeight).toBeGreaterThan(geometry.clientHeight)
+  expect(geometry.viewportHeight - geometry.asideBottom).toBeLessThan(12)
+  expect(geometry.viewportHeight - geometry.panelBottom).toBeLessThan(12)
+  expect(geometry.asideBottom).toBeGreaterThan(geometry.viewportHeight / 2)
+  expect(geometry.panelBottom).toBeGreaterThan(geometry.viewportHeight / 2)
+  expect(Math.abs(geometry.asideTop - geometry.panelTop)).toBeLessThan(2)
+
+  // 小节目录：点击后只滚动右卡正文，目标小节停在正文区顶部（没有被挡住）。
+  // 选中间的小节——末节下方内容不足一屏，滚动到底后无法贴顶，不适合做贴顶断言。
+  const targetOffset = () => page.evaluate(() => {
+    const scroller = document.querySelector('[data-testid="report-article-scroll"]')!
+    const target = [...scroller.querySelectorAll('h3, h4, h5')]
+      .find(heading => heading.textContent?.trim() === '区域表现')
+    return target ? target.getBoundingClientRect().top - scroller.getBoundingClientRect().top : null
+  })
+  const before = await targetOffset()
+  expect(before).not.toBeNull()
+  expect(before!).toBeGreaterThan(300)
+  await page.getByRole('region', { name: '小节目录' }).getByRole('link', { name: '区域表现' }).click()
+  await expect.poll(targetOffset, { message: '目录应把目标小节滚动到右卡正文顶部' }).toBeLessThan(40)
+  expect(await targetOffset()).toBeGreaterThanOrEqual(0)
+})
+
+test('智能运营：筛选条在右卡正文滚动时吸顶，查询按钮始终可点', async ({ page }) => {
+  await mockSession(page, admin)
+  const records = emptyRecords()
+  await mockOperationsReports(page, records)
+  await overrideArticleMarkdown(page, article2Id, longProseMarkdown() + '\n\n' + article2Markdown)
+  await page.setViewportSize({ width: 1440, height: 900 })
+
+  await page.goto(`/#/operations/reports/${reportId}?article=${article2Id}`)
+  await expect(page.getByTestId('report-filter-bar')).toBeVisible()
+  await expect(page.getByRole('cell', { name: '华东', exact: true })).toBeVisible()
+
+  await page.getByTestId('report-article-scroll').evaluate(element => { element.scrollTop = 900 })
+  expect(await page.getByTestId('report-article-scroll').evaluate(element => element.scrollTop)).toBeGreaterThan(0)
+  // 吸顶后：筛选条紧贴右卡头部下沿，查询按钮中心命中自身（未被滚动内容遮挡）
+  const sticky = await page.evaluate(() => {
+    const bar = document.querySelector('[data-testid="report-filter-bar"]')!
+    const header = document.querySelector('[data-testid="report-edit-article"]')!.closest('div')!.parentElement!
+    const button = document.querySelector('[data-testid="report-refresh"]')!
+    const rect = button.getBoundingClientRect()
+    const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
+    return {
+      headerBottom: header.getBoundingClientRect().bottom,
+      // 吸顶的是命令条外层工具条（筛选控件 → 一体化命令条 → 工具条）
+      stripTop: bar.parentElement!.parentElement!.getBoundingClientRect().top,
+      buttonHit: !!hit && button.contains(hit),
+    }
+  })
+  expect(sticky.stripTop - sticky.headerBottom).toBeGreaterThanOrEqual(-1)
+  expect(sticky.stripTop - sticky.headerBottom).toBeLessThan(2)
+  expect(sticky.buttonHit).toBe(true)
+
+  // 滚动后仍可直接重查：一次点击只发一次批量 execute
+  const callsBefore = records.executeCalls.length
+  await page.getByTestId('report-refresh').click()
+  await expect.poll(() => records.executeCalls.length).toBe(callsBefore + 1)
+})
+
+test('智能运营：键盘聚焦显现排序按钮并提交真实顺序', async ({ page }) => {
+  await mockSession(page, admin)
+  const records = emptyRecords()
+  await mockOperationsReports(page, records)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const reorderCalls: Array<Record<string, unknown>> = []
+  await page.route(`**/api/v2/operations/reports/${reportId}/articles/reorder`, route => {
+    reorderCalls.push(route.request().postDataJSON() as Record<string, unknown>)
+    return json(route, { items: [article2Summary, article1Summary, article3Summary] })
+  })
+
+  await page.goto(`/#/operations/reports/${reportId}?article=${article2Id}`)
+  await expect(page.getByTestId('operations-report-book')).toBeVisible()
+  // 聚焦文章行：排序按钮由 focus-within 显现（不依赖 hover），且命中不被遮挡
+  await page.getByRole('button', { name: '区域分布明细', exact: true }).focus()
+  const up = page.getByLabel('上移文章 区域分布明细', { exact: true })
+  await expect(up).toBeVisible()
+  await expectTopmost(up)
+  await up.click()
+  // 提交的是全量顺序：article2 移到第一位
+  await expect.poll(() => reorderCalls.length, { message: '排序应提交 POST' }).toBe(1)
+  expect(reorderCalls[0]).toEqual({ article_ids: [article2Id, article1Id, article3Id] })
+})
+
+test('智能运营：零行结果区分筛选为空并提供一键清除', async ({ page }) => {
+  await mockSession(page, admin)
+  const records = emptyRecords()
+  await mockOperationsReports(page, records)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  // 区域筛选生效时返回零行；清除筛选（参数不再携带 region）后返回全部行
+  const executeCalls: ExecuteCall[] = []
+  await page.route(`**/api/v2/operations/reports/${reportId}/articles/${article2Id}/execute`, route => {
+    const body = route.request().postDataJSON() as { queries?: Record<string, string>, params?: Record<string, unknown> }
+    executeCalls.push({ queries: body.queries, params: body.params })
+    const region = body.params?.region
+    const rows = typeof region === 'string' && region
+      ? []
+      : [{ region: '华东', total: 12 }, { region: '华北', total: 8 }]
+    return json(route, { results: { regional: queryResult(['region', 'total'], rows) } })
+  })
+
+  await page.goto(`/#/operations/reports/${reportId}?article=${article2Id}`)
+  // 默认筛选（华东）下零行：文案归因到筛选，而不是「本来没数据」
+  await expect(page.getByText('当前筛选条件下没有数据。')).toBeVisible()
+  const clear = page.getByTestId('report-clear-filters')
+  await expect(clear).toBeVisible()
+  await expectTopmost(clear)
+
+  await clear.click()
+  // 清除后：以未过滤参数重新批量执行，表格出现真实行
+  await expect(page.getByRole('cell', { name: '华北', exact: true })).toBeVisible()
+  const lastCall = executeCalls[executeCalls.length - 1]
+  expect(lastCall.params).toEqual({})
+})
+
+test('智能运营：单篇文章加载失败保留目录并可就地重试', async ({ page }) => {
+  await mockSession(page, admin)
+  const records = emptyRecords()
+  await mockOperationsReports(page, records)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  let failArticle = true
+  await page.route(`**/api/v2/operations/reports/${reportId}/articles/${article2Id}`, route => {
+    if (failArticle && route.request().method() === 'GET') {
+      return jsonError(route, 500, { detail: { code: 'internal', message: '服务暂不可用' } })
+    }
+    return route.fallback()
+  })
+
+  await page.goto(`/#/operations/reports/${reportId}?article=${article2Id}`)
+  await expect(page.getByText('这篇文章暂时无法打开')).toBeVisible()
+  await expect(page.getByText('服务暂不可用')).toBeVisible()
+  // 文章目录仍在，可切到其他文章
+  await expect(page.getByRole('button', { name: '第 47 周订单趋势', exact: true })).toBeVisible()
+
+  failArticle = false
+  await page.getByRole('button', { name: '重新加载' }).click()
+  await expect(page.getByRole('heading', { name: '区域分布明细' })).toBeVisible()
 })
 
 test('智能运营：已授权的非管理员可见报告册入口', async ({ page }) => {

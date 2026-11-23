@@ -101,7 +101,9 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     && new URLSearchParams(location.search).get('tab') === 'data'
   // 场景助手（对话式建模）与本体网络页同为「左画布 + 右操作」双卡全高布局，
   // 需要相同的 edge-to-edge 容器（h-full 无内边距，间距由页面自身 p-1 提供，MYW-64）。
-  const isEdgeToEdgePage = isActive('/explore') || isActive('/agent') || isActive('/events') || isActive('/tickets') || isActive('/api-hub') || isActive('/ontology-model/network') || isActive('/scenes/modeling') || isMappingWorkspace
+  // 运营报告册详情同为「左目录 + 右正文」双卡全高工作台；列表页不在此列。
+  const isReportBookPage = /^\/operations\/reports\/[^/]+$/.test(location.pathname)
+  const isEdgeToEdgePage = isActive('/explore') || isActive('/agent') || isActive('/events') || isActive('/tickets') || isActive('/api-hub') || isActive('/ontology-model/network') || isActive('/scenes/modeling') || isMappingWorkspace || isReportBookPage
   const isStewardPage = isActive('/data/pipelines/steward')
   // 标签栏独立于所有页面，所有页面统一显示（含业务探索、智能助手等全屏页）
   const showTopTabBar = true
