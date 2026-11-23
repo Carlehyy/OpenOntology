@@ -3,13 +3,12 @@
  *  kind=platform_default 只读，custom 可增删改/激活；「停用回默认」= 激活默认 profile。 */
 import type { MulticaProfile, MulticaProfilePayload } from '@/api/superAssistant'
 
-import { resolveNativeWebUrl } from '../webEntryUrl.ts'
-
 /** 表单态（token 永不回显，只收集新输入；空串 = 保留已存凭据） */
 export interface MulticaProfileFormState {
   id: string
   name: string
   baseUrl: string
+  webUrl: string
   token: string
   workspaceId: string
   enabled: boolean
@@ -43,23 +42,21 @@ export function multicaTestStatusMeta(status: MulticaProfile['last_test_status']
   return { label: '未测试', ok: null }
 }
 
-/** 自定义 profile 的 Web 工作台入口 = 服务地址（base_url）的 origin，剥掉
- *  路径只留协议+主机+端口。前提是该实例的 Web 与 API 同源（平台 bundled
- *  multica-gateway、或自建的同源反代：web 容器把 /api/* 服务端代理到后端）；
- *  按官方默认分端口发布（API 8080 / Web 3000）的实例，这里打开的是 API 端口
- *  而不是 Web 界面——已知局限，profile 目前没有独立的 Web 入口字段。
- *  仅接受 http(s)；地址缺失或非法返回 null（不渲染外链，不猜测入口）。
- *  平台默认 profile 不走此推导（web_url 由部署下发）。 */
-export function multicaCustomWebEntryUrl(profile: Pick<MulticaProfile, 'base_url'>): string | null {
-  if (!profile.base_url) return null
+/** 仅接受显式的原生 Web origin，API 地址不参与浏览器入口解析。 */
+export function resolveMulticaWebUrl(raw: string | null | undefined): string | null {
+  const value = raw?.trim()
+  if (!value || !/^https?:\/\/[^/]+\/?$/i.test(value) || /[\s@?#\\]/u.test(value)) return null
+  if (Array.from(value).some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)) return null
   try {
-    return resolveNativeWebUrl(new URL(profile.base_url).origin)
+    const target = new URL(value)
+    return target.port === '0' || target.origin.length > 500 ? null : target.origin
   } catch {
     return null
   }
 }
 
-/** 组装 POST/PATCH 负载并做必填校验（返回 missing 非空时 body 为 null）：
+/** 组装 POST/PATCH 负载并做表单校验（返回 missing 非空时 body 为 null）：
+ *  - 工作台地址留空时发送 null，新配置不提供入口、编辑时清除已保存的入口；
  *  - 编辑时空 token 不发送（保留已存凭据，token 不回显）；
  *  - 启用态必须有可用凭据：新建必须填 token，编辑时已存 token_set 即可；
  *  - workspace_name 取选中工作区显示名随保存持久化（下拉兜底显示名称而非裸 UUID）。 */
@@ -69,9 +66,13 @@ export function multicaProfileSavePayload(
 ): { body: MulticaProfilePayload | null; missing: string | null } {
   const name = form.name.trim()
   const baseUrl = form.baseUrl.trim()
+  const webUrl = resolveMulticaWebUrl(form.webUrl)
   const token = form.token.trim()
   if (!name) return { body: null, missing: '请填写配置名称' }
   if (!baseUrl) return { body: null, missing: '请填写服务地址' }
+  if (form.webUrl.trim() && !webUrl) {
+    return { body: null, missing: '工作台地址须包含 HTTP(S) 协议、主机和可选端口' }
+  }
   if (!form.workspaceId) return { body: null, missing: '请先执行连接测试并选择工作区' }
   if (form.enabled && !token && !(options.editing && options.originalTokenSet)) {
     return { body: null, missing: '启用集成前请先填写 API Token' }
@@ -79,6 +80,7 @@ export function multicaProfileSavePayload(
   const body: MulticaProfilePayload = {
     name,
     base_url: baseUrl,
+    web_url: webUrl,
     workspace_id: form.workspaceId,
     enabled: form.enabled,
   }
