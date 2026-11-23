@@ -19,11 +19,11 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
 import { writeTextToClipboard } from '@/utils/clipboard'
-import { errorText, saveBlob } from './assistantPanelUtils'
 import { resolveNativeWebUrl } from '../webEntryUrl'
+import { errorText, saveBlob } from './assistantPanelUtils'
 import { DialogShell } from './AssistantConfiguration'
 import {
-  multicaCustomWebEntryUrl, multicaProfileSavePayload, multicaTestStatusMeta, splitMulticaProfiles,
+  multicaProfileSavePayload, multicaTestStatusMeta, resolveMulticaWebUrl, splitMulticaProfiles,
   type MulticaProfileFormState,
 } from './multicaProfileModel'
 
@@ -647,8 +647,8 @@ function MulticaProfilesPanel({ onError, onChanged, addButtonRef }: {
     ? data?.profiles.find(profile => profile.id === form.id) ?? null
     : null
   const effective = data?.effective ?? null
-  /** 原生入口仅部署侧显式下发（platform_default.web_url，custom 恒 null）：
-   *  http(s) 校验通过才渲染链接，绝不从 API base_url 推测 Web 地址。 */
+  /** 平台默认入口只消费部署下发的 web_url（http(s) 校验通过才渲染链接）；
+   *  自定义配置的入口取各自显式保存的 web_url，均不从 API base_url 推测。 */
   const defaultWebEntry = resolveNativeWebUrl(defaultProfile?.web_url)
 
   const reload = (silent = false) => {
@@ -664,7 +664,7 @@ function MulticaProfilesPanel({ onError, onChanged, addButtonRef }: {
 
   const startAdd = () => {
     setError(''); setTestResult(null); setWorkspaces([])
-    setForm(form ? null : { id: '', name: '', baseUrl: '', token: '', workspaceId: '', enabled: true })
+    setForm(form ? null : { id: '', name: '', baseUrl: '', webUrl: '', token: '', workspaceId: '', enabled: true })
   }
 
   const startEdit = (profile: MulticaProfile) => {
@@ -673,6 +673,7 @@ function MulticaProfilesPanel({ onError, onChanged, addButtonRef }: {
       id: profile.id,
       name: profile.name,
       baseUrl: profile.base_url,
+      webUrl: profile.web_url ?? '',
       token: '',
       workspaceId: profile.workspace_id,
       enabled: profile.enabled,
@@ -876,7 +877,7 @@ function MulticaProfilesPanel({ onError, onChanged, addButtonRef }: {
             )}
             {customProfiles.map(profile => {
               const testMeta = multicaTestStatusMeta(profile.last_test_status)
-              const customWebEntry = multicaCustomWebEntryUrl(profile)
+              const customWebEntry = resolveMulticaWebUrl(profile.web_url)
               return (
                 <div
                   key={profile.id}
@@ -989,6 +990,20 @@ function MulticaProfilesPanel({ onError, onChanged, addButtonRef }: {
                   />
                   <span className="mt-1 block text-[10px] leading-4 text-[var(--color-text-tertiary)]">
                     自托管实例的 API 地址（默认端口 8080）；生产环境按 SSRF 策略拒绝内网地址。
+                  </span>
+                </label>
+                <label className="block text-xs text-[var(--color-text-secondary)]">工作台地址（选填）
+                  <input
+                    data-testid="multica-web-url"
+                    value={form.webUrl}
+                    onChange={event => setForm({ ...form, webUrl: event.target.value })}
+                    inputMode="url"
+                    maxLength={500}
+                    placeholder="https://multica.example.com:8446"
+                    className="mt-1.5 min-h-11 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-base)] px-3 font-mono text-sm outline-none focus:border-brand-deep focus-visible:ring-2 focus-visible:ring-ring"
+                  />
+                  <span className="mt-1 block text-[10px] leading-4 text-[var(--color-text-tertiary)]">
+                    填写浏览器可访问的 Multica 地址，留空则隐藏工作台入口。
                   </span>
                 </label>
               </div>

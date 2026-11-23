@@ -3,9 +3,9 @@ import { describe, it } from 'node:test'
 
 import {
   isDefaultMulticaProfile,
-  multicaCustomWebEntryUrl,
   multicaProfileSavePayload,
   multicaTestStatusMeta,
+  resolveMulticaWebUrl,
   splitMulticaProfiles,
   type MulticaProfileFormState,
 } from '../../../pages/super-assistant/components/multicaProfileModel.ts'
@@ -53,6 +53,7 @@ const form = (overrides: Partial<MulticaProfileFormState> = {}): MulticaProfileF
   id: '',
   name: '客户支持',
   baseUrl: 'http://127.0.0.1:8080',
+  webUrl: 'http://127.0.0.1:18100',
   token: 'mul_secret',
   workspaceId: 'ws-2',
   enabled: true,
@@ -90,27 +91,24 @@ describe('multicaTestStatusMeta', () => {
   })
 })
 
-describe('multicaCustomWebEntryUrl', () => {
-  it('取 base_url 的 origin：剥掉路径与查询，保留协议+主机+端口', () => {
-    assert.equal(
-      multicaCustomWebEntryUrl(customProfile({ base_url: 'https://multica.example.com' })),
-      'https://multica.example.com',
-    )
-    assert.equal(
-      multicaCustomWebEntryUrl(customProfile({ base_url: 'https://multica.example.com/api/v1?x=1' })),
-      'https://multica.example.com',
-    )
-    assert.equal(
-      multicaCustomWebEntryUrl(customProfile({ base_url: 'http://127.0.0.1:8080' })),
-      'http://127.0.0.1:8080',
-    )
+describe('resolveMulticaWebUrl', () => {
+  it('接受 HTTP(S) origin 并保留浏览器应访问的主机和端口', () => {
+    assert.equal(resolveMulticaWebUrl(' HTTPS://Web.Example.test:443/ '), 'https://web.example.test')
+    assert.equal(resolveMulticaWebUrl('http://127.0.0.1:18100'), 'http://127.0.0.1:18100')
+    assert.equal(resolveMulticaWebUrl('https://[2001:db8::10]:8446/'), 'https://[2001:db8::10]:8446')
+    assert.equal(resolveMulticaWebUrl(null), null)
   })
 
-  it('地址缺失、非 http(s) 或无法解析时返回 null（不渲染外链）', () => {
-    assert.equal(multicaCustomWebEntryUrl(customProfile({ base_url: '' })), null)
-    assert.equal(multicaCustomWebEntryUrl(customProfile({ base_url: 'javascript:alert(1)' })), null)
-    assert.equal(multicaCustomWebEntryUrl(customProfile({ base_url: 'ftp://multica.example.com' })), null)
-    assert.equal(multicaCustomWebEntryUrl(customProfile({ base_url: 'not a url' })), null)
+  it('不渲染非 origin、带凭据或浏览器会重新解释的目标', () => {
+    for (const value of [
+      'web.example.test', 'ftp://web.example.test', 'https:////web.example.test',
+      'https://pat@web.example.test', 'https://web.example.test/v1', 'https://web.example.test/.',
+      'https://web.example.test//', 'https://web.example.test?', 'https://web.example.test/#',
+      'https://web.example.test\\evil.example.test', 'https://we\x00b.example.test',
+      'https://we\tb.example.test', 'https://web.example.test:0', 'https://web.example.test:65536',
+    ]) {
+      assert.equal(resolveMulticaWebUrl(value), null, value)
+    }
   })
 })
 
@@ -125,6 +123,7 @@ describe('multicaProfileSavePayload', () => {
     assert.deepEqual(body, {
       name: '客户支持',
       base_url: 'http://127.0.0.1:8080',
+      web_url: 'http://127.0.0.1:18100',
       workspace_id: 'ws-2',
       enabled: true,
       workspace_name: 'E2E 工作区',
@@ -172,5 +171,19 @@ describe('multicaProfileSavePayload', () => {
       multicaProfileSavePayload(form({ workspaceId: '' }), { editing: false, originalTokenSet: false }).missing,
       '请先执行连接测试并选择工作区',
     )
+  })
+
+  it('工作台地址可留空或清除，填写时校验并规范化', () => {
+    for (const editing of [false, true]) {
+      const options = { editing, originalTokenSet: editing }
+      const empty = multicaProfileSavePayload(form({ webUrl: ' ' }), options)
+      assert.equal(empty.missing, null)
+      assert.equal(empty.body?.web_url, null)
+      const valid = multicaProfileSavePayload(form({ webUrl: ' https://web.example.test/ ' }), options)
+      assert.equal(valid.body?.web_url, 'https://web.example.test')
+      const invalid = multicaProfileSavePayload(form({ webUrl: 'https://web.example.test/login' }), options)
+      assert.equal(invalid.body, null)
+      assert.match(invalid.missing ?? '', /工作台地址/)
+    }
   })
 })

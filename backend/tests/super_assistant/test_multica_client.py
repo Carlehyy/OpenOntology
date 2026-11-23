@@ -31,6 +31,32 @@ def _patch_request(monkeypatch, response: _FakeResponse, calls: list | None = No
     monkeypatch.setattr(multica_client, "_request", fake_request)
 
 
+def test_clean_web_url_is_browser_origin_only(monkeypatch):
+    def no_network(*args, **kwargs):
+        pytest.fail("workbench URL validation must not query the network")
+
+    monkeypatch.setattr(multica_client, "validate_mcp_url", no_network)
+    monkeypatch.setattr(multica_client, "_request", no_network)
+    for value, expected in (
+        (None, None),
+        (" ", None),
+        (" HTTPS://Web.Example.test:443/ ", "https://web.example.test"),
+        ("http://127.0.0.1:18100", "http://127.0.0.1:18100"),
+        ("https://[2001:db8::10]:8446/", "https://[2001:db8::10]:8446"),
+    ):
+        assert multica_client.clean_web_url(value) == expected
+    for value in (
+        "web.example.test", "ftp://web.example.test", "https:////web.example.test",
+        "https://pat@web.example.test", "https://web.example.test/v1",
+        "https://web.example.test//", "https://web.example.test?", "https://web.example.test/#",
+        "https://web.example.test\\evil.example.test", "https://we\x00b.example.test",
+        "https://we\tb.example.test", "https://web.example.test:0",
+        "https://web.example.test:65536", "https://[2001:db8::10]x",
+    ):
+        with pytest.raises(MulticaClientError, match="工作台地址"):
+            multica_client.clean_web_url(value)
+
+
 def test_fetch_me_sends_bearer_and_normalizes_base_url(monkeypatch):
     calls: list = []
     _patch_request(monkeypatch, _FakeResponse(payload={"id": "u1", "name": "admin"}), calls)

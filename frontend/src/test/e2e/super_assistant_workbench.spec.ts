@@ -122,12 +122,12 @@ const multicaCommandsFixture = [
 ]
 
 const multicaUnconfiguredFixture = {
-  configured: false, enabled: false, base_url: '', workspace_id: '', token_set: false,
+  configured: false, enabled: false, base_url: '', workspace_id: '', web_url: null, token_set: false,
   commands: [], last_test_status: null, last_test_message: null, last_tested_at: null,
 }
 
 const multicaEnabledFixture = {
-  configured: true, enabled: true, base_url: 'http://127.0.0.1:8080', workspace_id: 'ws-1',
+  configured: true, enabled: true, base_url: 'http://127.0.0.1:8080', workspace_id: 'ws-1', web_url: 'http://127.0.0.1:18100',
   workspace_name: 'My Workspace', token_set: true, commands: multicaCommandsFixture,
   last_test_status: 'success', last_test_message: '连接成功', last_tested_at: at(0, 8),
 }
@@ -151,7 +151,7 @@ const multicaDefaultProfileFixture = (overrides: Record<string, unknown> = {}) =
 /** 自定义 profile：用户自建，可增删改/激活 */
 const multicaCustomProfileFixture = (overrides: Record<string, unknown> = {}) => ({
   id: 'mp-custom-1', name: '客户支持', kind: 'custom', builtin_key: null,
-  web_url: null,
+  web_url: 'http://127.0.0.1:18100',
   is_active: false, enabled: true, base_url: 'http://127.0.0.1:8080',
   workspace_id: 'ws-1', workspace_name: 'My Workspace', token_set: true,
   revision: 1, last_test_status: 'success', last_test_message: '连接成功：admin', last_tested_at: at(0, 8),
@@ -919,8 +919,8 @@ async function mockApis(page: Page, options: MockOptions = {}) {
           id: `mp-custom-${multicaProfileCreates.length}`,
           kind: 'custom',
           builtin_key: null,
-          // 契约：web_url 仅平台默认 profile 携带，custom 恒为 null
-          web_url: null,
+          // web_url 是浏览器入口，custom 与 platform_default 都可携带
+          web_url: (body.web_url as string) || null,
           is_active: false,
           revision: 1,
           token_set: Boolean(submittedToken),
@@ -4111,7 +4111,7 @@ test('能力拓展：multica 多 profile——添加、测试连接、选工作�
   await expect(integrationsDialog.getByTestId('multica-default-card')).toContainText('平台默认')
   await expect(integrationsDialog.getByTestId('multica-default-card')).toContainText('当前使用')
   await expect(integrationsDialog.getByTestId('multica-default-card')).toContainText('未配置服务地址')
-  // 部署未下发 web_url（null）：不渲染「打开 Multica」外链，也不从 base_url 推测
+  // 部署未下发 web_url 时不显示「打开 Multica」外链。
   await expect(integrationsDialog.getByTestId('multica-open-web')).toHaveCount(0)
   // 左栏仅两类集成，旧「文件夹同步」不再提供
   await expect(integrationsDialog.locator('[data-integrations-tab]')).toHaveCount(2)
@@ -4136,11 +4136,12 @@ test('能力拓展：multica 多 profile——添加、测试连接、选工作�
   await expect(integrationsDialog.getByTestId('multica-profile-form')).toBeVisible()
   await integrationsDialog.getByTestId('multica-profile-name').fill('客户支持')
   await integrationsDialog.getByTestId('multica-base-url').fill('http://127.0.0.1:8080')
+  await integrationsDialog.getByTestId('multica-web-url').fill('http://127.0.0.1:18100')
   await integrationsDialog.getByTestId('multica-token').fill('mul-e2e-token')
   await integrationsDialog.getByTestId('multica-test-button').click()
   await expect(integrationsDialog.getByTestId('multica-test-result')).toContainText('连接成功')
   await expect.poll(() => mocks.multicaTests.length).toBe(1)
-  expect(mocks.multicaTests[0]).toMatchObject({ base_url: 'http://127.0.0.1:8080', token: 'mul-e2e-token' })
+  expect(mocks.multicaTests[0]).toEqual({ base_url: 'http://127.0.0.1:8080', token: 'mul-e2e-token' })
 
   await integrationsDialog.getByRole('combobox', { name: 'Multica 工作区' }).click()
   await page.getByRole('option', { name: 'E2E 工作区' }).click()
@@ -4150,6 +4151,7 @@ test('能力拓展：multica 多 profile——添加、测试连接、选工作�
   expect(mocks.multicaProfileCreates[0]).toMatchObject({
     name: '客户支持',
     base_url: 'http://127.0.0.1:8080',
+    web_url: 'http://127.0.0.1:18100',
     token: 'mul-e2e-token',
     workspace_id: 'ws-2',
     // 选中工作区的显示名随保存持久化（下拉兜底显示名称而非裸 UUID）
@@ -4191,7 +4193,7 @@ test('能力拓展：长配置与操作在桌面和窄屏均不被裁切', async
   await mockApis(page, {
     multicaConfig: multicaEnabledFixture,
     multicaProfiles: [
-      multicaDefaultProfileFixture({ is_active: false, token_set: true, web_url: serviceUrl }),
+      multicaDefaultProfileFixture({ is_active: false, token_set: true, web_url: 'https://multica.example.com:8446' }),
       multicaCustomProfileFixture({ name: profileName, base_url: serviceUrl, is_active: true, last_test_status: 'error' }),
     ],
     remoteAgents: [{
@@ -4274,8 +4276,7 @@ test('multica 多 profile：激活自定义配置与停用回默认', async ({ p
   await expect(dialog.getByTestId('multica-default-card')).not.toContainText('当前使用')
   await expect(dialog.getByTestId('multica-effective-commands')).toContainText('/multica:list_agents')
 
-  // 「打开 Multica」只出现在默认卡（部署下发的 web_url 原样使用，新窗口隔离）；
-  // custom 行恒无 web_url 字段，不渲染该外链
+  // 入口均使用后端下发的 web_url，新窗口隔离；默认卡与自定义行互不串用
   const openWebLink = dialog.getByTestId('multica-default-card').getByTestId('multica-open-web')
   await expect(openWebLink).toBeVisible()
   await expect(openWebLink).toHaveAttribute('href', 'http://localhost:18100')
@@ -4283,13 +4284,27 @@ test('multica 多 profile：激活自定义配置与停用回默认', async ({ p
   await expect(openWebLink).toHaveAttribute('rel', 'noopener noreferrer')
   await expect(row.getByTestId('multica-open-web')).toHaveCount(0)
 
-  // custom 行的「打开工作台」：入口 = base_url 的 origin（官方自托管栈 web 与
-  // API 同源），剥掉路径只留协议+主机+端口，新窗口隔离打开
+  // custom 行的「打开工作台」使用 profile 显式保存的 Web origin，新窗口隔离打开
   const customOpenWeb = row.getByTestId('multica-profile-open-web')
   await expect(customOpenWeb).toBeVisible()
-  await expect(customOpenWeb).toHaveAttribute('href', 'http://127.0.0.1:8080')
+  await expect(customOpenWeb).toHaveAttribute('href', 'http://127.0.0.1:18100')
   await expect(customOpenWeb).toHaveAttribute('target', '_blank')
   await expect(customOpenWeb).toHaveAttribute('rel', 'noopener noreferrer')
+
+  // 从真实点击产生的窗口验证不同入口；路由在 context 层拦截新标签的首次请求。
+  const targets = [
+    { link: openWebLink, url: 'http://localhost:18100/', heading: '捆绑 Multica' },
+    { link: customOpenWeb, url: 'http://127.0.0.1:18100/', heading: '客户支持 Multica' },
+  ]
+  for (const { link, url, heading } of targets) {
+    await page.context().route(url, route => route.fulfill({
+      contentType: 'text/html; charset=utf-8', body: `<h1>${heading}</h1>`,
+    }))
+    const [popup] = await Promise.all([page.waitForEvent('popup'), link.click()])
+    await expect(popup).toHaveURL(url)
+    await expect(popup.getByRole('heading', { name: heading })).toBeVisible()
+    await popup.close()
+  }
 
   // 停用并回默认 = 激活平台默认 profile（POST /profiles/{default_id}/activate）
   await dialog.getByTestId('multica-profile-deactivate').click()
@@ -4326,6 +4341,8 @@ test('multica 多 profile：编辑保存（PATCH 不回传 token）与删除确�
   await expect(form).toBeVisible()
   await expect(form.getByTestId('multica-profile-name')).toHaveValue('客户支持')
   await expect(form.getByTestId('multica-base-url')).toHaveValue('http://127.0.0.1:8080')
+  const webUrl = form.getByTestId('multica-web-url')
+  await expect(webUrl).toHaveValue('http://127.0.0.1:18100')
   await expect(form.getByTestId('multica-token')).toHaveValue('')
   await expect(form.getByTestId('multica-token')).toHaveAttribute('placeholder', /已保存（留空保留）/)
   await expect.poll(() => mocks.multicaProfileWorkspaceCalls.length).toBeGreaterThanOrEqual(1)
@@ -4334,18 +4351,28 @@ test('multica 多 profile：编辑保存（PATCH 不回传 token）与删除确�
   await expect(page.getByRole('option', { name: 'My Workspace' })).toBeVisible()
   await page.getByRole('option', { name: 'My Workspace' }).click()
 
-  // 保存：PATCH 语义负载；空 token 不发送（保留已存凭据）
+  // 非 origin 阻止保存，清空则移除工作台入口。空 token 不发送。
+  const saveButton = dialog.getByTestId('multica-profile-save-button')
+  await webUrl.fill('https://multica.example.com/login')
+  await saveButton.click()
+  await expect(dialog.getByRole('alert')).toHaveText('工作台地址须包含 HTTP(S) 协议、主机和可选端口')
+  expect(mocks.multicaProfilePatches).toHaveLength(0)
+
+  await webUrl.clear()
   await form.getByTestId('multica-profile-name').fill('客户支持 v2')
-  await dialog.getByTestId('multica-profile-save-button').click()
+  await saveButton.click()
   await expect.poll(() => mocks.multicaProfilePatches.length).toBe(1)
   expect(mocks.multicaProfilePatches[0]).toMatchObject({
     name: '客户支持 v2',
     base_url: 'http://127.0.0.1:8080',
+    web_url: null,
     workspace_id: 'ws-1',
     enabled: true,
   })
   expect(Object.keys(mocks.multicaProfilePatches[0])).not.toContain('token')
-  await expect(dialog.getByTestId('multica-profile-row')).toContainText('客户支持 v2')
+  const row = dialog.getByTestId('multica-profile-row')
+  await expect(row).toContainText('客户支持 v2')
+  await expect(row.getByTestId('multica-profile-open-web')).toHaveCount(0)
 
   // 删除走 ConfirmDialog（不做静默直删）；删除正在生效的配置时提示回落默认
   await dialog.getByTestId('multica-profile-delete').click()

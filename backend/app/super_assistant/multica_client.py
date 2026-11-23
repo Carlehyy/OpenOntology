@@ -12,6 +12,7 @@ from urllib.parse import quote, unquote, urlsplit
 from uuid import UUID
 
 import httpx
+from pydantic import AnyHttpUrl
 
 from app.super_assistant.mcp_client import McpClientError, validate_mcp_url
 
@@ -70,6 +71,28 @@ def clean_base_url(base_url: str) -> str:
     except ValueError as exc:
         raise MulticaClientError(f"multica 服务地址无效：{exc}") from exc
     return value
+
+
+def clean_web_url(web_url: str | None) -> str | None:
+    """Normalize a browser entry origin without DNS or network access."""
+    value = (web_url or "").strip()
+    if not value:
+        return None
+    try:
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError
+        if (parsed.username is not None or parsed.path not in {"", "/"}
+                or any(char in "?#\\" or char.isspace() or ord(char) < 32 or ord(char) == 127
+                       for char in value)):
+            raise ValueError
+        url = AnyHttpUrl(value)
+        origin = str(url).removesuffix("/")
+        if url.port == 0 or len(origin) > 500:
+            raise ValueError
+    except ValueError:
+        raise MulticaClientError("multica 工作台地址无效：请填写 HTTP(S) 协议、主机和可选端口") from None
+    return origin
 
 
 def normalize_base_url(base_url: str) -> str:

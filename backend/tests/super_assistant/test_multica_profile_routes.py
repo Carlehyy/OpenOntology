@@ -91,6 +91,7 @@ def _create_profile(client, **overrides):
     payload = {
         "name": "团队实例",
         "base_url": "http://127.0.0.1:8080",
+        "web_url": "http://127.0.0.1:18100",
         "workspace_id": "ws-1",
         "workspace_name": "My Workspace",
         "token": "mul-secret",
@@ -124,6 +125,7 @@ def test_create_activate_and_token_redaction_roundtrip(tmp_path, monkeypatch):
     profile = created.json()
     assert profile["kind"] == "custom" and profile["is_active"] is False
     assert profile["token_set"] is True and "token" not in profile
+    assert profile["web_url"] == "http://127.0.0.1:18100"
 
     activated = client.post(f"{PREFIX}/profiles/{profile['id']}/activate")
     assert activated.status_code == 200, activated.text
@@ -132,9 +134,13 @@ def test_create_activate_and_token_redaction_roundtrip(tmp_path, monkeypatch):
 
     listing = client.get(f"{PREFIX}/profiles").json()
     assert listing["active_profile_id"] == profile["id"]
-    # 生效切换到自定义；legacy GET 同步返回自定义视图
+    by_kind = {item["kind"]: item for item in listing["profiles"]}
+    assert by_kind["custom"]["web_url"] == "http://127.0.0.1:18100"
+    assert by_kind["platform_default"]["web_url"] == DEFAULTS["web_url"]
+    # 生效切换到自定义；legacy GET 仍只提供 API 配置。
     legacy = client.get(f"{PREFIX}/config").json()
     assert legacy["base_url"] == "http://127.0.0.1:8080" and legacy["enabled"] is True
+    assert "web_url" not in legacy and "web_url" not in listing["effective"]
 
 
 def test_create_rejects_tokenless_enable_and_invalid_url(tmp_path, monkeypatch):
@@ -143,6 +149,10 @@ def test_create_rejects_tokenless_enable_and_invalid_url(tmp_path, monkeypatch):
     assert no_token.status_code == 400
     bad_url = _create_profile(client, base_url="ftp://multica.local")
     assert bad_url.status_code == 400
+    bad_web_url = _create_profile(client, web_url="javascript:alert(1)")
+    assert bad_web_url.status_code == 400
+    assert "工作台地址" in bad_web_url.json()["detail"]
+    assert client.get(f"{PREFIX}/profiles").json()["profiles"] == []
 
 
 def test_profile_not_found_and_platform_conflict_map_to_404_409(tmp_path, monkeypatch):
@@ -226,6 +236,12 @@ def test_update_keeps_blank_token_and_bumps_revision(tmp_path, monkeypatch):
     body = updated.json()
     assert body["revision"] == 2 and body["workspace_id"] == "ws-2"
     assert body["token_set"] is True  # 凭据保留
+    assert body["web_url"] == profile["web_url"]  # 缺省不修改
+
+    cleared = client.patch(f"{PREFIX}/profiles/{profile['id']}", json={"web_url": None})
+    assert cleared.status_code == 200
+    assert cleared.json()["web_url"] is None and cleared.json()["revision"] == 2
+    assert client.get(f"{PREFIX}/profiles").json()["profiles"][0]["web_url"] is None
 
 
 def test_delete_falls_back_to_platform_default(tmp_path, monkeypatch):

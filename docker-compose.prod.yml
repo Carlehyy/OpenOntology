@@ -698,8 +698,8 @@ services:
       # 变量——inactive profile 插值也会阻断核心 compose。
       JWT_SECRET: ${MULTICA_JWT_SECRET:-}
       APP_ENV: ${MULTICA_APP_ENV:-production}
-      # 浏览器入口 = MULTICA_DEFAULT_WEB_URL 对应的公开 origin（管理员显式
-      # 配置，通常是指向 web 容器宿主端口的 TLS 反代地址；部署脚本不做推导）。
+      # 浏览器入口是 MULTICA_DEFAULT_WEB_URL 对应的公开 Web origin；bundled 栈
+      # 留空时由 deploy-prod.sh 按 PUBLIC_TLS_IP 和 MULTICA_HTTPS_PORT 推导。
       FRONTEND_ORIGIN: ${MULTICA_FRONTEND_ORIGIN:-}
       MULTICA_APP_URL: ${MULTICA_APP_URL:-}
       ALLOW_SIGNUP: ${MULTICA_ALLOW_SIGNUP:-true}

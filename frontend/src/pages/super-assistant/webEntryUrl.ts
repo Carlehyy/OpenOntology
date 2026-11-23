@@ -44,8 +44,8 @@ function isLoopbackHostname(hostname: string): boolean {
  * Multica 平台默认 profile 的 web_url 同用此策略：MULTICA_DEFAULT_WEB_URL 由
  * 部署下发（bundled 栈为 multica-gateway 的推导 origin，见
  * docs/operations/configuration.md），前端不做任何推导，回环值也原样保留。
- * custom profile 恒无 web_url 字段，其「打开工作台」入口由
- * multicaCustomWebEntryUrl 从 base_url origin 推导（前提与局限见该函数注释）。
+ * custom profile 的入口取其显式保存的 web_url（resolveMulticaWebUrl 校验），
+ * 不走此函数，也不从 API base_url 推导。
  */
 export function resolveNativeWebUrl(raw: string | null | undefined): string | null {
   return resolveWebUrl(raw, '')

@@ -620,9 +620,9 @@ export interface MulticaProfile {
   name: string
   kind: 'platform_default' | 'custom' | string
   builtin_key: string | null
-  /** 原生 Web 入口：仅 platform_default 携带部署下发的 MULTICA_DEFAULT_WEB_URL
-   *  （bundled 栈为 multica-gateway 的推导 origin），
-   *  custom 恒为 null；经 http(s) 校验后用于「打开 Multica」链接，前端不做任何推导。 */
+  /** 浏览器可达的原生 Multica Web origin：平台默认来自部署下发的
+   *  MULTICA_DEFAULT_WEB_URL（bundled 栈为 multica-gateway 的推导 origin），
+   *  custom 由用户显式配置。 */
   web_url: string | null
   is_active: boolean
   enabled: boolean
@@ -650,6 +650,7 @@ export interface MulticaProfilesResult {
 export interface MulticaProfilePayload {
   name?: string
   base_url?: string
+  web_url?: string | null
   token?: string | null
   workspace_id?: string
   workspace_name?: string | null

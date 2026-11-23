@@ -538,7 +538,7 @@ def profile_view(profile: SuperAssistantMulticaProfile,
     return MulticaProfileOut(
         id=profile.id, name=profile.name, kind=profile.kind, builtin_key=profile.builtin_key,
         web_url=(_platform_default_settings()["web_url"] or None)
-            if profile.kind == PROFILE_KIND_PLATFORM_DEFAULT else None,
+            if profile.kind == PROFILE_KIND_PLATFORM_DEFAULT else profile.web_url,
         is_active=profile.is_active, enabled=bool(revision is not None and _revision_usable(revision)),
         base_url=revision.base_url if revision is not None else "",
         workspace_id=revision.workspace_id if revision is not None else "",
@@ -572,12 +572,13 @@ def list_profiles(db: Session, owner_id: str) -> MulticaProfilesOut:
 
 def create_profile(db: Session, owner_id: str, body: MulticaProfileCreate) -> MulticaProfileOut:
     base_url = multica_client.normalize_base_url(body.base_url)
+    web_url = multica_client.clean_web_url(body.web_url)
     if body.enabled and not body.token:
         raise MulticaServiceError("启用 multica 集成前请先填写 API Token")
     _lock_owner(db, owner_id)
     _check_workspace_source(db, owner_id, base_url, body.workspace_id)
     profile = SuperAssistantMulticaProfile(owner_id=owner_id, name=body.name,
-        kind=PROFILE_KIND_CUSTOM, is_active=False)
+        kind=PROFILE_KIND_CUSTOM, web_url=web_url, is_active=False)
     db.add(profile)
     db.flush()
     revision = _append_revision(db, profile, base_url=base_url, workspace_id=body.workspace_id,
@@ -592,6 +593,7 @@ def create_profile(db: Session, owner_id: str, body: MulticaProfileCreate) -> Mu
 def update_profile(db: Session, owner_id: str, profile_id: str, body: MulticaProfileUpdate) -> MulticaProfileOut:
     # DNS validation belongs outside the owner write transaction.
     new_base_url = multica_client.normalize_base_url(body.base_url) if body.base_url is not None else None
+    new_web_url = multica_client.clean_web_url(body.web_url) if body.web_url is not None else None
     _lock_owner(db, owner_id)
     profile = _require_profile(db, owner_id, profile_id)
     if profile.kind == PROFILE_KIND_PLATFORM_DEFAULT:
@@ -613,6 +615,8 @@ def update_profile(db: Session, owner_id: str, profile_id: str, body: MulticaPro
     _check_workspace_source(db, owner_id, base_url, workspace_id)
     if body.name is not None:
         profile.name = body.name
+    if "web_url" in body.model_fields_set:
+        profile.web_url = new_web_url
     if any((revision.base_url != base_url, revision.workspace_id != workspace_id,
             revision.workspace_name != workspace_name, revision.enabled != enabled,
             revision.token_encrypted != token_encrypted)):
