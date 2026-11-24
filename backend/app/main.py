@@ -424,6 +424,23 @@ app.include_router(
     tags=["super-assistant"],
     dependencies=assistant_guard,
 )
+# Multica 一键直达票据签发（/multica/entry）：同前缀同守卫子路由；中继以
+# 平台默认 profile 的入口账号服务端登录 Multica。
+from app.super_assistant import multica_entry as super_assistant_multica_entry
+app.include_router(
+    super_assistant_multica_entry.router,
+    prefix="/api/v2/super-assistant",
+    tags=["super-assistant"],
+    dependencies=assistant_guard,
+)
+# Multica 一键直达中继（/multica/sso/consume）：浏览器经 multica-gateway 在
+# Multica origin 访问，带不上平台 Bearer 头——有意不挂 assistant_guard，凭证
+# 是 entry 签发的一次性票据（HMAC + 90s TTL + Redis 单次消费）。
+app.include_router(
+    super_assistant_multica_entry.sso_router,
+    prefix="/api/v2/super-assistant",
+    tags=["super-assistant"],
+)
 # 内置工具目录与用户级启停：同前缀同守卫的独立子路由
 from app.super_assistant import tools as super_assistant_tools
 app.include_router(

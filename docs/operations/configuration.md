@@ -661,6 +661,29 @@ compose 提供上游 multica-ai/multica **v0.11.0**（commit
 显式 `MULTICA_APP_ENV=production` 并存，以及两个 URL 的 origin 形态
 （完整五值时）。
 
+**一键直达（可选）**：Multica Web 只认它自己的 Cookie 会话，平台持有的
+PAT 换不出浏览器会话，所以「打开 Multica」默认只是打开 Multica 自带的
+验证码登录页。设置 `MULTICA_SSO_EMAIL` 后，平台默认 profile 的入口改为
+一键直达（与 WeKnora/Kaneo 的中继同构）：
+
+- 受守卫的 `POST /api/v2/super-assistant/multica/entry` 签发一次性票据
+  （HMAC + 90s + Redis 单次消费）；浏览器新标签打开
+  `{MULTICA_DEFAULT_WEB_URL}/sso/entry?ticket=…`，multica-gateway 把该路径
+  反代到平台的 consume 路由；
+- consume 以 `MULTICA_SSO_EMAIL` 这一个 Multica 账号 + 上游固定验证码
+  `MULTICA_DEV_VERIFICATION_CODE` 服务端调用 `POST /auth/send-code` 与
+  `POST /auth/verify-code`，把响应的 `Set-Cookie` 挂在 302 `/` 上下发——
+  会话 cookie 对 Multica origin 是第一方；
+- 所有平台用户以同一个 Multica 账号进入（与默认 PAT 的共享语义一致），
+  自定义 profile 不参与直达；
+- 配置约束：`MULTICA_SSO_EMAIL` 必须与 `MULTICA_DEV_VERIFICATION_CODE`
+  成对出现（即同时接受上面「固定验证码」的安全取舍），且部署级默认集
+  完整；两个值只进 backend 与 multica 容器，不进日志与接口响应。
+
+fail-closed：票据无效/重放、Redis 不可用、Multica 拒绝或缺 `Set-Cookie`
+都 302 回 Multica 根路径且不种 cookie，落到自带的验证码登录页（即引入
+直达前的体验）。部署未配置直达时，默认卡的链接保持原生直开。
+
 ### 集成数据集 dbx（生产）
 
 集成数据集的源登记与 schema 发现只使用固定版本 dbx；native PostgreSQL

@@ -435,6 +435,9 @@ class MulticaProfileOut(BaseModel):
     kind: str
     builtin_key: str | None = None
     web_url: str | None = None
+    # 平台默认 profile 是否提供一键直达（POST /multica/entry）：部署配置了
+    # 中继账号与固定验证码时为 true；custom 恒为 false。
+    sso_entry: bool = False
     is_active: bool
     enabled: bool
     base_url: str

@@ -24,7 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.shared.encryption import decrypt, encrypt
-from app.super_assistant import multica_client
+from app.super_assistant import multica_client, multica_sso
 from app.super_assistant.models import (
     SuperAssistantMulticaConfig,
     SuperAssistantMulticaProfile,
@@ -539,6 +539,8 @@ def profile_view(profile: SuperAssistantMulticaProfile,
         id=profile.id, name=profile.name, kind=profile.kind, builtin_key=profile.builtin_key,
         web_url=(_platform_default_settings()["web_url"] or None)
             if profile.kind == PROFILE_KIND_PLATFORM_DEFAULT else profile.web_url,
+        sso_entry=(profile.kind == PROFILE_KIND_PLATFORM_DEFAULT
+            and multica_sso.sso_entry_enabled()),
         is_active=profile.is_active, enabled=bool(revision is not None and _revision_usable(revision)),
         base_url=revision.base_url if revision is not None else "",
         workspace_id=revision.workspace_id if revision is not None else "",

@@ -224,6 +224,7 @@ compose_environment() {
     -u MULTICA_DEFAULT_WORKSPACE_ID \
     -u MULTICA_DEFAULT_WORKSPACE_NAME \
     -u MULTICA_DEFAULT_PAT \
+    -u MULTICA_SSO_EMAIL \
     -u SUPER_ASSISTANT_MULTICA_INTERNAL_BASE_URLS \
     -u STEWARD_INTERNAL_PROXY_BASE_URL \
     -u STEWARD_BROWSER_HTTP_LEASE_SECONDS \
@@ -1955,6 +1956,18 @@ validate_multica_config() {
     log "MULTICA_DEV_VERIFICATION_CODE is set but MULTICA_APP_ENV=production; Multica ignores the fixed code under production - remove the code or set MULTICA_APP_ENV to a non-production value"
     exit 1
   fi
+  # 一键直达（MULTICA_SSO_EMAIL）：中继靠固定验证码服务端登录，两者必须
+  # 成对出现，且只对部署级默认 profile 生效（入口取 WEB_URL）。
+  if [ -n "$(env_value MULTICA_SSO_EMAIL)" ]; then
+    if [ -z "$dev_code" ]; then
+      log "MULTICA_SSO_EMAIL requires MULTICA_DEV_VERIFICATION_CODE (the one-click entry signs in with the fixed code)"
+      exit 1
+    fi
+    if [ -z "$(env_value MULTICA_DEFAULT_WEB_URL)" ]; then
+      log "MULTICA_SSO_EMAIL requires MULTICA_DEFAULT_WEB_URL (the one-click entry opens the deployment default's web origin)"
+      exit 1
+    fi
+  fi
   # 官方镜像 digest 门禁：三个镜像引用（默认 pin 或运维覆盖）都必须是
   # 不可变 @sha256；GHCR 只发布 latest tag，浮动引用一律拒绝。
   for key in MULTICA_BACKEND_IMAGE MULTICA_WEB_IMAGE MULTICA_POSTGRES_IMAGE; do
@@ -2354,7 +2367,7 @@ dependency_key_allowed() {
     MULTICA_DEFAULT_PAT|MULTICA_DEFAULT_WEB_URL|\
     MULTICA_DEFAULT_BASE_URL|MULTICA_DEFAULT_WORKSPACE_ID|\
     MULTICA_DEFAULT_WORKSPACE_NAME|\
-    MULTICA_DEV_VERIFICATION_CODE|\
+    MULTICA_DEV_VERIFICATION_CODE|MULTICA_SSO_EMAIL|\
     MULTICA_BACKEND_IMAGE|MULTICA_WEB_IMAGE|MULTICA_POSTGRES_IMAGE|\
     SUPER_ASSISTANT_MCP_STDIO_ENABLED|SUPER_ASSISTANT_MCP_STDIO_ALLOWED_COMMANDS)
       return 0

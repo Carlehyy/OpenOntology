@@ -20,6 +20,7 @@ import {
 } from '@/components/ui/select'
 import { writeTextToClipboard } from '@/utils/clipboard'
 import { resolveNativeWebUrl } from '../webEntryUrl'
+import { resolveWeKnoraEntryUrl } from '../weknoraUrl'
 import { errorText, saveBlob } from './assistantPanelUtils'
 import { DialogShell } from './AssistantConfiguration'
 import {
@@ -651,6 +652,34 @@ function MulticaProfilesPanel({ onError, onChanged, addButtonRef }: {
    *  自定义配置的入口取各自显式保存的 web_url，均不从 API base_url 推测。 */
   const defaultWebEntry = resolveNativeWebUrl(defaultProfile?.web_url)
 
+  /** 平台默认 profile 的一键直达（与 openKaneo 同构）：先同步开空白标签保住
+   *  用户手势（await 后再 window.open 会被弹窗拦截），再领取一次性票据跳转，
+   *  登录由 multica-gateway 的中继在 Multica origin 完成。修饰键/中键点击保留
+   *  原生直开（Multica 自带的验证码登录页）兜底；领票失败时关闭空白页并如实
+   *  报错——原生 URL 直开仍是可用兜底。 */
+  const openDefaultMultica = async (event: React.MouseEvent<HTMLAnchorElement>) => {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+    event.preventDefault()
+    const popup = window.open('', '_blank')
+    try {
+      const { redirect_url } = await superAssistantApi.createMulticaEntry()
+      // 复用入口地址校验（仅 http(s) 且路径恰为 /sso/entry）；Multica 不做
+      // 回环主机改写，与平台默认入口同样严格保留后端 canonical origin。
+      const entryUrl = resolveWeKnoraEntryUrl(redirect_url, '')
+      if (!entryUrl) throw new Error('跳转地址无效')
+      if (!popup) {
+        // 弹窗被拦截：当前标签跳转，直达体验保持完整
+        window.location.href = entryUrl
+        return
+      }
+      popup.opener = null
+      popup.location.href = entryUrl
+    } catch (error) {
+      popup?.close()
+      toast.error('Multica 工作台打开失败', { description: errorText(error) })
+    }
+  }
+
   const reload = (silent = false) => {
     superAssistantApi.multicaProfiles()
       .then(result => { setData(result); setLoaded(true) })
@@ -843,6 +872,8 @@ function MulticaProfilesPanel({ onError, onChanged, addButtonRef }: {
                     target="_blank"
                     rel="noopener noreferrer"
                     data-testid="multica-open-web"
+                    data-sso-entry={defaultProfile.sso_entry ? 'true' : undefined}
+                    onClick={defaultProfile.sso_entry ? openDefaultMultica : undefined}
                     className="inline-flex min-h-9 shrink-0 items-center gap-1 rounded-lg px-2 text-xs text-brand-ink transition-colors hover:bg-brand-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   >
                     <ExternalLink size={12} /> 打开 Multica

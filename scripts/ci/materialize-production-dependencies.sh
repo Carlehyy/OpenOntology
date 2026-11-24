@@ -170,6 +170,10 @@ append_optional MULTICA_DEFAULT_PAT PROD_MULTICA_DEFAULT_PAT
 # an account email plus this code can log in, so enable it only for private or
 # test instances. Leave unset to keep codes in the container log / email only.
 append_optional MULTICA_DEV_VERIFICATION_CODE PROD_MULTICA_DEV_VERIFICATION_CODE
+# Optional one-click entry for the platform-default Multica profile: the
+# backend signs users into this single Multica account using the fixed code
+# above (both are required together).
+append_optional MULTICA_SSO_EMAIL PROD_MULTICA_SSO_EMAIL
 # Official v0.11.0 digest pins; when omitted, deploy-prod.sh supplies the
 # verified digests itself. Overrides must also include @sha256.
 append_optional_digest MULTICA_BACKEND_IMAGE PROD_MULTICA_BACKEND_IMAGE

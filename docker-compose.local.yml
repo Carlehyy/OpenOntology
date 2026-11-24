@@ -86,6 +86,7 @@ x-platform-runtime-weknora-secret-blocks: &platform-runtime-weknora-secret-block
   MULTICA_JWT_SECRET: ""
   MULTICA_POSTGRES_PASSWORD: ""
   MULTICA_DEV_VERIFICATION_CODE: ""
+  MULTICA_SSO_EMAIL: ""
 
 services:
   db:
@@ -846,6 +847,10 @@ services:
       # 部署级 PAT：掩码锚点把它对 env_file 服务置空，这里显式取回真值
       # （仅 backend 与 pipeline_executor；task_worker/migrate 保持空掩码）。
       MULTICA_DEFAULT_PAT: ${MULTICA_DEFAULT_PAT:-}
+      # Multica 一键直达（仅 backend）：中继账号与上游固定验证码经掩码锚点
+      # 置空，这里显式取回真值；只用于服务端签发会话。
+      MULTICA_SSO_EMAIL: ${MULTICA_SSO_EMAIL:-}
+      MULTICA_DEV_VERIFICATION_CODE: ${MULTICA_DEV_VERIFICATION_CODE:-}
       # Multica 内网地址允许清单，独立于 MCP 的清单，不共用信任面。
       SUPER_ASSISTANT_MULTICA_INTERNAL_BASE_URLS: ${SUPER_ASSISTANT_MULTICA_INTERNAL_BASE_URLS:-}
     depends_on:

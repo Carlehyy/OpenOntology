@@ -1053,6 +1053,15 @@ if [ "$multica_dev_code_secret_count" -lt 2 ]; then
   printf 'verification and deploy must both materialize the Multica fixed sign-in code secret\n' >&2
   exit 1
 fi
+multica_sso_email_count="$(
+  grep -cF \
+    'PROD_MULTICA_SSO_EMAIL: ${{ vars.PROD_MULTICA_SSO_EMAIL }}' \
+    "$DEPLOY_WORKFLOW"
+)"
+if [ "$multica_sso_email_count" -lt 2 ]; then
+  printf 'verification and deploy must both materialize the Multica one-click entry account\n' >&2
+  exit 1
+fi
 multica_manifest_config_count="$(
   grep -cF \
     'PROD_MULTICA_DEFAULT_BASE_URL: ${{ vars.PROD_MULTICA_DEFAULT_BASE_URL }}' \
@@ -1476,6 +1485,7 @@ env \
   PROD_MULTICA_DEFAULT_WORKSPACE_NAME= \
   PROD_MULTICA_DEFAULT_PAT= \
   PROD_MULTICA_DEV_VERIFICATION_CODE= \
+  PROD_MULTICA_SSO_EMAIL= \
   bash "$REPO_ROOT/scripts/ci/materialize-production-dependencies.sh" \
     "$test_dir/test-production-dependencies.env" >/dev/null
 # 上面五个显式空值不可省：`env A=B … cmd` 继承作业环境，仓库级
@@ -1745,6 +1755,7 @@ env \
   PROD_MULTICA_DEFAULT_WORKSPACE_NAME= \
   PROD_MULTICA_DEFAULT_PAT= \
   PROD_MULTICA_DEV_VERIFICATION_CODE= \
+  PROD_MULTICA_SSO_EMAIL= \
   bash "$REPO_ROOT/scripts/ci/materialize-production-dependencies.sh" \
     "$test_dir/test-kaneo-dependencies.env" >/dev/null
 # 五个显式空值同上：该 manifest 会经 -u 应用进 .env，仓库级
@@ -3769,6 +3780,25 @@ fi
 printf 'ok deploy-multica-dev-code-validated\n'
 set_test_env_value MULTICA_DEV_VERIFICATION_CODE ""
 set_test_env_value MULTICA_APP_ENV ""
+# The one-click entry signs in with the fixed code: an entry account without
+# it is refused rather than deployed as a silently unusable relay.
+set_test_env_value MULTICA_SSO_EMAIL admin@multica.example.invalid
+if (
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT"
+) >"$test_dir/multica-sso-without-code.log" 2>&1; then
+  printf 'MULTICA_SSO_EMAIL without MULTICA_DEV_VERIFICATION_CODE must be rejected\n' >&2
+  exit 1
+fi
+grep -q 'MULTICA_SSO_EMAIL requires MULTICA_DEV_VERIFICATION_CODE' \
+  "$test_dir/multica-sso-without-code.log"
+printf 'ok deploy-multica-sso-pairing-validated\n'
+set_test_env_value MULTICA_SSO_EMAIL ""
 
 # The web bind address must be a plain IP literal: hostnames, host:port and
 # schemes would silently change the published-interface contract.
