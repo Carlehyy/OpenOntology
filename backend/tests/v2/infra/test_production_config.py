@@ -458,6 +458,60 @@ def test_deploy_completes_one_click_entry_on_bundled_default(tmp_path):
     assert generated["MULTICA_DEFAULT_BASE_URL"] == "http://multica:8080"
     assert generated["MULTICA_APP_ENV"] == "development"
     assert generated["MULTICA_SSO_EMAIL"] == "admin@multica.example.com"
+    # 中继每次进入都先发一次验证码，且所有用户共用后端容器这一个来源 IP：
+    # 留空的每来源验证码限额被抬到 60/分钟，否则上游默认的 5 次/分钟会把
+    # 直达限流成「只跳转、不种会话」。
+    assert generated["MULTICA_RATE_LIMIT_AUTH"] == "60"
+    # 网页来源与默认集的 WEB_URL 一致：上游据此给会话 cookie 加 Secure、
+    # 放行来自网关来源的实时连接。
+    assert generated["MULTICA_FRONTEND_ORIGIN"] == "https://203.0.113.10:8446"
+
+
+def test_deploy_derives_multica_frontend_origin_without_a_default(tmp_path):
+    """没有部署级默认集时 bundled 栈照常运行：网页来源仍按网关 origin 推导，
+    手动登录的用户同样拿到 Secure 会话 cookie 与可用的实时连接。"""
+    shutil.copy(ROOT / ".env.example", tmp_path / ".env.example")
+    shutil.copy(ROOT / ".env.example", tmp_path / ".env")
+
+    result = _run_deploy_validation(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    generated = _read_env(tmp_path / ".env")
+    assert generated["MULTICA_FRONTEND_ORIGIN"] == "https://64.83.14.139:8446"
+    # 未启用直达时不改动上游默认的验证码限额（模板键保持为空）
+    assert generated.get("MULTICA_RATE_LIMIT_AUTH", "") == ""
+
+
+def test_deploy_keeps_explicit_multica_frontend_origin_and_rate_limit(tmp_path):
+    """显式值一律尊重：自备反代的网页来源与运维自定的验证码限额不被改写。"""
+    _write_multica_default_env(
+        tmp_path,
+        "MULTICA_SSO_EMAIL=admin@multica.example.com",
+        "MULTICA_DEV_VERIFICATION_CODE=246810",
+        "MULTICA_FRONTEND_ORIGIN=https://multica.example.com",
+        "MULTICA_RATE_LIMIT_AUTH=120",
+    )
+
+    result = _run_deploy_validation(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    generated = _read_env(tmp_path / ".env")
+    assert generated["MULTICA_FRONTEND_ORIGIN"] == "https://multica.example.com"
+    assert generated["MULTICA_RATE_LIMIT_AUTH"] == "120"
+
+
+@pytest.mark.parametrize("value", ["0", "abc", "-1", "5.5"], ids=["zero", "text", "negative", "decimal"])
+def test_deploy_rejects_non_positive_multica_rate_limit(tmp_path, value):
+    _write_fixed_sign_in_code_env(tmp_path, "246810")
+    with (tmp_path / ".env").open("a", encoding="utf-8") as handle:
+        handle.write(f"MULTICA_RATE_LIMIT_AUTH={value}\n")
+
+    result = _run_deploy_validation(tmp_path)
+
+    assert result.returncode != 0
+    assert "MULTICA_RATE_LIMIT_AUTH must be a positive integer" in (
+        result.stdout + result.stderr
+    )
 
 
 def test_production_compose_publishes_multica_gateway_tls_entry():

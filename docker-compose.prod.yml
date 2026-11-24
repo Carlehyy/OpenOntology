@@ -712,6 +712,10 @@ services:
       FRONTEND_ORIGIN: ${MULTICA_FRONTEND_ORIGIN:-}
       MULTICA_APP_URL: ${MULTICA_APP_URL:-}
       ALLOW_SIGNUP: ${MULTICA_ALLOW_SIGNUP:-true}
+      # 上游对 /auth/send-code 按来源 IP 限流（默认 5 次/分钟）。一键直达的中继
+      # 每次进入都要先发一次验证码，且所有平台用户共用后端容器这一个来源 IP；
+      # 启用直达时由 deploy-prod.sh 在留空的情况下调高（默认 60）。
+      RATE_LIMIT_AUTH: ${MULTICA_RATE_LIMIT_AUTH:-5}
       MULTICA_DATABASE_STARTUP_TIMEOUT: ${MULTICA_DATABASE_STARTUP_TIMEOUT:-3m}
     healthcheck:
       # 官方健康契约：GET /healthz（ready，迁移完成后 200）。镜像基 alpine

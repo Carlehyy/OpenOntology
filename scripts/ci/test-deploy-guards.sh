@@ -3772,6 +3772,10 @@ fi
 grep -Fq 'configured MULTICA_APP_ENV=development so MULTICA_DEV_VERIFICATION_CODE takes effect' \
   "$test_dir/multica-dev-code-ok.log"
 grep -Fxq 'MULTICA_APP_ENV=development' "$test_dir/.env"
+# The bundled stack's web origin follows the multica-gateway origin when
+# left empty (upstream derives Secure session cookies and its WebSocket
+# origin check from it).
+grep -Fxq 'MULTICA_FRONTEND_ORIGIN=https://64.83.14.139:8446' "$test_dir/.env"
 if grep -Fq '246810' "$test_dir/multica-dev-code-ok.log" \
     || grep -Fq '246810' "$test_dir/multica-dev-code-production.log"; then
   printf 'the Multica fixed sign-in code leaked into deployment logs\n' >&2
@@ -3797,7 +3801,26 @@ if (
 fi
 grep -q 'MULTICA_SSO_EMAIL requires MULTICA_DEV_VERIFICATION_CODE' \
   "$test_dir/multica-sso-without-code.log"
+# With the code present but no deployment default, the entry has no web
+# origin to open: refused as well instead of deploying a dead relay.
+set_test_env_value MULTICA_DEV_VERIFICATION_CODE 246810
+if (
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT"
+) >"$test_dir/multica-sso-without-web-url.log" 2>&1; then
+  printf 'MULTICA_SSO_EMAIL without MULTICA_DEFAULT_WEB_URL must be rejected\n' >&2
+  exit 1
+fi
+grep -q 'MULTICA_SSO_EMAIL requires MULTICA_DEFAULT_WEB_URL' \
+  "$test_dir/multica-sso-without-web-url.log"
 printf 'ok deploy-multica-sso-pairing-validated\n'
+set_test_env_value MULTICA_DEV_VERIFICATION_CODE ""
+set_test_env_value MULTICA_APP_ENV ""
 set_test_env_value MULTICA_SSO_EMAIL ""
 
 # The web bind address must be a plain IP literal: hostnames, host:port and

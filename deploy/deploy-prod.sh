@@ -217,6 +217,7 @@ compose_environment() {
     -u MULTICA_APP_ENV \
     -u MULTICA_FRONTEND_ORIGIN \
     -u MULTICA_APP_URL \
+    -u MULTICA_RATE_LIMIT_AUTH \
     -u MULTICA_ALLOW_SIGNUP \
     -u MULTICA_DATABASE_STARTUP_TIMEOUT \
     -u MULTICA_DEFAULT_BASE_URL \
@@ -1753,7 +1754,7 @@ configure_multica_env() {
   # 员在 Multica 原生界面/官方 CLI 创建后填入服务器 .env（或经受控 manifest
   # 物化）——部署绝不宣称空卷已初始化账号/PAT/workspace。
   local current base_url web_url bind_addr ws_id ws_name default_pat tls_ip https_port
-  local gateway_web_origin dev_code
+  local gateway_web_origin dev_code bundled_frontend_origin
   local -a updates=()
   case "$(env_value MULTICA_ENABLED)" in
     1|true|TRUE|yes|YES|"") MULTICA_INTERNAL=1 ;;
@@ -1873,6 +1874,38 @@ configure_multica_env() {
       fi
     fi
   fi
+  # bundled 栈的网页来源（上游 FRONTEND_ORIGIN）：会话 cookie 的 Secure 标记、
+  # 实时连接（WebSocket）的来源校验与邀请链接都以它为准。留空时上游拒绝来自
+  # multica-gateway 来源的实时连接、cookie 也不带 Secure，因此按本部署发布的
+  # 公开 Web origin 推导：默认集指向 bundled 栈且已有 WEB_URL 时与它一致
+  # （自备反代的部署由此保留自己的 origin），否则取网关 origin。显式值一律尊重。
+  current="$(env_value MULTICA_FRONTEND_ORIGIN)"
+  if [ -z "$current" ]; then
+    tls_ip="$(env_value PUBLIC_TLS_IP)"
+    https_port="$(env_value MULTICA_HTTPS_PORT)"
+    https_port="${https_port:-8446}"
+    case "$tls_ip" in
+      "") gateway_web_origin="" ;;
+      *:*) gateway_web_origin="https://[${tls_ip}]:${https_port}" ;;
+      *) gateway_web_origin="https://${tls_ip}:${https_port}" ;;
+    esac
+    bundled_frontend_origin="$gateway_web_origin"
+    if [ "${base_url%/}" = "http://multica:8080" ] && [ -n "$web_url" ]; then
+      bundled_frontend_origin="${web_url%/}"
+    fi
+    if [ -n "$bundled_frontend_origin" ]; then
+      updates+=("MULTICA_FRONTEND_ORIGIN=${bundled_frontend_origin}")
+      log "configured MULTICA_FRONTEND_ORIGIN from the bundled Multica web origin (session cookie Secure flag and WebSocket origin checks follow it)"
+    fi
+  fi
+  # 一键直达的验证码限额：上游对 /auth/send-code 按来源 IP 限流（默认 5 次/
+  # 分钟），中继每次进入都要先发一次验证码（校验接口要求一条未使用的记录），
+  # 且所有平台用户共用后端容器这一个来源 IP。启用直达时留空即取 60/分钟；
+  # 显式值一律尊重。
+  if [ -n "$(env_value MULTICA_SSO_EMAIL)" ] && [ -z "$(env_value MULTICA_RATE_LIMIT_AUTH)" ]; then
+    updates+=("MULTICA_RATE_LIMIT_AUTH=60")
+    log "configured MULTICA_RATE_LIMIT_AUTH=60 so the one-click entry relay is not throttled by the per-source sign-in code limit"
+  fi
   # Multica 内网地址允许清单独立于 MCP 清单：未显式配置时按同源补齐，绝不
   # 写入 SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS。
   current="$(env_value SUPER_ASSISTANT_MULTICA_INTERNAL_BASE_URLS)"
@@ -1927,7 +1960,7 @@ validate_multica_config() {
   # 错误）；五项全空在两种状态下都合法——启用时栈正常跑、无部署级默认
   # （readiness 不门禁 multica_default），管理员在原生界面完成初始化后
   # 回填。仅在启用 bundled 栈时才强校验镜像/密钥/端口。
-  local multica_pat dev_code app_env
+  local multica_pat dev_code app_env rate_limit_auth
   local configured_count=0 key value
   for key in \
     MULTICA_DEFAULT_BASE_URL MULTICA_DEFAULT_WEB_URL \
@@ -1968,6 +2001,15 @@ validate_multica_config() {
       exit 1
     fi
   fi
+  # 验证码限额是上游 /auth/send-code 的每来源 IP 每分钟次数：正整数。
+  rate_limit_auth="$(env_value MULTICA_RATE_LIMIT_AUTH)"
+  case "$rate_limit_auth" in
+    "") ;;
+    *[!0-9]*|0)
+      log "MULTICA_RATE_LIMIT_AUTH must be a positive integer (sign-in code requests per minute per source)"
+      exit 1
+      ;;
+  esac
   # 官方镜像 digest 门禁：三个镜像引用（默认 pin 或运维覆盖）都必须是
   # 不可变 @sha256；GHCR 只发布 latest tag，浮动引用一律拒绝。
   for key in MULTICA_BACKEND_IMAGE MULTICA_WEB_IMAGE MULTICA_POSTGRES_IMAGE; do
