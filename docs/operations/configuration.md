@@ -678,7 +678,18 @@ PAT 换不出浏览器会话，所以「打开 Multica」默认只是打开 Mult
   自定义 profile 不参与直达；
 - 配置约束：`MULTICA_SSO_EMAIL` 必须与 `MULTICA_DEV_VERIFICATION_CODE`
   成对出现（即同时接受上面「固定验证码」的安全取舍），且部署级默认集
-  完整；两个值只进 backend 与 multica 容器，不进日志与接口响应。
+  完整；两个值只进 backend 与 multica 容器，不进日志与接口响应；
+- 验证码限额：上游对 `POST /auth/send-code` 按来源 IP 限流（默认每分钟
+  5 次）。中继每次进入都必须先发一次验证码（校验接口要求一条未使用的
+  记录），而所有平台用户共用后端容器这一个来源 IP——因此启用直达且
+  `MULTICA_RATE_LIMIT_AUTH` 留空时部署取 60/分钟；显式值一律尊重。若配置
+  了邮件服务，每次直达也会向 `MULTICA_SSO_EMAIL` 发一封验证码邮件。
+
+bundled 栈的网页来源 `MULTICA_FRONTEND_ORIGIN`（上游变量）留空时由部署
+按公开 Web origin 推导：默认集指向 bundled 栈时与其 `MULTICA_DEFAULT_WEB_URL`
+一致，否则取 multica-gateway origin。上游据此决定会话 cookie 的 `Secure`
+标记，并校验实时连接（WebSocket）的来源——留空会导致经网关访问时实时
+连接被拒（`ws: rejected origin`）且 cookie 不带 `Secure`。
 
 fail-closed：票据无效/重放、Redis 不可用、Multica 拒绝或缺 `Set-Cookie`
 都 302 回 Multica 根路径且不种 cookie，落到自带的验证码登录页（即引入
