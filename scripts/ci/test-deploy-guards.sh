@@ -1044,6 +1044,15 @@ if [ "$multica_manifest_secret_count" -lt 2 ]; then
   printf 'verification and deploy must both materialize the Multica manifest secret\n' >&2
   exit 1
 fi
+multica_dev_code_secret_count="$(
+  grep -cF \
+    'PROD_MULTICA_DEV_VERIFICATION_CODE: ${{ secrets.PROD_MULTICA_DEV_VERIFICATION_CODE }}' \
+    "$DEPLOY_WORKFLOW"
+)"
+if [ "$multica_dev_code_secret_count" -lt 2 ]; then
+  printf 'verification and deploy must both materialize the Multica fixed sign-in code secret\n' >&2
+  exit 1
+fi
 multica_manifest_config_count="$(
   grep -cF \
     'PROD_MULTICA_DEFAULT_BASE_URL: ${{ vars.PROD_MULTICA_DEFAULT_BASE_URL }}' \
@@ -1466,6 +1475,7 @@ env \
   PROD_MULTICA_DEFAULT_WORKSPACE_ID= \
   PROD_MULTICA_DEFAULT_WORKSPACE_NAME= \
   PROD_MULTICA_DEFAULT_PAT= \
+  PROD_MULTICA_DEV_VERIFICATION_CODE= \
   bash "$REPO_ROOT/scripts/ci/materialize-production-dependencies.sh" \
     "$test_dir/test-production-dependencies.env" >/dev/null
 # 上面五个显式空值不可省：`env A=B … cmd` 继承作业环境，仓库级
@@ -1734,6 +1744,7 @@ env \
   PROD_MULTICA_DEFAULT_WORKSPACE_ID= \
   PROD_MULTICA_DEFAULT_WORKSPACE_NAME= \
   PROD_MULTICA_DEFAULT_PAT= \
+  PROD_MULTICA_DEV_VERIFICATION_CODE= \
   bash "$REPO_ROOT/scripts/ci/materialize-production-dependencies.sh" \
     "$test_dir/test-kaneo-dependencies.env" >/dev/null
 # 五个显式空值同上：该 manifest 会经 -u 应用进 .env，仓库级
@@ -3694,6 +3705,70 @@ fi
 grep -q 'MULTICA_BACKEND_IMAGE must be pinned to an immutable @sha256 digest' \
   "$test_dir/multica-floating-image.log"
 set_test_env_value MULTICA_BACKEND_IMAGE ""
+
+# Fixed sign-in code (upstream MULTICA_DEV_VERIFICATION_CODE): exactly six
+# digits; refused together with an explicit production APP_ENV (upstream would
+# silently ignore it there); with APP_ENV left empty the deployment runs the
+# stack as development so the code takes effect, and the code never reaches
+# the deployment log.
+set_test_env_value MULTICA_DEV_VERIFICATION_CODE 12345
+if (
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT"
+) >"$test_dir/multica-bad-dev-code.log" 2>&1; then
+  printf 'a MULTICA_DEV_VERIFICATION_CODE that is not six digits must be rejected\n' >&2
+  exit 1
+fi
+grep -q 'MULTICA_DEV_VERIFICATION_CODE must be exactly 6 digits' \
+  "$test_dir/multica-bad-dev-code.log"
+set_test_env_value MULTICA_DEV_VERIFICATION_CODE 246810
+set_test_env_value MULTICA_APP_ENV production
+if (
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT"
+) >"$test_dir/multica-dev-code-production.log" 2>&1; then
+  printf 'MULTICA_DEV_VERIFICATION_CODE together with MULTICA_APP_ENV=production must be rejected\n' >&2
+  exit 1
+fi
+grep -q 'MULTICA_DEV_VERIFICATION_CODE is set but MULTICA_APP_ENV=production' \
+  "$test_dir/multica-dev-code-production.log"
+set_test_env_value MULTICA_APP_ENV ""
+if (
+  cd "$test_dir"
+  env -u STRICT_IMAGE_DIGESTS \
+    APP_DIR="$test_dir" \
+    SKIP_GIT=1 \
+    DEPLOY_VALIDATE_ONLY=1 \
+    DEPENDENCY_CONFIG_FILE=test-production-dependencies.env \
+    bash "$DEPLOY_SCRIPT"
+) >"$test_dir/multica-dev-code-ok.log" 2>&1; then
+  :
+else
+  printf 'a six-digit MULTICA_DEV_VERIFICATION_CODE with APP_ENV left empty must deploy; log follows\n' >&2
+  cat "$test_dir/multica-dev-code-ok.log" >&2
+  exit 1
+fi
+grep -Fq 'configured MULTICA_APP_ENV=development so MULTICA_DEV_VERIFICATION_CODE takes effect' \
+  "$test_dir/multica-dev-code-ok.log"
+grep -Fxq 'MULTICA_APP_ENV=development' "$test_dir/.env"
+if grep -Fq '246810' "$test_dir/multica-dev-code-ok.log" \
+    || grep -Fq '246810' "$test_dir/multica-dev-code-production.log"; then
+  printf 'the Multica fixed sign-in code leaked into deployment logs\n' >&2
+  exit 1
+fi
+printf 'ok deploy-multica-dev-code-validated\n'
+set_test_env_value MULTICA_DEV_VERIFICATION_CODE ""
+set_test_env_value MULTICA_APP_ENV ""
 
 # The web bind address must be a plain IP literal: hostnames, host:port and
 # schemes would silently change the published-interface contract.

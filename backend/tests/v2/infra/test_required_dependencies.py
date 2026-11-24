@@ -56,6 +56,7 @@ MATERIALIZED_KEYS = {
     "MULTICA_DEFAULT_WORKSPACE_ID",
     "MULTICA_DEFAULT_WORKSPACE_NAME",
     "MULTICA_DEFAULT_PAT",
+    "MULTICA_DEV_VERIFICATION_CODE",
     "MULTICA_BACKEND_IMAGE",
     "MULTICA_WEB_IMAGE",
     "MULTICA_POSTGRES_IMAGE",
@@ -116,6 +117,7 @@ MATERIALIZER_OPTIONAL_VALUES = {
     "PROD_MULTICA_DEFAULT_WORKSPACE_ID": "00000000-0000-0000-0000-000000000001",
     "PROD_MULTICA_DEFAULT_WORKSPACE_NAME": "OpenOntology default workspace",
     "PROD_MULTICA_DEFAULT_PAT": "synthetic-multica-default-pat",
+    "PROD_MULTICA_DEV_VERIFICATION_CODE": "246810",
     "PROD_MULTICA_BACKEND_IMAGE": (
         f"example.invalid/multica-backend@sha256:{'3' * 64}"
     ),
@@ -265,6 +267,7 @@ def test_committed_manifest_template_declares_contract_without_secrets():
         "MINIO_SECRET_KEY",
         "N8N_API_KEY",
         "MULTICA_DEFAULT_PAT",
+        "MULTICA_DEV_VERIFICATION_CODE",
     }
     assert all(manifest[key] == "" for key in secret_keys)
     assert ".internal" not in template.read_text(encoding="utf-8")
@@ -499,12 +502,19 @@ def _assert_multica_compose_graph():
     ]
 
     # Secret masking: every env_file consumer keeps the empty masks for the
-    # Multica PAT and the stack's own JWT/DB secrets; only backend and
-    # pipeline_executor re-declare the real PAT for the deployment default
-    # and the AutoLoop worker.
+    # Multica PAT, the stack's own JWT/DB secrets and the fixed sign-in code;
+    # only backend and pipeline_executor re-declare the real PAT for the
+    # deployment default and the AutoLoop worker, and only the multica API
+    # container receives the fixed sign-in code.
     masked = {"MULTICA_DEFAULT_PAT", "MULTICA_JWT_SECRET",
-              "MULTICA_POSTGRES_PASSWORD"}
+              "MULTICA_POSTGRES_PASSWORD", "MULTICA_DEV_VERIFICATION_CODE"}
     for compose_services_map in (local, prod):
+        assert compose_services_map["multica"]["environment"][
+            "MULTICA_DEV_VERIFICATION_CODE"
+        ] == "${MULTICA_DEV_VERIFICATION_CODE:-}"
+        assert compose_services_map["multica"]["environment"]["APP_ENV"] == (
+            "${MULTICA_APP_ENV:-production}"
+        )
         for name, block in compose_services_map.items():
             environment = block.get("environment") or {}
             if not isinstance(environment, dict):
@@ -523,15 +533,16 @@ def _assert_multica_compose_graph():
                 # platform-default profile.
                 assert environment["MULTICA_JWT_SECRET"] == ""
                 assert environment["MULTICA_POSTGRES_PASSWORD"] == ""
+                assert environment["MULTICA_DEV_VERIFICATION_CODE"] == ""
                 if name == "pipeline_executor":
                     assert environment["MULTICA_DEFAULT_WEB_URL"] == (
                         "${MULTICA_DEFAULT_WEB_URL:-}"
                     )
-            else:
+            elif name != "multica":
                 # Any other service that carries these keys must keep the
                 # empty mask (only the multica stack containers consume the
-                # real stack secrets, and they use plain interpolated keys
-                # like JWT_SECRET/POSTGRES_PASSWORD instead).
+                # real stack secrets, and the JWT/DB ones use plain
+                # interpolated keys like JWT_SECRET/POSTGRES_PASSWORD instead).
                 for key in masked & set(environment):
                     assert environment[key] == "", (name, key)
 

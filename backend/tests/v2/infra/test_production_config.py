@@ -1603,6 +1603,61 @@ def test_deploy_requires_explicit_web_url_for_external_multica_default(
     assert _read_env(tmp_path / ".env")["MULTICA_DEFAULT_WEB_URL"] == ""
 
 
+def _write_fixed_sign_in_code_env(tmp_path, code: str, app_env: str = "") -> None:
+    shutil.copy(ROOT / ".env.example", tmp_path / ".env.example")
+    (tmp_path / ".env").write_text(
+        (ROOT / ".env.example").read_text(encoding="utf-8")
+        + f"MULTICA_DEV_VERIFICATION_CODE={code}\n"
+        + (f"MULTICA_APP_ENV={app_env}\n" if app_env else ""),
+        encoding="utf-8",
+    )
+
+
+def test_deploy_runs_bundled_multica_as_development_for_fixed_sign_in_code(
+    tmp_path,
+):
+    """上游只在 APP_ENV 非 production 时认固定验证码：配置了验证码而
+    APP_ENV 留空，部署按这一意图把栈落为 development；验证码是登录凭据，
+    不得出现在部署日志里。"""
+    _write_fixed_sign_in_code_env(tmp_path, "246810")
+
+    result = _run_deploy_validation(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    generated = _read_env(tmp_path / ".env")
+    assert generated["MULTICA_APP_ENV"] == "development"
+    assert generated["MULTICA_DEV_VERIFICATION_CODE"] == "246810"
+    assert (
+        "configured MULTICA_APP_ENV=development so "
+        "MULTICA_DEV_VERIFICATION_CODE takes effect"
+    ) in result.stdout
+    assert "246810" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    ("code", "app_env", "message"),
+    [
+        ("12345", "", "must be exactly 6 digits"),
+        ("12a456", "", "must be exactly 6 digits"),
+        ("246810", "production", "is set but MULTICA_APP_ENV=production"),
+    ],
+    ids=["five-digits", "non-digit", "explicit-production"],
+)
+def test_deploy_rejects_inconsistent_fixed_sign_in_code(
+    tmp_path, code, app_env, message,
+):
+    """固定验证码必须是 6 位数字；显式 production 环境下上游会静默忽略它，
+    这种自相矛盾的配置直接拒绝而不是部署成功却不生效。"""
+    _write_fixed_sign_in_code_env(tmp_path, code, app_env)
+
+    result = _run_deploy_validation(tmp_path)
+
+    assert result.returncode != 0
+    assert f"MULTICA_DEV_VERIFICATION_CODE {message}" in (
+        result.stdout + result.stderr
+    )
+
+
 def test_deploy_preserves_external_redis_url_without_binding_local_password(
     tmp_path,
 ):

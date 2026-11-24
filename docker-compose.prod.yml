@@ -75,7 +75,9 @@ x-weknora-app: &weknora-app-base
 # MULTICA_POSTGRES_PASSWORD belong to the multica containers only; `backend`
 # and `pipeline_executor` re-declare the real PAT for the default multica
 # integration and the AutoLoop worker, while every other runtime container
-# (and every process for JWT/DB secrets) keeps the empty mask.
+# (and every process for JWT/DB secrets) keeps the empty mask. The fixed
+# sign-in code MULTICA_DEV_VERIFICATION_CODE is likewise consumed by the
+# multica API container only (it is a sign-in credential for that service).
 x-platform-runtime-weknora-secret-blocks: &platform-runtime-weknora-secret-blocks
   WEKNORA_ADMIN_PASSWORD: ""
   WEKNORA_DB_PASSWORD: ""
@@ -92,6 +94,7 @@ x-platform-runtime-weknora-secret-blocks: &platform-runtime-weknora-secret-block
   MULTICA_DEFAULT_PAT: ""
   MULTICA_JWT_SECRET: ""
   MULTICA_POSTGRES_PASSWORD: ""
+  MULTICA_DEV_VERIFICATION_CODE: ""
 
 
 services:
@@ -698,6 +701,11 @@ services:
       # 变量——inactive profile 插值也会阻断核心 compose。
       JWT_SECRET: ${MULTICA_JWT_SECRET:-}
       APP_ENV: ${MULTICA_APP_ENV:-production}
+      # 官方固定验证码（上游 MULTICA_DEV_VERIFICATION_CODE）：仅 APP_ENV 非
+      # production 时生效，知道账号邮箱与该验证码即可登录 Multica，属于该
+      # 服务自己的登录凭据——只进本容器，其余 env_file 进程一律空掩码；
+      # 留空即关闭，验证码仍只打印在本容器日志或经邮件发送。
+      MULTICA_DEV_VERIFICATION_CODE: ${MULTICA_DEV_VERIFICATION_CODE:-}
       # 浏览器入口是 MULTICA_DEFAULT_WEB_URL 对应的公开 Web origin；bundled 栈
       # 留空时由 deploy-prod.sh 按 PUBLIC_TLS_IP 和 MULTICA_HTTPS_PORT 推导。
       FRONTEND_ORIGIN: ${MULTICA_FRONTEND_ORIGIN:-}
