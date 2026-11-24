@@ -15,7 +15,10 @@ import pytest
 import sqlalchemy as sa
 from fastapi import HTTPException
 from pydantic import ValidationError
+from sqlalchemy.orm import sessionmaker
 
+from app.deps import get_db
+from app.main import app
 from app.data_channel.connections.models import Connection
 from app.data_channel.datasets import integrated_store as store
 from app.data_channel.datasets.models import Dataset, DatasetVersion, IntegratedSyncRun
@@ -258,6 +261,76 @@ def test_register_with_inline_source_is_atomic_and_encrypted(db, admin_user, mon
         # No credentials anywhere in the DTO.
         assert "fixture-source-password" not in str(result) and "config" not in result
         assert db.query(IntegratedAssetFieldConfig).count() == 0
+    finally:
+        engine.dispose()
+
+
+def _production_sessions(db):
+    # Production SessionLocal disables autoflush; the shared test session does
+    # not, which hid registration never flushing the asset before its row lock.
+    return sessionmaker(bind=db.get_bind(), autoflush=False)
+
+
+@pytest.mark.parametrize("reference", ["connection_id", "source_connection"])
+def test_register_locks_a_flushed_asset_without_autoflush(db, admin_user, monkeypatch, reference):
+    """Production SessionLocal has autoflush=False.
+
+    ensure_replica locks the asset with SELECT ... FOR UPDATE right after it
+    joins the session. Unless that INSERT was flushed first the lock finds no
+    row, and every registration fails ASSET_NOT_FOUND (HTTP 500) in production.
+    """
+    engine, table, schema, fingerprint = _physical_source(monkeypatch)
+    try:
+        monkeypatch.setattr(service, "dbx", lambda: _FakeDbxAdapter(_dbx_evidence(schema)))
+        body = _register_body()
+        if reference == "connection_id":
+            db.add(Connection(id="shared-source", name="shared source", kind="postgres", config={}))
+            db.commit()
+            body = {"name": body["name"], "connection_id": "shared-source",
+                    "schema_name": body["schema_name"], "table_name": body["table_name"]}
+        session = _production_sessions(db)()
+        try:
+            user = session.get(type(admin_user), admin_user.id)
+            result = service.register_asset(
+                session, user, RegisterAsset.model_validate(body))
+        finally:
+            session.close()
+
+        db.expire_all()
+        asset = db.get(IntegratedAsset, result["id"])
+        assert asset is not None and asset.connection_id == result["connection_id"]
+        # Registration is incomplete without its replica: the row and the
+        # queued first rebuild committed with connection+dataset+asset.
+        replica = db.get(IntegratedReplica, asset.id)
+        assert replica is not None and replica.status == "initializing"
+        run = db.get(IntegratedReplicaRun, replica.pending_run_id)
+        assert run.status == "queued" and run.generation == replica.generation == 1
+        assert run.schema_fingerprint == asset.schema_fingerprint == fingerprint
+        assert result["replica"]["status"] == "initializing"
+        assert result["replica"]["complete"] is False
+    finally:
+        engine.dispose()
+
+
+def test_register_responds_201_without_autoflush(db, client, auth_headers, monkeypatch):
+    engine, table, schema, fingerprint = _physical_source(monkeypatch)
+    try:
+        monkeypatch.setattr(service, "dbx", lambda: _FakeDbxAdapter(_dbx_evidence(schema)))
+
+        def override_get_db():
+            session = _production_sessions(db)()
+            try:
+                yield session
+            finally:
+                session.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+        response = client.post("/api/v2/integrated-datasets", json=_register_body(),
+                               headers=auth_headers)
+        assert response.status_code == 201, response.text
+        db.expire_all()
+        assert db.query(IntegratedAsset).count() == 1
+        assert db.query(IntegratedReplicaRun).filter_by(status="queued").count() == 1
     finally:
         engine.dispose()
 
