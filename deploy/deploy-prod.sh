@@ -210,6 +210,7 @@ compose_environment() {
     -u MULTICA_POSTGRES_USER \
     -u MULTICA_POSTGRES_PASSWORD \
     -u MULTICA_JWT_SECRET \
+    -u MULTICA_DEV_VERIFICATION_CODE \
     -u MULTICA_WEB_PORT \
     -u MULTICA_WEB_BIND_ADDR \
     -u MULTICA_HTTPS_PORT \
@@ -1751,7 +1752,7 @@ configure_multica_env() {
   # 员在 Multica 原生界面/官方 CLI 创建后填入服务器 .env（或经受控 manifest
   # 物化）——部署绝不宣称空卷已初始化账号/PAT/workspace。
   local current base_url web_url bind_addr ws_id ws_name default_pat tls_ip https_port
-  local gateway_web_origin
+  local gateway_web_origin dev_code
   local -a updates=()
   case "$(env_value MULTICA_ENABLED)" in
     1|true|TRUE|yes|YES|"") MULTICA_INTERNAL=1 ;;
@@ -1802,6 +1803,15 @@ configure_multica_env() {
         ;;
     esac
   done
+  # 官方固定验证码 MULTICA_DEV_VERIFICATION_CODE（可选）：上游只在 APP_ENV 非
+  # production 时认它，因此配置了验证码就必须让栈跑在非 production 环境。
+  # APP_ENV 留空时按这一意图落 development；显式写 production 又配验证码是
+  # 自相矛盾的配置，交由 validate 拒绝。验证码只进 multica 容器，日志脱敏。
+  dev_code="$(env_value MULTICA_DEV_VERIFICATION_CODE)"
+  if [ -n "$dev_code" ] && [ -z "$(env_value MULTICA_APP_ENV)" ]; then
+    updates+=("MULTICA_APP_ENV=development")
+    log "configured MULTICA_APP_ENV=development so MULTICA_DEV_VERIFICATION_CODE takes effect (Multica ignores the fixed code under production)"
+  fi
   # 五值默认集的推导只在“其余四值已齐、仅差派生项”时进行：全空集合保持
   # 全空（栈正常启动、无部署级默认，readiness 不门禁 multica_default——
   # 管理员在原生界面完成账号/PAT/workspace 后再回填），部分填写则原样交给
@@ -1916,7 +1926,7 @@ validate_multica_config() {
   # 错误）；五项全空在两种状态下都合法——启用时栈正常跑、无部署级默认
   # （readiness 不门禁 multica_default），管理员在原生界面完成初始化后
   # 回填。仅在启用 bundled 栈时才强校验镜像/密钥/端口。
-  local multica_pat
+  local multica_pat dev_code app_env
   local configured_count=0 key value
   for key in \
     MULTICA_DEFAULT_BASE_URL MULTICA_DEFAULT_WEB_URL \
@@ -1930,6 +1940,21 @@ validate_multica_config() {
     exit 1
   fi
   [ "$MULTICA_INTERNAL" = "1" ] || return 0
+  # 固定验证码形态：上游要求恰好 6 位数字；显式 production 环境下上游会忽略
+  # 它，这种组合只可能是配置失误，直接拒绝而不是静默不生效。
+  dev_code="$(env_value MULTICA_DEV_VERIFICATION_CODE)"
+  app_env="$(env_value MULTICA_APP_ENV)"
+  case "$dev_code" in
+    "") ;;
+    *[!0-9]*|?|??|???|????|?????|???????*)
+      log "MULTICA_DEV_VERIFICATION_CODE must be exactly 6 digits (the fixed sign-in code format Multica expects)"
+      exit 1
+      ;;
+  esac
+  if [ -n "$dev_code" ] && [ "$(printf '%s' "$app_env" | tr '[:upper:]' '[:lower:]')" = "production" ]; then
+    log "MULTICA_DEV_VERIFICATION_CODE is set but MULTICA_APP_ENV=production; Multica ignores the fixed code under production - remove the code or set MULTICA_APP_ENV to a non-production value"
+    exit 1
+  fi
   # 官方镜像 digest 门禁：三个镜像引用（默认 pin 或运维覆盖）都必须是
   # 不可变 @sha256；GHCR 只发布 latest tag，浮动引用一律拒绝。
   for key in MULTICA_BACKEND_IMAGE MULTICA_WEB_IMAGE MULTICA_POSTGRES_IMAGE; do
@@ -2329,6 +2354,7 @@ dependency_key_allowed() {
     MULTICA_DEFAULT_PAT|MULTICA_DEFAULT_WEB_URL|\
     MULTICA_DEFAULT_BASE_URL|MULTICA_DEFAULT_WORKSPACE_ID|\
     MULTICA_DEFAULT_WORKSPACE_NAME|\
+    MULTICA_DEV_VERIFICATION_CODE|\
     MULTICA_BACKEND_IMAGE|MULTICA_WEB_IMAGE|MULTICA_POSTGRES_IMAGE|\
     SUPER_ASSISTANT_MCP_STDIO_ENABLED|SUPER_ASSISTANT_MCP_STDIO_ALLOWED_COMMANDS)
       return 0
@@ -2809,7 +2835,8 @@ redact_compose_logs() {
     KANEO_ADMIN_PASSWORD KANEO_DB_PASSWORD KANEO_AUTH_SECRET \
     HINDSIGHT_DB_PASSWORD HINDSIGHT_API_KEY HINDSIGHT_SERVICE_TOKEN \
     HINDSIGHT_CP_ACCESS_KEY \
-    MULTICA_DEFAULT_PAT MULTICA_JWT_SECRET MULTICA_POSTGRES_PASSWORD; do
+    MULTICA_DEFAULT_PAT MULTICA_JWT_SECRET MULTICA_POSTGRES_PASSWORD \
+    MULTICA_DEV_VERIFICATION_CODE; do
     value="$(env_value "$key")"
     [ -z "$value" ] || sensitive_values+=("$value")
   done

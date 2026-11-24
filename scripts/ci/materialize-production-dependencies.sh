@@ -165,6 +165,11 @@ append_optional MULTICA_DEFAULT_WEB_URL PROD_MULTICA_DEFAULT_WEB_URL
 append_optional MULTICA_DEFAULT_WORKSPACE_ID PROD_MULTICA_DEFAULT_WORKSPACE_ID
 append_optional MULTICA_DEFAULT_WORKSPACE_NAME PROD_MULTICA_DEFAULT_WORKSPACE_NAME
 append_optional MULTICA_DEFAULT_PAT PROD_MULTICA_DEFAULT_PAT
+# Optional fixed sign-in code for the bundled Multica (upstream
+# MULTICA_DEV_VERIFICATION_CODE). It is a sign-in credential: anyone who knows
+# an account email plus this code can log in, so enable it only for private or
+# test instances. Leave unset to keep codes in the container log / email only.
+append_optional MULTICA_DEV_VERIFICATION_CODE PROD_MULTICA_DEV_VERIFICATION_CODE
 # Official v0.11.0 digest pins; when omitted, deploy-prod.sh supplies the
 # verified digests itself. Overrides must also include @sha256.
 append_optional_digest MULTICA_BACKEND_IMAGE PROD_MULTICA_BACKEND_IMAGE

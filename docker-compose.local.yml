@@ -65,7 +65,9 @@ x-weknora-app: &weknora-app-base
 # containers only. `backend` and `pipeline_executor` re-declare the real PAT
 # for the default multica integration and the AutoLoop worker (explicit keys
 # win over merge keys); all other runtime containers keep the empty PAT mask,
-# and every platform process keeps the empty JWT/DB-secret masks.
+# and every platform process keeps the empty JWT/DB-secret masks. The fixed
+# sign-in code MULTICA_DEV_VERIFICATION_CODE is likewise masked everywhere
+# except the multica API container.
 # `backend` re-declares KANEO_ADMIN_PASSWORD and WEKNORA_ADMIN_PASSWORD with
 # the real local values for the one-click SSO relays; all other runtime
 # containers keep the empty masks.
@@ -83,6 +85,7 @@ x-platform-runtime-weknora-secret-blocks: &platform-runtime-weknora-secret-block
   MULTICA_DEFAULT_PAT: ""
   MULTICA_JWT_SECRET: ""
   MULTICA_POSTGRES_PASSWORD: ""
+  MULTICA_DEV_VERIFICATION_CODE: ""
 
 services:
   db:
@@ -680,6 +683,8 @@ services:
       # 本地开发兜底 JWT；生产无兜底（deploy-prod.sh 强制生成强随机值）。
       JWT_SECRET: ${MULTICA_JWT_SECRET:-multica-local-jwt-secret-change-me}
       APP_ENV: ${MULTICA_APP_ENV:-production}
+      # 官方固定验证码（仅 APP_ENV 非 production 时生效）；留空即关闭。
+      MULTICA_DEV_VERIFICATION_CODE: ${MULTICA_DEV_VERIFICATION_CODE:-}
       # 浏览器入口 = web 容器的 loopback 发布端口（web 在服务端代理 API）。
       FRONTEND_ORIGIN: ${MULTICA_FRONTEND_ORIGIN:-http://localhost:18100}
       MULTICA_APP_URL: ${MULTICA_APP_URL:-http://localhost:18100}

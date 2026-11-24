@@ -625,14 +625,23 @@ compose 提供上游 multica-ai/multica **v0.11.0**（commit
 自动播种——默认启用的 bundled 栈是"自动启动、手动初始化"，不是零配置
 可用。管理员手动步骤：
 
-1. 首启后打开 web 入口，用邮箱注册首个账号——生产直接访问
-   multica-gateway（`https://<PUBLIC_TLS_IP>:<MULTICA_HTTPS_PORT>`，默认
-   8446；自签证书需在浏览器信任一次），或建 SSH 隧道走
-   `http://localhost:18100`，本地 compose 直接 `http://localhost:18100`。
-   未配置 RESEND/SMTP 时，验证码打印在 API 容器日志
-   （`docker compose --profile multica logs multica` 中的
-   `[DEV] Verification code` 行）；生产建议配置邮件后再开放注册并收紧
-   `MULTICA_ALLOW_SIGNUP`。
+1. 首启后打开 web 入口，用邮箱注册首个账号。Multica 没有密码登录：输入
+   邮箱后填 6 位验证码，会话默认 30 天（上游 `AUTH_TOKEN_TTL`，滑动续期）。
+   生产直接访问 multica-gateway
+   （`https://<PUBLIC_TLS_IP>:<MULTICA_HTTPS_PORT>`，默认 8446；自签证书
+   需在浏览器信任一次），或建 SSH 隧道走 `http://localhost:18100`，本地
+   compose 直接 `http://localhost:18100`。验证码的获取方式二选一：
+   - 默认：未配置 RESEND/SMTP 时打印在 API 容器日志
+     （`docker compose --profile multica logs multica` 中的
+     `[DEV] Verification code` 行），配置了邮件服务则发到邮箱。
+   - 固定验证码：设置 `MULTICA_DEV_VERIFICATION_CODE`（恰好 6 位数字）
+     后，任何账号邮箱 + 该验证码即可登录。**它等同于公开的登录口令**：
+     能访问 web 入口的人只要知道一个账号邮箱就能进，只适合私有或测试
+     实例；需要对外收紧时改回留空并配置邮件服务。上游只在 `APP_ENV`
+     非 production 时认它，因此 `MULTICA_APP_ENV` 留空时部署自动落
+     development，显式 production 与固定验证码并存则部署拒绝。该值只进
+     multica 容器，部署日志脱敏。
+   生产建议配置邮件后再开放注册并收紧 `MULTICA_ALLOW_SIGNUP`。
 2. 在 Multica 内创建/选定 workspace，记下其 ID 与名称。
 3. 用该账号铸造 PAT：Multica 原生界面/API（`POST /api/tokens`），或
    官方 CLI `multica login` 指向本部署（浏览器登录流自动 mint PAT）。
@@ -648,7 +657,8 @@ compose 提供上游 multica-ai/multica **v0.11.0**（commit
 
 部署脚本启用时校验：三个镜像 digest、JWT/DB 密钥非空且非开发兜底、
 五值 all-or-nothing、PAT ≥8 位且无空白、`MULTICA_WEB_PORT` 端口范围、
-`MULTICA_WEB_BIND_ADDR` 为 IP 字面量，以及两个 URL 的 origin 形态
+`MULTICA_WEB_BIND_ADDR` 为 IP 字面量、固定验证码恰好 6 位数字且不与
+显式 `MULTICA_APP_ENV=production` 并存，以及两个 URL 的 origin 形态
 （完整五值时）。
 
 ### 集成数据集 dbx（生产）
