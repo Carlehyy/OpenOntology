@@ -420,11 +420,13 @@ def register_asset(db, user, body):
     if new_connection is not None:
         db.add(new_connection)
     db.add(dataset)
+    db.add(asset)
     try:
         # Connection encryption, dataset, asset and its optional field config
         # commit atomically; no partial registration can survive a failure.
+        # Production sessions disable autoflush: the flush must precede
+        # ensure_replica, whose row lock reads the asset from the database.
         db.flush()
-        db.add(asset)
         # Registration is incomplete without a local read replica: the durable
         # replica row and its queued rebuild run join the same transaction, and
         # the replication runtime reconciles queued runs (no extra dispatch
