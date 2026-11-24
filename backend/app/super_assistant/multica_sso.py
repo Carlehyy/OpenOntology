@@ -23,6 +23,11 @@ Multica Web 只认它自己的 Cookie 会话，会话只能由邮箱验证码或
 fail-closed：任何失败（票据无效/重放、Redis 不可用、Multica 拒绝、缺
 ``Set-Cookie``）都 302 回 Multica 根路径且不种 cookie，落到 Multica 自带
 登录页（即引入直达前的体验）。邮箱、验证码与票据不写日志、不进接口响应。
+
+上游节流（不可配置）：``/auth/send-code`` 对同一邮箱 60 秒内只发一次
+验证码，而直达让所有平台用户共用一个账号——因此全平台每分钟最多完成
+一次「新的登录」。窗口内的直达拿不到新会话并按 fail-closed 降级；已有
+会话的浏览器仍按原会话进入，不受影响。
 """
 from __future__ import annotations
 

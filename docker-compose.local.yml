@@ -690,8 +690,6 @@ services:
       FRONTEND_ORIGIN: ${MULTICA_FRONTEND_ORIGIN:-http://localhost:18100}
       MULTICA_APP_URL: ${MULTICA_APP_URL:-http://localhost:18100}
       ALLOW_SIGNUP: ${MULTICA_ALLOW_SIGNUP:-true}
-      # 上游 /auth/send-code 的每来源 IP 每分钟限额（默认 5）；与生产 compose 同名。
-      RATE_LIMIT_AUTH: ${MULTICA_RATE_LIMIT_AUTH:-5}
       MULTICA_DATABASE_STARTUP_TIMEOUT: ${MULTICA_DATABASE_STARTUP_TIMEOUT:-3m}
     healthcheck:
       # 官方健康契约：GET /healthz（ready，迁移完成后 200）。镜像基 alpine

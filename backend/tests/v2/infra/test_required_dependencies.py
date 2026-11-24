@@ -523,10 +523,6 @@ def _assert_multica_compose_graph():
         assert compose_services_map["multica"]["environment"]["APP_ENV"] == (
             "${MULTICA_APP_ENV:-production}"
         )
-        # 上游 /auth/send-code 的每来源限额经同名变量透传（默认即上游默认 5）。
-        assert compose_services_map["multica"]["environment"][
-            "RATE_LIMIT_AUTH"
-        ] == "${MULTICA_RATE_LIMIT_AUTH:-5}"
         backend_environment = compose_services_map["backend"]["environment"]
         for key, value in relay_pair.items():
             assert backend_environment[key] == value
