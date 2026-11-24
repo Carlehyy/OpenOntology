@@ -401,6 +401,65 @@ def test_production_rejects_non_public_multica_default_web_url(web_url):
     )
 
 
+def test_production_accepts_complete_one_click_multica_entry():
+    """中继账号 + 固定验证码 + 完整默认集：一键直达配置完整，无报错。"""
+    assert production_config_errors(_production_settings(
+        **_multica_default(
+            multica_sso_email="admin@multica.example.com",
+            multica_dev_verification_code="246810",
+        )
+    )) == []
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        (
+            {"multica_sso_email": "admin@multica.example.com"},
+            "MULTICA_SSO_EMAIL requires MULTICA_DEV_VERIFICATION_CODE",
+        ),
+        (
+            {
+                "multica_default_web_url": "",
+                "multica_sso_email": "admin@multica.example.com",
+                "multica_dev_verification_code": "246810",
+            },
+            "MULTICA_SSO_EMAIL requires the complete MULTICA_DEFAULT_* "
+            "deployment default",
+        ),
+    ],
+    ids=["account-without-fixed-code", "incomplete-default"],
+)
+def test_production_rejects_inconsistent_one_click_multica_entry(
+    overrides, message,
+):
+    """一键直达只对部署级默认 profile 生效：中继账号必须与固定验证码成对，
+    且默认集完整（入口取 WEB_URL、登录请求打 BASE_URL）。"""
+    errors = production_config_errors(
+        _production_settings(**_multica_default(**overrides))
+    )
+    assert message in errors
+
+
+def test_deploy_completes_one_click_entry_on_bundled_default(tmp_path):
+    """生产实际组合：清单只给直达账号 + 固定验证码 + 工作区/PAT 三项，地址
+    两项由部署推导，栈落 development，直达配置整体通过校验。"""
+    _write_multica_default_env(
+        tmp_path,
+        "MULTICA_SSO_EMAIL=admin@multica.example.com",
+        "MULTICA_DEV_VERIFICATION_CODE=246810",
+    )
+
+    result = _run_deploy_validation(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    generated = _read_env(tmp_path / ".env")
+    assert generated["MULTICA_DEFAULT_WEB_URL"] == "https://203.0.113.10:8446"
+    assert generated["MULTICA_DEFAULT_BASE_URL"] == "http://multica:8080"
+    assert generated["MULTICA_APP_ENV"] == "development"
+    assert generated["MULTICA_SSO_EMAIL"] == "admin@multica.example.com"
+
+
 def test_production_compose_publishes_multica_gateway_tls_entry():
     """Multica web 的公开入口是 bundled multica-gateway（TLS，复用平台证书），
     与 weknora/kaneo 网关同构；loopback 宿主端口不再承担公开访问。"""
@@ -423,6 +482,16 @@ def test_production_compose_publishes_multica_gateway_tls_entry():
     )
     assert "./docker/multica/multica-proxy.inc:/etc/nginx/multica-proxy.inc:ro" in volumes
     assert "frontend_ssl_certs:/etc/nginx/certs:ro" in volumes
+    # 一键直达中继：TLS server 上的 /sso/entry 反代到平台 backend 的 consume
+    # 路由（会话 Set-Cookie 以 Multica origin 第一方下发），与 kaneo 网关同构。
+    gateway_conf = (ROOT / "docker/multica/gateway.conf").read_text(encoding="utf-8")
+    tls_server = gateway_conf.split("listen 443 ssl default_server;", 1)[1]
+    assert "location = /sso/entry {" in tls_server
+    assert (
+        "proxy_pass http://$multica_sso_backend"
+        "/api/v2/super-assistant/multica/sso/consume$is_args$args;"
+    ) in tls_server
+    assert "resolver 127.0.0.11 valid=30s ipv6=off;" in tls_server
 
 
 def test_production_compose_requires_real_stack_without_chroma_or_fallbacks():

@@ -338,6 +338,12 @@ class Settings(BaseSettings):
     multica_default_workspace_id: str = ""
     multica_default_workspace_name: str = ""
     multica_default_pat: str = Field(default="", repr=False)
+    # 一键直达（可选，仅平台默认 profile）：中继以这一个 Multica 账号 + 上游
+    # 官方固定验证码服务端登录（见 super_assistant/multica_sso）。验证码是
+    # 登录凭据：不进 repr；compose 掩码锚点把这两个值对 env_file 服务置空，
+    # 仅 backend 显式取回真值（与 MULTICA_DEFAULT_PAT 的例外同构）。
+    multica_sso_email: str = ""
+    multica_dev_verification_code: str = Field(default="", repr=False)
     # Multica 内网地址允许清单（逗号分隔的 origin+路径前缀）。刻意独立于
     # MCP 的 SUPER_ASSISTANT_MCP_INTERNAL_BASE_URLS：默认空，不随 MCP 清单
     # 扩大信任面；仅部署声明内网 Multica（如 http://multica:3000）时填写。
@@ -351,6 +357,16 @@ class Settings(BaseSettings):
         if urlsplit(str(value or "").strip()).scheme != "https":
             raise ValueError("KANEO_WEB_URL must use https")
         return value
+
+    @field_validator("multica_dev_verification_code")
+    @classmethod
+    def multica_dev_verification_code_is_six_digits(cls, value: str) -> str:
+        # 上游固定验证码只接受恰好 6 位数字，其余取值会被静默忽略；在配置
+        # 入口就拒绝，避免「配了却不生效」的静默失败。
+        stripped = str(value or "").strip()
+        if stripped and not (len(stripped) == 6 and all(c in "0123456789" for c in stripped)):
+            raise ValueError("MULTICA_DEV_VERIFICATION_CODE must be exactly 6 digits")
+        return stripped
 
     # Hindsight 长期记忆服务（可选，Compose profile `hindsight`）。空地址 =
     # 功能关闭；部署 wiring 默认注入容器内网地址 http://hindsight:8888。
@@ -851,6 +867,21 @@ def production_config_errors(current: Settings) -> list[str]:
         if is_local:
             _insecure.append(
                 f"{key} must use a browser-reachable public host in production"
+            )
+    # 一键直达只对部署级默认 profile 生效：中继账号与固定验证码必须成对
+    # 出现，且默认集完整（入口取 WEB_URL，登录请求打 BASE_URL）。
+    if current.multica_sso_email.strip():
+        if not current.multica_dev_verification_code.strip():
+            _insecure.append(
+                "MULTICA_SSO_EMAIL requires MULTICA_DEV_VERIFICATION_CODE"
+            )
+        if not (
+            current.multica_default_web_url.strip()
+            and current.multica_default_base_url.strip()
+        ):
+            _insecure.append(
+                "MULTICA_SSO_EMAIL requires the complete MULTICA_DEFAULT_* "
+                "deployment default"
             )
     _insecure.extend(_integrated_dbx_config_errors(current))
     _insecure.extend(required_dependency_config_errors(current))

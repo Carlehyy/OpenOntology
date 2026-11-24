@@ -131,6 +131,12 @@ export interface KaneoEntry {
   redirect_url: string
 }
 
+/** Multica 一键直达跳转票据（平台默认 profile） */
+export interface MulticaEntry {
+  /** 带 90s 一次性票据的 Multica 入口地址：新标签打开后由网关中继完成登录 */
+  redirect_url: string
+}
+
 export interface SkillFile {
   path: string
   size: number
@@ -624,6 +630,9 @@ export interface MulticaProfile {
    *  MULTICA_DEFAULT_WEB_URL（bundled 栈为 multica-gateway 的推导 origin），
    *  custom 由用户显式配置。 */
   web_url: string | null
+  /** 平台默认 profile 是否提供一键直达（部署配置了中继账号与固定验证码）：
+   *  true 时「打开 Multica」先领一次性票据再跳转；custom 恒不带该标记。 */
+  sso_entry?: boolean
   is_active: boolean
   enabled: boolean
   base_url: string
@@ -831,6 +840,10 @@ export const superAssistantApi = {
   /** Kaneo 一键免登录：领取一次性跳转票据，登录由中继在 Kaneo origin 完成 */
   createKaneoEntry: () =>
     apiClientV2.post<KaneoEntry>('/super-assistant/kaneo/entry'),
+  /** Multica 一键直达（平台默认 profile）：领取一次性跳转票据，登录由中继
+   *  在 Multica origin 完成 */
+  createMulticaEntry: () =>
+    apiClientV2.post<MulticaEntry>('/super-assistant/multica/entry'),
   streamChat,
   /** kernel.v1 长任务 API；与旧 Conversation 流并行，调用方需自行保存 run_id/version。 */
   createKernelRun: (conversationId: string, body: {

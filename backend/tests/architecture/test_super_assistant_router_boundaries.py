@@ -834,8 +834,12 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     # /multica/profiles/{profile_id} 的 patch/delete、/activate 与 /test 的
     # post、/workspaces 的 get 共 7 个操作（5 条路径，multica.py 子路由）；
     # 旧 /multica/config|test|workspaces 四端点契约不变。
-    assert len(paths) == 102
-    assert sum(len(item) for item in paths.values()) == 132
+    # Multica 一键直达（与 Kaneo/WeKnora 中继同构，仅平台默认 profile）新增
+    # /multica/entry 的 POST 与 /multica/sso/consume 的 GET（经 multica-gateway
+    # 反代抵达，不挂平台守卫，一次性票据即凭证）共 2 个操作（2 条路径，
+    # multica_entry.py 子路由）；profile 输出新增 sso_entry 标记。
+    assert len(paths) == 104
+    assert sum(len(item) for item in paths.values()) == 134
     assert hashlib.sha256(payload).hexdigest() == (
-        "76dfc8516e39d5f5269c8b2b1cfab1d27087794901a48b0029a6ad71f74d49f0"
+        "0f780ab8e5fcc6c869e2fa2a2242d7d6bb5865806eb264d71de3db0615a5c2cf"
     )

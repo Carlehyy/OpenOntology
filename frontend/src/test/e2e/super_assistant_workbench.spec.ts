@@ -403,6 +403,8 @@ async function mockApis(page: Page, options: MockOptions = {}) {
   }
   // 一键免登录：点击时领取一次性跳转票据；记录请求供断言
   const kaneoEntryCalls: string[] = []
+  // Multica 平台默认 profile 的一键直达：同样领一次性票据；记录请求供断言
+  const multicaEntryCalls: string[] = []
   await page.route('**/api/**', route => {
     const request = route.request()
     const path = new URL(request.url()).pathname
@@ -896,6 +898,13 @@ async function mockApis(page: Page, options: MockOptions = {}) {
     }
     // multica 旧单配置契约保留：页面级 /multica: 命令门控仍 GET /multica/config
     // （写入已迁至 /multica/profiles；新建 profile 的测试连接走旧 /multica/test）
+    // Multica 平台默认 profile 一键直达：签发带一次性票据的 Multica origin 入口地址
+    if (path === '/api/v2/super-assistant/multica/entry' && request.method() === 'POST') {
+      multicaEntryCalls.push(request.url())
+      return json(route, {
+        redirect_url: 'https://multica.example.com:8446/sso/entry?ticket=ticket-1.signature',
+      })
+    }
     if (path === '/api/v2/super-assistant/multica/config') {
       return json(route, options.multicaConfig ?? multicaUnconfiguredFixture)
     }
@@ -1151,6 +1160,7 @@ async function mockApis(page: Page, options: MockOptions = {}) {
     weknoraEntryCalls,
     kaneoCalls,
     kaneoEntryCalls,
+    multicaEntryCalls,
     mcpPatches,
     mcpTests,
     isChatDone: () => chatDone,
@@ -4317,6 +4327,69 @@ test('multica 多 profile：激活自定义配置与停用回默认', async ({ p
   await row.getByTestId('multica-profile-activate').click()
   await expect.poll(() => mocks.multicaProfileActivates).toEqual(['mp-default', 'mp-custom-1'])
   await expect(row).toContainText('当前使用')
+})
+
+test('multica 平台默认：部署了一键直达时「打开 Multica」领票进入免登录入口', async ({ page }) => {
+  await seedAuth(page)
+  const mocks = await mockApis(page, {
+    multicaConfig: multicaEnabledFixture,
+    multicaProfiles: [
+      multicaDefaultProfileFixture({
+        is_active: true, web_url: 'https://multica.example.com:8446', sso_entry: true,
+      }),
+    ],
+  })
+  await page.goto('/#/super-assistant')
+
+  const menu = await openChatActionsMenu(page)
+  await menu.locator('[data-ctx-item="integrations"]').click()
+  const entry = page.getByRole('dialog').getByTestId('multica-open-web')
+  await expect(entry).toHaveAttribute('data-sso-entry', 'true')
+  // 原生直开兜底仍在：href 仍是部署下发的 web_url（修饰键/中键点击走它）
+  await expect(entry).toHaveAttribute('href', 'https://multica.example.com:8446')
+
+  // 普通左键：领一次性票据后新标签进入 Multica origin 的免登录入口
+  // （登录由 multica-gateway 中继完成），window.opener 已被隔离。外部 origin
+  // 在测试里就地应答，用例不依赖外网解析。
+  await page.context().route('https://multica.example.com:8446/**',
+    route => route.fulfill({ status: 200, contentType: 'text/html', body: '<html><body>multica</body></html>' }))
+  const popupPromise = page.waitForEvent('popup')
+  await entry.click()
+  const popup = await popupPromise
+  await popup.waitForURL('https://multica.example.com:8446/sso/entry?ticket=ticket-1.signature')
+  expect(mocks.multicaEntryCalls).toHaveLength(1)
+  expect(mocks.multicaEntryCalls[0]).toContain('/api/v2/super-assistant/multica/entry')
+  expect(await popup.evaluate(() => window.opener)).toBeNull()
+  await popup.close()
+})
+
+test('multica 平台默认：未部署一键直达时保持原生链接、点击不领票', async ({ page }) => {
+  await seedAuth(page)
+  const mocks = await mockApis(page, {
+    multicaConfig: multicaEnabledFixture,
+    multicaProfiles: [
+      multicaDefaultProfileFixture({ is_active: true, web_url: 'https://multica.example.com:8446' }),
+    ],
+  })
+  await page.goto('/#/super-assistant')
+
+  const menu = await openChatActionsMenu(page)
+  await menu.locator('[data-ctx-item="integrations"]').click()
+  const entry = page.getByRole('dialog').getByTestId('multica-open-web')
+  await expect(entry).toHaveAttribute('href', 'https://multica.example.com:8446')
+  await expect(entry).not.toHaveAttribute('data-sso-entry', /.+/)
+
+  // 原生 target=_blank 直开（Multica 自带的验证码登录页），不经票据接口。
+  // 链接带 rel=noopener：新页面与打开方没有 opener 关系，按上下文的页面事件捕获。
+  await page.context().route('https://multica.example.com:8446/**',
+    route => route.fulfill({ status: 200, contentType: 'text/html', body: '<html><body>multica login</body></html>' }))
+  const nativePagePromise = page.context().waitForEvent('page')
+  await entry.click()
+  const nativePage = await nativePagePromise
+  await nativePage.waitForURL('https://multica.example.com:8446/')
+  expect(await nativePage.evaluate(() => window.opener)).toBeNull()
+  await nativePage.close()
+  expect(mocks.multicaEntryCalls).toHaveLength(0)
 })
 
 test('multica 多 profile：编辑保存（PATCH 不回传 token）与删除确认', async ({ page }) => {
