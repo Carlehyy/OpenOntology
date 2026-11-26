@@ -173,7 +173,7 @@ def _run(db: Session, ontology_id: str, user, question: str,
     yield {"type": "meta", "conversationId": conv.id,
            "model": call_kwargs.get("model"), "releaseId": scope.release_id}
 
-    messages: list[dict] = [{"role": "system", "content": _system_prompt(scope)}]
+    messages: list[dict] = [{"role": "system", "content": _system_prompt(scope, question=question)}]
     digest = _history_digest(older)
     if digest:
         messages.append({"role": "system", "content": digest})

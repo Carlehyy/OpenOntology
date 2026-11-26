@@ -412,6 +412,18 @@ class TestAnswerEvidence:
             [_message([_step(valid)])], scope)
         assert evidence[0]["result"]["columns"] == valid["columns"]
 
+    def test_old_display_name_collisions_do_not_prove_current_field_identity(self):
+        scope = _two_type_scope()
+        order = scope.object_types["ot-order"]
+        order.properties[1]["displayName"] = "status"
+        steps = [_step(_stat_result(7, object_type_id=order.id))]
+        assert answer_evidence.trusted_history_steps([_message(steps)], scope) == []
+
+        order.properties[1]["displayName"] = "金额"
+        alias_steps = [_step(_stat_result(7, object_type_id=order.id, prop="状态"))]
+        assert answer_evidence.trusted_history_steps([_message(alias_steps)], scope) == []
+        assert answer_evidence.trusted_history_steps([_message(steps)], scope)
+
     def test_vague_correction_never_drops_verified_numbers(self):
         steps = [_step({"value": 1})]
         original = verify_answer("共 1 个，另 999 个异常。", steps)

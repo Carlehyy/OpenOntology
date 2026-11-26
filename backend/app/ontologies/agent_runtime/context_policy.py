@@ -3,10 +3,14 @@ from __future__ import annotations
 
 import json
 import re
+from itertools import chain, zip_longest
 from typing import Any
 
+from app.ontologies.agent_runtime import property_visibility
 from app.ontologies.agent_runtime.boundary import remote_object_type_ids
 from app.ontologies.agent_runtime.limits import limit
+from app.ontologies.agent_runtime.query_window import TEMPORAL_PROPERTY_TYPES
+from app.ontologies.formal_modeling.action_validation import action_parameter_hints
 
 # 模型不需要的传输/展示字段：只在结果顶层剥离。业务 rows/items 由本体定义，
 # 其中同名属性必须原样保留。
@@ -28,9 +32,141 @@ _MONTH_VALUE_RE = re.compile(
 )
 
 
-def ontology_catalog(scope) -> str:
-    remote_ids = remote_object_type_ids(scope)
+def _mentioned(question: str, *labels: Any) -> bool:
+    for label in labels:
+        if not isinstance(label, str) or not (term := label.strip().casefold()):
+            continue
+        if not term.isascii():
+            if term in question:
+                return True
+        elif re.search(r"(?<![a-z0-9_])" + re.escape(term) + r"(?![a-z0-9_])", question):
+            return True
+    return False
+
+
+def _released_catalog(scope, question: str, budget: int) -> str:
+    """Rank only released, visible metadata; mentions are hints, not a query plan."""
+    question = question[:limit("context_chars_cap")].casefold()
+    types = scope.object_types
+    remote_ids = remote_object_type_ids(scope) & types.keys()
+    remote_states = property_visibility.remote_binding_states(scope, remote_ids)
+    direct = {ot.id for ot in types.values()
+              if _mentioned(question, ot.id, ot.name, ot.display_name)}
+    related = set()
+    named_links, inferred_links = [], []
+    for link in scope.link_types.values():
+        source, target = link.source_object_type_id, link.target_object_type_id
+        if _mentioned(question, link.id, link.name, link.display_name):
+            named_links.append(link)
+            related.update((source, target))
+        elif source != target and source in direct and target in direct:
+            inferred_links.append(link)
+    actions = []
+    if scope.profile.allow_action_proposals:
+        for action in scope.actions.values():
+            if _mentioned(question, action.id, action.name, action.display_name):
+                actions.append(action)
+                if action.object_type_id is not None:
+                    related.add(action.object_type_id)
+
+    # 自由描述可能提到其他字段；只在不受结构和远程列限制时加入短摘录。
+    descriptions = not remote_ids and all(getattr(scope.profile, key) is None for key in (
+        "allowed_object_type_ids", "allowed_link_type_ids", "allowed_action_ids",
+        "allowed_properties",
+    ))
+    ranked = []
+    for ot in types.values():
+        allowed = scope.allowed_property_names(ot.id)
+        queryable = scope.queryable_property_names(ot, remote_states=remote_states)
+        fields = []
+        primary = None
+        for prop in ot.properties or []:
+            if not isinstance(prop, dict) or not (name := prop.get("name")):
+                continue
+            if ((allowed is not None and name not in allowed)
+                    or (queryable is not None and name not in queryable)):
+                continue
+            label = prop.get("displayName") or prop.get("display_name") or name
+            ptype = str(prop.get("type") or "string")
+            mentioned = _mentioned(question, name, label)
+            is_primary = bool(ot.primary_key and ot.primary_key in (name, prop.get("id")))
+            if is_primary:
+                primary = name
+            field = {"name": name, "displayName": label, "type": ptype}
+            if descriptions and mentioned and isinstance(prop.get("description"), str):
+                field["description"] = prop["description"][:120]
+            fields.append(((mentioned, is_primary, ptype.lower() in TEMPORAL_PROPERTY_TYPES), field))
+        priority = (ot.id in related, ot.id in direct, any(score[0] for score, _ in fields))
+        ranked.append((priority, ot, fields, primary))
+    ranked.sort(key=lambda entry: entry[0], reverse=True)
+
+    lines = ["# 本体授权目录", _json({"releaseId": scope.release_id})]
+    footer = "目录为节选，缺少的授权属性、关系和动作可用 describe_objects 定向查看；不声明实例数量。"
+    used = sum(len(line) + 1 for line in lines) + len(footer)
+
+    def append(record: dict) -> None:
+        nonlocal used
+        line = _json(record)
+        if used + len(line) + 1 <= budget:
+            lines.append(line)
+            used += len(line) + 1
+
+    def type_record(entry) -> dict:
+        priority, ot, fields, primary = entry
+        fields.sort(key=lambda pair: pair[0], reverse=True)
+        record = {
+            "objectTypeId": ot.id, "name": ot.name, "displayName": ot.display_name,
+            "dataMode": "remote" if ot.id in remote_ids else "materialized",
+            "properties": [field for _, field in fields[:6]],
+        }
+        if primary is not None:
+            record["primaryKey"] = primary
+        if len(fields) > 6:
+            record["omittedProperties"] = len(fields) - 6
+        if descriptions and any(priority) and ot.description:
+            record["description"] = ot.description[:120]
+        return record
+
+    def link_record(link) -> dict:
+        record = {
+            "linkType": link.name, "id": link.id, "displayName": link.display_name,
+            "sourceObjectTypeId": link.source_object_type_id,
+            "targetObjectTypeId": link.target_object_type_id,
+            "cardinality": link.cardinality,
+        }
+        if descriptions and link.description:
+            record["description"] = link.description[:120]
+        return record
+
+    def action_record(action) -> dict:
+        return {
+            "action": action.name, "id": action.id, "displayName": action.display_name,
+            "objectTypeId": action.object_type_id,
+            "requiresApproval": bool(action.requires_approval),
+            "parameters": action_parameter_hints(action),
+        }
+
+    # Share the focus budget across types, relationships and actions. A long
+    # list of matching types must not take all the space before a named action.
+    for records in zip_longest(
+        (type_record(entry) for entry in ranked if any(entry[0])),
+        map(link_record, chain(named_links, inferred_links)),
+        map(action_record, actions),
+    ):
+        for record in records:
+            if record is not None:
+                append(record)
+    for entry in ranked:
+        if not any(entry[0]):
+            append(type_record(entry))
+    return "\n".join([*lines, footer])
+
+
+def ontology_catalog(scope, *, question: str | None = None) -> str:
     budget = min(16_000, limit("context_chars_cap") // 3)
+    if question is not None and getattr(scope, "release", None) is not None:
+        return _released_catalog(scope, question, budget)
+    remote_ids = remote_object_type_ids(scope)
     lines = [f"# 本体「{scope.ontology.name}」授权目录", f"releaseId={scope.release_id}"]
     used = sum(map(len, lines))
     types = list(scope.object_types.values())

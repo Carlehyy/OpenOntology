@@ -1,5 +1,6 @@
 """本体助手 × 世界模型推演工具：检索过滤 / 版本漂移 / 前置条件 / RBAC / 审计留痕 / 限额。"""
 import copy
+import json
 import uuid
 
 import pytest
@@ -400,9 +401,10 @@ def test_default_chat_uses_frozen_release_until_formal_promotion(
         assert f"世界模型推演服务：{len(available_ids)} 个可用" in step["summary"]
         assert {item["serviceId"] for item in step["result"]["available"]} == available_ids
         assert {item["serviceId"] for item in step["result"]["blocked"]} == blocked_ids
-        catalog = seen_catalogs[-1]
-        for type_id in {"ot-order", "ot-supplier", "ot-warehouse"}:
-            assert (f"id={type_id}," in catalog) == (type_id in type_ids)
+        catalog = seen_catalogs[-1].split("# 本体授权目录\n", 1)[1].split("\n\n", 1)[0]
+        records = [json.loads(line) for line in catalog.splitlines() if line.startswith("{")]
+        assert [item["releaseId"] for item in records if "releaseId" in item] == [release_id]
+        assert {item["objectTypeId"] for item in records if "properties" in item} == type_ids
         db.expire_all()
         release = db.get(OntologyVersion, release_id)
         assert {item["id"] for item in release.snapshot_formal["objectTypes"]} == type_ids

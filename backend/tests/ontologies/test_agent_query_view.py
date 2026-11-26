@@ -3,12 +3,18 @@
 这些测试刻意把“当前时间”固定为 2026-11-03T04:00Z（Asia/Shanghai 12:00），
 覆盖 9/10/11 去重阈值、窗口左闭右开边界、重复事件、多维/NULL 下钻、
 时间桶边界、querySpec 篡改拒绝、Web cursor 生命周期和源端失败不返回 0。
+
+末尾一节沿发布版真实回合验证：模型首请求的授权目录带出规范字段、已发布
+关系与 releaseId 后，首个工具调用就是业务查询，并在真实查询层一次查对。
 """
 from __future__ import annotations
 
 import copy
+import json
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -941,3 +947,256 @@ def test_instance_detail_marks_unmapped_definitions_without_mutating_scope(
     assert set(definitions) == {"sname", "internal_note"}
     assert set(detail["properties"]) == {"sname"}
     assert all("queryable" not in item for item in scope.object_types["ot-supplier"].properties)
+
+
+# ---------------------------------------------------------------- 首请求元数据 → 首个业务调用
+
+
+PAID_AT = "paid_at"
+# 付款时间刻意排在订单第 7 个属性：旧目录只列前 6 个，模型在首请求里看不到它。
+_ORDER_PROPERTIES = (
+    ("order_no", "订单号", "string", True),
+    ("status", "状态", "string", False),
+    ("amount", "金额", "number", False),
+    ("customer", "客户", "string", False),
+    ("channel", "渠道", "string", False),
+    ("region", "区域", "string", False),
+    (PAID_AT, "付款时间", "datetime", False),
+)
+# 订单 → 供应商的已发布关系（规范名即发布快照里的 linkType）。
+_ORDER_SUPPLIER = {"linkType": "order_supplier",
+                   "sourceObjectTypeId": "ot-order",
+                   "targetObjectTypeId": "ot-supplier"}
+QUESTION = "按 Asia/Shanghai 时间，付款时间在最近 7 天内的已支付订单，以及各自的供应商"
+_ZONE = re.compile(r"[A-Z][a-z]+(?:_[A-Z][a-z]+)*/[A-Z][a-z]+")  # 问题点名的 IANA 时区
+
+
+@pytest.fixture
+def paid_orders_ontology(client, auth_headers, ontology, db):
+    """订单 + 供应商合成数据，冻结为发布版；``windowStartUtc`` 是问题窗口的起点。
+
+    窗口为 [FIXED_NOW - 7 天, FIXED_NOW)。每条未命中订单只被一个谓词排除，
+    所以行集能分辨付款时间窗口、已支付状态与已发布关系是否真的生效。
+    """
+    # 合成模型与回归的前提：付款时间在第 7 位，且是订单上唯一的 datetime 字段。
+    assert _ORDER_PROPERTIES[6][0] == PAID_AT
+    assert [item[2] for item in _ORDER_PROPERTIES].count("datetime") == 1
+
+    oid = ontology["id"]
+    window_start = FIXED_NOW - timedelta(days=7)
+    # id, 订单号, 状态, 付款时间（UTC）, 供应商实例
+    orders = (
+        ("inst-po1", "SO-001", "paid",
+         window_start + timedelta(days=1, hours=6), "inst-ps1"),
+        ("inst-po2", "SO-002", "paid",
+         window_start, "inst-ps2"),                              # 等于起点，左闭
+        ("inst-po3", "SO-003", "paid",
+         window_start - timedelta(seconds=1), "inst-ps1"),        # 早于窗口
+        ("inst-po4", "SO-004", "paid",
+         FIXED_NOW, "inst-ps1"),                                 # 等于终点，右开
+        ("inst-po5", "SO-005", "refunded",
+         window_start + timedelta(days=2, hours=6), "inst-ps1"),  # 非已支付
+        ("inst-po6", "SO-006", "paid",
+         window_start + timedelta(days=3, hours=4), None),        # 无已发布关系
+        ("inst-po7", "SO-007", "paid",
+         None, "inst-ps2"),                                      # 付款时间为空
+    )
+    instances, links = [], []
+    for instance_id, order_no, status, paid_at, supplier_id in orders:
+        properties = {"order_no": order_no, "status": status, "amount": 100,
+                      "customer": f"客户-{order_no}", "channel": "online",
+                      "region": "east"}
+        if paid_at is not None:
+            properties[PAID_AT] = paid_at.isoformat()
+        instances.append({"id": instance_id, "objectTypeId": "ot-order",
+                          "properties": properties, "computed": {}})
+        if supplier_id:
+            links.append({"id": f"li-{order_no}", "linkTypeId": "lt-1",
+                          "sourceObjectId": instance_id,
+                          "targetObjectId": supplier_id})
+    instances.extend(
+        {"id": instance_id, "objectTypeId": "ot-supplier",
+         "properties": {"sname": name}, "computed": {}}
+        for instance_id, name in (("inst-ps1", "华南电子"), ("inst-ps2", "华北物资")))
+    body = {
+        "objectTypes": [
+            {"id": "ot-order", "name": "Order", "displayName": "订单",
+             "primaryKey": "order_no",
+             "properties": [
+                 {"id": f"p{index}", "name": name, "displayName": display,
+                  "type": type_name,
+                  **({"required": True} if required else {})}
+                 for index, (name, display, type_name, required)
+                 in enumerate(_ORDER_PROPERTIES, 1)],
+             "positionX": 0, "positionY": 0},
+            {"id": "ot-supplier", "name": "Supplier", "displayName": "供应商",
+             "primaryKey": "sname",
+             "properties": [{"id": "p-supplier", "name": "sname",
+                             "displayName": "名称", "type": "string",
+                             "required": True}],
+             "positionX": 0, "positionY": 0},
+        ],
+        "linkTypes": [
+            {"id": "lt-1", "name": "order_supplier", "displayName": "订单-供应商",
+             "sourceObjectTypeId": "ot-order",
+             "targetObjectTypeId": "ot-supplier",
+             "cardinality": "many-to-one"}],
+        "actions": [], "functions": [],
+        "instances": instances, "linkInstances": links,
+    }
+    r = client.put(f"/api/v2/formal/ontologies/{oid}/full",
+                   headers=auth_headers, json=body)
+    assert r.status_code == 200, r.text
+    return {**_freeze(db, oid), "windowStartUtc": window_start.isoformat()}
+
+
+def _catalog_records(text: str) -> list[dict]:
+    """目录里单独成行的 JSON 对象（严格 JSON 行）。"""
+    records = []
+    for line in text.splitlines():
+        if not line.startswith("{"):
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    return records
+
+
+def _declared_fields(records: list[dict]) -> list[dict]:
+    """对象行声明的字段对象（name / displayName / type）。"""
+    return [field for record in records for field in record.get("properties") or []
+            if isinstance(field, dict)]
+
+
+def _catalog_driven_model():
+    """合成模型：时区取自用户问题，字段与关系取自它已看到的目录 JSON 行。
+
+    模型掌握业务词表（订单=Order、已支付=status=paid、供应商=Supplier），
+    但付款时间字段（唯一的 datetime 字段对象）、订单→供应商关系（带
+    ``linkType`` 的行）和时区（问题点名的 IANA 时区）都必须有依据可读。
+    缺结构就像真实模型那样先 ``describe_objects``（至多一次），缺时区就先
+    说明；都不替用户猜。模型内部不做断言，只把每轮请求记到
+    ``seen["requests"]``。
+    """
+    seen = {"requests": []}
+
+    def plan(zone: str, *texts: str):
+        records = [record for text in texts for record in _catalog_records(text)]
+        datetimes = [field["name"] for field in _declared_fields(records)
+                     if field.get("type") == "datetime"]
+        links = [record["linkType"] for record in records
+                 if isinstance(record.get("linkType"), str)]
+        if len(datetimes) != 1 or len(links) != 1:
+            return None
+        return {"id": "call-query", "name": "query_objects", "arguments": {
+            "object_type": "Order",
+            "window": {"property": datetimes[0], "timezone": zone,
+                       "last": {"unit": "day", "count": 7}},
+            "filters": [{"property": "status", "op": "eq", "value": "paid"}],
+            "joins": [{"object_type": "Supplier", "link_type": links[0],
+                       "type": "inner"}],
+            "select": ["order_no", datetimes[0],
+                       {"object_type": "Supplier", "property": "sname"}],
+            "order_by": [{"output": datetimes[0], "direction": "asc"}],
+            "page_size": 50,
+        }}
+
+    def chat(_call_kwargs, messages, _tools):
+        seen["requests"].append(list(messages))
+        ran = [message for message in messages if message.get("role") == "tool"]
+        if any(message.get("name") == "query_objects" for message in ran):
+            return {"content": "已列出窗口内付款的已支付订单及其供应商。",
+                    "tool_calls": []}
+        zone = _ZONE.search(next(
+            message["content"] for message in reversed(messages)
+            if message.get("role") == "user"))
+        if ran or zone is None:
+            return {"content": "缺少时区、付款时间字段或供应商关系的依据，无法规划查询。",
+                    "tool_calls": []}
+        call = plan(zone.group(), *[str(message.get("content") or "")
+                                    for message in messages
+                                    if message.get("role") in ("system", "tool")])
+        return {"content": None, "tool_calls": [call or {
+            "id": "call-discover", "name": "describe_objects",
+            "arguments": {"object_types": ["Order"]}}]}
+
+    return chat, seen
+
+
+def test_first_request_metadata_drives_first_business_call_on_published_release(
+        db, admin_user, paid_orders_ontology, monkeypatch):
+    """首请求目录带出第 7 个属性与已发布关系 → 首个工具调用就是业务查询，且一次查对。
+
+    只断言规范字段名、原样类型与 releaseId，不绑定提示词措辞。
+    """
+    release = paid_orders_ontology
+    chat, seen = _catalog_driven_model()
+    from app.ontologies.agent_runtime import orchestrator, turn_model
+
+    monkeypatch.setattr(orchestrator, "select_llm_model_config",
+                        lambda *_args, **_kwargs: SimpleNamespace(id="fixture-model"))
+    monkeypatch.setattr(orchestrator, "llm_call_kwargs",
+                        lambda _cfg: {"model": "fixture-model"})
+    monkeypatch.setattr(turn_model.llm_bridge, "chat", chat)
+    events = list(orchestrator.run_agent_turn(
+        db, release["ontologyId"], admin_user, QUESTION,
+        release_id=release["releaseId"]))
+
+    # 1) 首请求：授权目录给出付款时间的规范字段、已发布关系与发布标识
+    system = seen["requests"][0][0]
+    assert system["role"] == "system"
+    records = _catalog_records(system["content"])
+    assert any({"name": PAID_AT, "type": "datetime"}.items() <= field.items()
+               for field in _declared_fields(records)), (
+        "首请求目录未带出付款时间字段（订单第 7 个属性）的规范名与原样类型")
+    assert any(_ORDER_SUPPLIER.items() <= record.items()
+               for record in records), (
+        "首请求目录未带出订单→供应商的已发布关系")
+    assert release["releaseId"] in [record.get("releaseId")
+                                    for record in records], (
+        "首请求目录未带出本次发布版的 releaseId")
+
+    # 2) 首个工具调用：没有发现或试错回合，直接是显式的业务查询
+    assert [event["type"] for event in events] == ["meta", "step", "answer", "done"]
+    step = next(event for event in events if event["type"] == "step")
+    assert step["tool"] == "query_objects"
+    query = step["arguments"]
+    assert query["window"] == {"property": PAID_AT, "timezone": "Asia/Shanghai",
+                               "last": {"unit": "day", "count": 7}}
+    assert query["filters"] == [{"property": "status", "op": "eq", "value": "paid"}]
+    assert query["joins"] == [{"object_type": "Supplier",
+                               "link_type": _ORDER_SUPPLIER["linkType"],
+                               "type": "inner"}]
+
+    # 3) 真实查询层：窗口冻结为绝对区间，查询计划钉在发布版与已发布关系上
+    start, end = release["windowStartUtc"], FIXED_NOW.isoformat()
+    window = step["result"]["resolvedWindow"]
+    assert (window["startUtc"], window["endUtc"], window["exclusiveEnd"]) == (
+        start, end, True)
+    plan = step["result"]["querySpec"]
+    assert {source["releaseId"] for source in plan["query"]["sources"]} == {
+        release["releaseId"]}
+    assert plan["query"]["joins"] == [{
+        "left": "s0", "right": "s1", "type": "inner",
+        "on": {"kind": "declared_relation", "linkTypeId": "lt-1",
+               "direction": "source_to_target"}}]
+    assert sorted((item["property"], item["op"], item["value"])
+                  for item in plan["query"]["where"]) == sorted([
+                      ("status", "eq", "paid"), (PAID_AT, "gte", start),
+                      (PAID_AT, "lt", end)])
+
+    # 4) 模型第二轮拿到的就是真实行集：窗口左闭右开、已支付、已发布关系同时生效
+    tool_result = seen["requests"][1][-1]
+    assert tool_result["name"] == "query_objects"
+    payload = json.loads(tool_result["content"])
+    assert payload["exact"] is True and payload["hasNext"] is False
+    assert payload["rows"] == [
+        {"order_no": "SO-002", "paid_at": start, "sname": "华北物资"},
+        {"order_no": "SO-001",
+         "paid_at": (datetime.fromisoformat(start)
+                     + timedelta(days=1, hours=6)).isoformat(),
+         "sname": "华南电子"},
+    ]

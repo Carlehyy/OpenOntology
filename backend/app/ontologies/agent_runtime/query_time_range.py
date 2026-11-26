@@ -8,10 +8,8 @@ from app.ontologies.agent_runtime.query_planning import (
     _definition_type, _definitions,
 )
 from app.ontologies.agent_runtime.query_window import (
-    resolve_window, window_filters, window_for_result,
+    TEMPORAL_PROPERTY_TYPES, resolve_window, window_filters, window_for_result,
 )
-
-_TEMPORAL_TYPES = {"date", "datetime", "timestamp", "time"}
 
 
 def get_data_time_range(db, scope, user, session_id: str, ot,
@@ -43,7 +41,7 @@ def get_data_time_range(db, scope, user, session_id: str, ot,
 
     definitions = _definitions(ot)
     temporal = [name for name, p in definitions.items()
-                if str(p.get("type") or "").lower() in _TEMPORAL_TYPES]
+                if str(p.get("type") or "").lower() in TEMPORAL_PROPERTY_TYPES]
     remote_bound = {prop for prop in binding.get("fieldMap", {}).values()
                     if prop != "__primary_key__"}
     temporal = [name for name in temporal if name in remote_bound]
