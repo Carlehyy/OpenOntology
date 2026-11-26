@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import type { AutoLoopRuleCreate, DecisionItem, DecisionStatus } from '../../api/autoloop.ts'
-import { acceptDecision, canMarkHandled, createDecisionSession, extractRuleDraftBlocks, isUnfinished, parseRuleDraft, sortDecisions, trustedIssueUrl } from '../../pages/super-assistant/components/autoloopLogic.ts'
+import { acceptDecision, canMarkHandled, createDecisionSession, DECISION_RECORD_FILTERS, DECISION_VIEWS, extractRuleDraftBlocks, isRecommendedLabel, isUnfinished, parseRuleDraft, sortDecisions, trustedIssueUrl } from '../../pages/super-assistant/components/autoloopLogic.ts'
 
 const draft: AutoLoopRuleCreate = {
   name: '告警路由', enabled: true, position: 0,
@@ -49,6 +49,23 @@ describe('助手规则草稿：完整 schema 与精确围栏', () => {
       `\`\`\`json\n${raw}\n\`\`\``, `\`\`\`\`text\n\`\`\`autoloop-rule-draft\n${raw}\n\`\`\`\n\`\`\`\``,
       `    \`\`\`autoloop-rule-draft\n${raw}\n    \`\`\``,
     ]) assert.deepEqual(extractRuleDraftBlocks(text), [], text)
+  })
+})
+
+describe('决策入口与记录筛选', () => {
+  it('待我处理只包含 open；处理记录完整覆盖其余七种状态', () => {
+    assert.equal(DECISION_VIEWS.pending.status, 'open')
+    const all = DECISION_RECORD_FILTERS.all.status.split(',')
+    const stages = ['processing', 'attention', 'finished'] as const
+    assert.deepEqual(stages.flatMap(key => DECISION_RECORD_FILTERS[key].status.split(',')), all)
+    assert.equal(new Set(['open', ...all]).size, 8)
+    assert.equal(all.includes('open'), false)
+    assert.equal(DECISION_VIEWS.records.status, DECISION_RECORD_FILTERS.all.status)
+    assert.deepEqual(DECISION_RECORD_FILTERS.attention.status.split(','), ['writeback_unknown', 'writeback_failed'])
+  })
+  it('仅末尾已有推荐标记时省略重复徽章', () => {
+    for (const label of ['继续（推荐）', '继续 (推荐)', '继续（推荐）  ']) assert.equal(isRecommendedLabel(label), true)
+    for (const label of ['推荐继续', '继续', '继续（推荐）并核实']) assert.equal(isRecommendedLabel(label), false)
   })
 })
 

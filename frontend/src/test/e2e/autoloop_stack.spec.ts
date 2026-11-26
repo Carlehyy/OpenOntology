@@ -78,6 +78,15 @@ async function hit(target: Locator) {
     return !!top && (top === element || element.contains(top))
   }), 'The visible control must receive pointer input').toBeTruthy()
 }
+async function confirmLocalClosure(page: Page, trigger: Locator) {
+  await hit(trigger)
+  await trigger.click()
+  const confirmation = page.getByRole('dialog', { name: '关闭本地事项？', exact: true })
+  await expect(confirmation).toContainText('此操作不代表关联任务已完成')
+  const confirm = confirmation.getByRole('button', { name: '确认关闭', exact: true })
+  await hit(confirm)
+  await confirm.click()
+}
 async function cleanupRules(request: APIRequestContext, token: string, prefix: string) {
   const rules = await api<AutoLoopRule[]>(request, token, 'GET', `${base}/rules`)
   for (const rule of rules.filter(item => item.name.startsWith(prefix))) {
@@ -381,7 +390,9 @@ test('AutoLoop 隔离栈：永久决策详情、服务端未完成计数与深�
   const dialog = page.getByRole('dialog', { name: '决策事项', exact: true })
   await expect(dialog.getByRole('heading', { name: item.title, exact: true })).toBeVisible()
   await expect(dialog.getByRole('region', { name: '待决定问题' })).toContainText(item.question)
-  await expect(dialog.getByText(`未完成 ${summary.unfinishedTotal}`, { exact: true })).toBeVisible()
+  await expect(dialog.getByRole('tab', { name: `待我处理 ${summary.openCount}`, exact: true })).toBeVisible()
+  await expect(dialog.getByRole('button', { name: `需关注 ${summary.unknownCount + summary.failedCount}`, exact: true })).toBeVisible()
+  await expect(dialog.getByRole('region', { name: '决策操作' }).getByRole('button', { name: '提交决定', exact: true })).toBeInViewport()
   await page.reload()
   await expect(dialog.getByRole('heading', { name: item.title, exact: true })).toBeVisible()
 })
@@ -399,9 +410,8 @@ test('AutoLoop 隔离栈：已人工处理只关闭本地事项，零连接器�
   const dialog = page.getByRole('dialog', { name: '决策事项', exact: true })
   await expect(dialog.getByRole('heading', { name: item.title, exact: true })).toBeVisible()
   const submit = page.waitForRequest(request => new URL(request.url()).pathname === `${base}/decision-items/${item.id}/mark-handled` && request.method() === 'POST')
-  const button = dialog.getByRole('button', { name: '已人工处理', exact: true })
-  await hit(button)
-  await button.click()
+  const button = dialog.getByRole('button', { name: '关闭本地事项', exact: true })
+  await confirmLocalClosure(page, button)
   const mutation = (await submit).postDataJSON() as { expectedContentVersion: number; idempotencyKey: string; optionId?: string; freeText?: string }
   expect(mutation.expectedContentVersion).toBe(item.contentVersion)
   expect(mutation.idempotencyKey).toMatch(/^[0-9a-f-]{36}$/i)
@@ -439,10 +449,10 @@ test('AutoLoop 隔离栈：stale-open 人工关闭412不取消先赢决定，显
   test.skip(current.contentVersion !== queued.contentVersion || current.status !== 'pending_dispatch', 'Fixture advanced before stale request; rerun with an exclusive no-claim environment')
   const captures: { expectedContentVersion: number; idempotencyKey: string }[] = []
   const responses = [412, 200]
-  const closure = dialog.getByRole('button', { name: '已人工处理', exact: true })
+  const closure = dialog.getByRole('button', { name: '关闭本地事项', exact: true })
   await hit(closure)
   const rejected = page.waitForResponse(response => new URL(response.url()).pathname === `${path}/mark-handled` && response.request().method() === 'POST')
-  await closure.click()
+  await confirmLocalClosure(page, closure)
   const rejection = await rejected
   const first = rejection.request().postDataJSON() as { expectedContentVersion: number; idempotencyKey: string }
   test.skip(first.expectedContentVersion !== original.contentVersion, 'The UI refreshed before the stale click; no stale snapshot was tested')
@@ -458,7 +468,7 @@ test('AutoLoop 隔离栈：stale-open 人工关闭412不取消先赢决定，显
   await expect(closure).toBeEnabled()
   const accepted = page.waitForResponse(response => new URL(response.url()).pathname === `${path}/mark-handled` && response.request().method() === 'POST')
   await hit(closure)
-  await closure.click()
+  await confirmLocalClosure(page, closure)
   const acceptance = await accepted
   expect(acceptance.status()).toBe(responses[1])
   captures.push(acceptance.request().postDataJSON() as { expectedContentVersion: number; idempotencyKey: string })
@@ -543,9 +553,9 @@ test('AutoLoop 隔离栈：writeback_failed 含 confirmed/unknown 步骤时旧�
   const dialog = page.getByRole('dialog', { name: '决策事项', exact: true })
   await expect(dialog.getByRole('heading', { name: original.title, exact: true })).toBeVisible()
   const blocked = page.waitForResponse(response => new URL(response.url()).pathname === `${path}/mark-handled` && response.request().method() === 'POST')
-  const closure = dialog.getByRole('button', { name: '已人工处理', exact: true })
+  const closure = dialog.getByRole('button', { name: '关闭本地事项', exact: true })
   await hit(closure)
-  await closure.click()
+  await confirmLocalClosure(page, closure)
   expect((await blocked).status()).toBe(409)
   await expect(dialog.getByRole('alert')).not.toBeEmpty()
   await expect(dialog.getByRole('status')).toContainText('请结合返回原因确认后续处理')
@@ -576,7 +586,7 @@ test('AutoLoop 隔离栈：提交决定按来源分流，保留真实写回步�
   const dialog = page.getByRole('dialog', { name: '决策事项', exact: true })
   await expect(dialog.getByRole('heading', { name: item.title, exact: true })).toBeVisible()
   const freeText = `isolated-choice-${randomUUID()}`
-  await dialog.getByLabel('自由补充', { exact: true }).fill(freeText)
+  await dialog.getByLabel(item.options.length ? '补充答复' : '你的答复', { exact: true }).fill(freeText)
   const submission = page.waitForRequest(request => new URL(request.url()).pathname === `${base}/decision-items/${item.id}/decide` && request.method() === 'POST')
   const button = dialog.getByRole('button', { name: '提交决定', exact: true })
   await hit(button)

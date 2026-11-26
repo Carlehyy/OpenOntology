@@ -251,7 +251,7 @@ test.describe('待处理决策事项提醒', () => {
 
     await arrival.getByRole('button', { name: '查看' }).click()
     await expect(page).toHaveURL(/decision=d-2/)
-    const dialog = page.getByRole('dialog')
+    const dialog = page.getByRole('dialog', { name: '决策事项', exact: true })
     await expect(dialog.getByText('是否升级镜像并重新部署').first()).toBeVisible()
 
     // 注意力脉冲只持续一小段：到点自动静止，用户打算稍后处理时不被持续打扰
@@ -260,7 +260,11 @@ test.describe('待处理决策事项提醒', () => {
     await expect(bell).toHaveCSS('animation-name', 'none')
 
     // 弹窗内处理后同步对齐：卡片与标题角标立即消失，而不是滞后到下一轮轮询
-    await dialog.getByRole('button', { name: '已人工处理' }).click()
+    await dialog.getByRole('button', { name: '关闭本地事项', exact: true }).click()
+    const confirmation = page.getByRole('dialog', { name: '关闭本地事项？', exact: true })
+    await expect(confirmation).toBeVisible()
+    expect(state.handled).toEqual([])
+    await confirmation.getByRole('button', { name: '确认关闭', exact: true }).click()
     await expect.poll(() => state.handled).toEqual(['d-2'])
     await expect(page.getByTestId('super-assistant-pending-decisions')).toHaveCount(0)
     await expect(page).toHaveTitle('OpenOntology')
@@ -429,10 +433,8 @@ test.describe('待处理决策事项提醒', () => {
     await seedAuth(page, 'custom', ['ontologies'])
     const state = await mockDecisionAlerts(page, [decision('d-7', new Date().toISOString(), '是否扩容存储')])
     await page.goto('/#/super-assistant')
-    await expect(page).toHaveTitle('OpenOntology')
-
-    // 等待页面自身的首轮请求落定，再手动触发：两种路径都不应发出决策摘要请求
-    await page.waitForTimeout(1500)
+    // 先等应用完成权限判定，再手动触发轮询，避免在入口脚本尚未加载时调用测试函数。
+    await expect(page.getByRole('heading', { name: '当前页面无法访问', exact: true })).toBeVisible()
     await refreshAlerts(page)
     await refreshAlerts(page)
     expect(state.summaryRequests).toBe(0)
