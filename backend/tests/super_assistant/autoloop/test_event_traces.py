@@ -35,7 +35,7 @@ _TABLES = [User.__table__, SuperAssistantMulticaConfig.__table__, *AUTOLOOP_TABL
 BASE = "/api/v2/super-assistant/autoloop"
 _ITEM_KEYS = {"id", "receivedAt", "title", "source", "route", "outcome", "rule",
               "action", "decisionItemId", "issueRef", "scheduledTaskId",
-              "scheduledRunId", "reason"}
+              "scheduledRunId", "reason", "routingPromptVersion", "modelConfigId"}
 
 
 @pytest.fixture

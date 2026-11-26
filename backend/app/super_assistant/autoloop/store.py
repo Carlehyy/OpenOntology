@@ -21,7 +21,7 @@ from .models import (
     NO_WORKSPACE, TERMINAL, UNFINISHED, AutoLoopAction, AutoLoopActionStep,
     AutoLoopConsumedNeed, AutoLoopDecision, AutoLoopDecisionRequest,
     AutoLoopDispatch, AutoLoopEvent, AutoLoopEvidence, AutoLoopIssueProgress,
-    AutoLoopReceipt, new_id, utcnow,
+    AutoLoopReceipt, AutoLoopRoutingPolicy, new_id, utcnow,
 )
 
 
@@ -52,6 +52,33 @@ def append_event(db: Session, **values: Any) -> AutoLoopEvent:
     db.add(event)
     db.flush()
     return event
+
+
+def latest_routing_policy(db: Session, owner_id: str) -> AutoLoopRoutingPolicy | None:
+    """The newest stored version; None means the owner is on the default."""
+    return db.scalar(select(AutoLoopRoutingPolicy).where(
+        AutoLoopRoutingPolicy.owner_id == owner_id,
+        AutoLoopRoutingPolicy.version > 0,
+    ).order_by(AutoLoopRoutingPolicy.version.desc()).limit(1))
+
+
+def routing_policy_version(db: Session, owner_id: str, version: int) -> AutoLoopRoutingPolicy | None:
+    """One immutable version, or None for the default (0)."""
+    if version <= 0:
+        return None
+    return db.get(AutoLoopRoutingPolicy, (owner_id, version))
+
+
+def append_routing_policy(db: Session, *, owner_id: str, version: int, prompt_text: str | None,
+                          created_by: str) -> AutoLoopRoutingPolicy:
+    """Insert one version inside a savepoint, so a lost race leaves the caller's
+    transaction usable; the (owner, version) key remains the final arbiter."""
+    with _savepoint(db):
+        row = AutoLoopRoutingPolicy(owner_id=owner_id, version=version,
+                                    prompt_text=prompt_text, created_by=created_by)
+        db.add(row)
+        db.flush()
+    return row
 
 
 def _projection_fact(db: Session, *, event_type: str, owner_id: str | None,

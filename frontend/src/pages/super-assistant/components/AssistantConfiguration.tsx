@@ -41,7 +41,7 @@ export { errorText }
 // 薄封装 ui/dialog：统一配置域弹层的头部与尺寸语言；
 // 遮罩、Esc 关闭与焦点管理交给 Radix，不再自绘 fixed 弹层和焦点陷阱。
 // （外部集成弹层等同语言复用，故导出）
-export function DialogShell({ title, description, size = 'default', onClose, children, contentClassName, onOpenAutoFocus, onEscapeKeyDown, onInteractOutside, icon, open = true }: {
+export function DialogShell({ title, description, size = 'default', onClose, children, contentClassName, onOpenAutoFocus, onCloseAutoFocus, onEscapeKeyDown, onInteractOutside, icon, open = true }: {
   title: string
   description?: string
   size?: 'default' | 'large' | 'wide' | 'xwide'
@@ -51,6 +51,8 @@ export function DialogShell({ title, description, size = 'default', onClose, chi
   contentClassName?: string
   /** 覆盖 Radix 默认的首个可聚焦元素聚焦（如聚焦首个输入框而非左栏 tab） */
   onOpenAutoFocus?: (event: Event) => void
+  /** 受控弹窗没有 DialogTrigger 时可还原实际打开入口。 */
+  onCloseAutoFocus?: (event: Event) => void
   /** 拦截 Esc（如内层临时态先回退；preventDefault 可阻止 Radix 关闭弹窗） */
   onEscapeKeyDown?: (event: KeyboardEvent) => void
   /** 拦截遮罩/外部点击（工作台型弹窗 preventDefault 阻止误触关闭；
@@ -75,6 +77,7 @@ export function DialogShell({ title, description, size = 'default', onClose, chi
     <Dialog open={open} onOpenChange={value => { if (!value) onClose() }}>
       <DialogContent
         onOpenAutoFocus={onOpenAutoFocus}
+        onCloseAutoFocus={onCloseAutoFocus}
         {...(onEscapeKeyDown ? { onEscapeKeyDown } : {})}
         {...(onInteractOutside ? { onInteractOutside } : {})}
         className={`flex flex-col overflow-hidden p-0 ${sizeClass} ${contentClassName ?? ''}`}

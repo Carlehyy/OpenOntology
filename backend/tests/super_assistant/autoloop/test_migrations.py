@@ -23,7 +23,11 @@ REVISION = "0147_autoloop"
 MERGE = "0151_autoloop_merge"
 HEAD = LATEST_HEAD
 PARENT = "0146_integrated_cdc"
+# The routing-policy versions arrived in 0156 and are covered by
+# test_routing_policy_migration.py; every other AutoLoop table is 0147's.
+ROUTING_POLICY = "sa_autoloop_routing_policies"
 NAMES = {table.name for table in AUTOLOOP_TABLES}
+OWNED = NAMES - {ROUTING_POLICY}
 
 
 def config(url):
@@ -171,5 +175,5 @@ def test_revision_is_self_contained_and_registry_uses_canonical_identity():
     import_all_models()
     for table in AUTOLOOP_TABLES:
         assert Base.metadata.tables[table.name] is table
-    assert {table.name for table in revision.TABLES} == NAMES
+    assert {table.name for table in revision.TABLES} == OWNED
     assert set(revision.FACT_NAMES) == {table.name for table in FACT_TABLES}

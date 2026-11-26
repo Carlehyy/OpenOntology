@@ -1,19 +1,69 @@
 """JWT AutoLoop endpoints; mutations commit before workers may send."""
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi.routing import APIRoute
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.auth.models import User
 from app.deps import get_current_user, get_db
-from app.super_assistant import multica_service
+from app.super_assistant import multica_service, provider
 
-from . import schemas, service, sourcing, store, templates, trace_service
+from . import planner, routing_policy, schemas, service, sourcing, store, templates, trace_service
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/autoloop")
+
+# Outer bound of a routing-policy request body, enforced before the JSON is
+# buffered. It is looser than the field limits on purpose: a client may
+# pretty-print or escape its JSON.
+POLICY_BODY_MAX_BYTES = 262144
+
+# Planner refusals of a preview, by HTTP status. Anything else is reported as
+# invalid model output so unknown text is never echoed to the client.
+_PREVIEW_REASONS = {
+    "explicit_model_unavailable": 503, "model_unavailable": 503,
+    "invalid_model_output": 502, "invalid_readonly_action": 502, "workspace_mismatch": 502,
+}
+
+
+class BoundedBodyRoute(APIRoute):
+    """Refuse an oversized body before FastAPI reads it into memory.
+
+    Scoped to the routing-policy routes only; no other endpoint changes. The
+    Content-Length header is checked first and the body is then streamed under
+    the same cap, so a chunked body or a false header cannot bypass it.
+    """
+
+    def get_route_handler(self):
+        original = super().get_route_handler()
+
+        async def bounded(request: Request) -> Response:
+            raw = request.headers.get("content-length")
+            if raw is not None:
+                try:
+                    length = int(raw)
+                except ValueError:
+                    raise HTTPException(status_code=400,
+                                        detail={"code": "invalid_content_length"}) from None
+                if length < 0 or length > POLICY_BODY_MAX_BYTES:
+                    raise HTTPException(status_code=413, detail={"code": "payload_too_large"})
+            chunks, seen = [], 0
+            async for chunk in request.stream():
+                seen += len(chunk)
+                if seen > POLICY_BODY_MAX_BYTES:
+                    raise HTTPException(status_code=413, detail={"code": "payload_too_large"})
+                chunks.append(chunk)
+            # Starlette's Request.body() returns this cache instead of reading
+            # the consumed stream again.
+            request._body = b"".join(chunks)
+            return await original(request)
+
+        return bounded
 
 
 @contextmanager
@@ -38,16 +88,47 @@ def _errors(db):
         raise HTTPException(status_code=422, detail={"code": "invalid_rule"}) from exc
 
 
+@contextmanager
+def _preview_failures():
+    """Answer a failed assessment with a named reason and no provider text.
+
+    A preview spends real provider quota but never sets the process-wide daily
+    limit stop (see routing_policy.preview); once that stop is in force, the
+    preview is refused before any call, like every other AutoLoop entry.
+    """
+    try:
+        yield
+    except provider.DailyLimitExceeded as exc:
+        logger.warning("AutoLoop routing preview hit the provider daily limit")
+        raise HTTPException(status_code=429, detail={
+            "code": "routing_preview_failed", "reason": "daily_limit_reached"}) from exc
+    except planner.PlanningError as exc:
+        reason = str(exc) if str(exc) in _PREVIEW_REASONS else "invalid_model_output"
+        raise HTTPException(status_code=_PREVIEW_REASONS[reason], detail={
+            "code": "routing_preview_failed", "reason": reason}) from exc
+    except provider.ProviderError as exc:
+        logger.warning("AutoLoop routing preview model call failed (%s)", type(exc).__name__)
+        raise HTTPException(status_code=503, detail={
+            "code": "routing_preview_failed", "reason": "model_call_failed"}) from exc
+    except ValueError as exc:
+        # An unusable model configuration, such as an API key that no longer
+        # decrypts. Its text may name endpoints, so only the class is logged.
+        logger.warning("AutoLoop routing preview model unusable (%s)", type(exc).__name__)
+        raise HTTPException(status_code=503, detail={
+            "code": "routing_preview_failed", "reason": "model_unavailable"}) from exc
+
+
 @router.get("/rules", response_model=list[schemas.RuleOut])
 def list_rules(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return service.rules(db, current_user.id)
 
 
 @router.post("/rules", response_model=schemas.RuleOut, status_code=201)
-def create_rule(body: schemas.RuleCreate, db: Session = Depends(get_db),
+def create_rule(body: schemas.RuleCreateRequest, db: Session = Depends(get_db),
                 current_user: User = Depends(get_current_user)):
     with _errors(db):
-        result = service.create_rule(db, current_user.id, body)
+        result = service.create_rule(db, current_user.id, body,
+                                     confirm_all_match=body.confirmAllMatch)
         db.commit()
         return result
 
@@ -66,10 +147,11 @@ def get_rule(identity: str, db: Session = Depends(get_db), current_user: User = 
 
 
 @router.patch("/rules/{identity}", response_model=schemas.RuleOut)
-def update_rule(identity: str, body: schemas.RulePatch, db: Session = Depends(get_db),
+def update_rule(identity: str, body: schemas.RulePatchRequest, db: Session = Depends(get_db),
                 current_user: User = Depends(get_current_user)):
     with _errors(db):
-        result = service.patch_rule(db, current_user.id, identity, body)
+        result = service.patch_rule(db, current_user.id, identity, body,
+            expected_version=body.expectedVersion, confirm_all_match=body.confirmAllMatch)
         db.commit()
         return result
 
@@ -193,3 +275,36 @@ def mark_handled(identity: str, body: schemas.MarkHandled, db: Session = Depends
         result = service.decision_result(db, row, request, replay=replay)
         db.commit()
         return result
+
+
+# The routing-policy routes carry their own body bound; the endpoints above
+# keep the platform's default request handling.
+policy_router = APIRouter(prefix="/routing-policy", route_class=BoundedBodyRoute)
+
+
+@policy_router.get("", response_model=schemas.RoutingPolicyOut)
+def get_routing_policy(db: Session = Depends(get_db),
+                       current_user: User = Depends(get_current_user)):
+    with _errors(db):
+        return routing_policy.state(db, current_user.id)
+
+
+@policy_router.patch("", response_model=schemas.RoutingPolicyOut)
+def update_routing_policy(body: schemas.RoutingPolicyPatch, db: Session = Depends(get_db),
+                          current_user: User = Depends(get_current_user)):
+    with _errors(db):
+        result = routing_policy.update(db, current_user.id, current_user.id, body)
+        db.commit()
+        return result
+
+
+@policy_router.post("/preview", response_model=schemas.RoutingPolicyPreviewOut)
+def preview_routing_policy(body: schemas.RoutingPolicyPreview, db: Session = Depends(get_db),
+                           current_user: User = Depends(get_current_user)):
+    # Read-only: nothing is committed, so a preview can never change the
+    # policy, an event, a decision or an action.
+    with _errors(db), _preview_failures():
+        return routing_policy.preview(db, current_user.id, body)
+
+
+router.include_router(policy_router)

@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from sqlalchemy import and_, case, func, or_, select, update
 from sqlalchemy.orm import Session
 
-from . import schemas, store, templates
+from . import matching, schemas, store, templates
 from .models import (
     TERMINAL, UNFINISHED, AutoLoopAction, AutoLoopActionStep, AutoLoopDecision,
     AutoLoopEvent, AutoLoopReceipt, AutoLoopRule, utcnow,
@@ -48,6 +48,16 @@ def rule_out(row: AutoLoopRule) -> dict:
         "createdAt": iso(row.created_at), "updatedAt": iso(row.updated_at)}
 
 
+def rule_wire(row: AutoLoopRule) -> dict:
+    """A rule exactly as the rule endpoints serialize it.
+
+    Error details carry the current rule so a client can treat it as the same
+    object it reads from GET /rules/{id}; the stored shape differs from the
+    serialized one (unset match terms are explicit nulls on the wire).
+    """
+    return schemas.RuleOut.model_validate(rule_out(row)).model_dump()
+
+
 def rules(db, owner_id):
     return [rule_out(row) for row in db.scalars(select(AutoLoopRule).where(
         AutoLoopRule.owner_id == owner_id).order_by(AutoLoopRule.position, AutoLoopRule.id))]
@@ -58,29 +68,57 @@ def get_rule(db, owner_id, identity):
 
 
 def _rule_values(body):
-    values = body.model_dump(exclude_none=True)
+    # Request-only fields (consent, version) never reach storage or snapshots.
+    values = {key: value for key, value in body.model_dump(exclude_none=True).items()
+              if key in schemas.RuleCreate.model_fields}
     templates.validate_templates(body.titleTemplate, body.descriptionTemplate)
     templates.validate_binding(values.get("binding"))
     values["name"] = values["name"].strip()
     return {_RULE_FIELDS.get(key, key): value for key, value in values.items()}
 
 
-def create_rule(db, owner_id, body):
+def _matches_everything(match) -> bool:
+    return matching.is_universal(match.model_dump(exclude_none=True))
+
+
+def create_rule(db, owner_id, body, *, confirm_all_match=False):
+    # A universal enabled rule takes every inbound event ahead of the
+    # assistant, so switching it on needs the owner's explicit confirmation.
+    if body.enabled and _matches_everything(body.match) and not confirm_all_match:
+        raise store.StoreConflict("all_match_requires_confirmation", http_status=422)
     row = AutoLoopRule(owner_id=owner_id, **_rule_values(body))
     db.add(row)
     db.flush()
     return rule_out(row)
 
 
-def patch_rule(db, owner_id, identity, body):
+def patch_rule(db, owner_id, identity, body, *, expected_version=None, confirm_all_match=False):
     row = db.scalar(select(AutoLoopRule).where(AutoLoopRule.id == identity,
         AutoLoopRule.owner_id == owner_id).with_for_update().execution_options(populate_existing=True))
     if row is None:
         raise store.StoreConflict("not_found", http_status=404)
+    # A stale token is refused even when the edit would change nothing, so an
+    # edit or an undo based on an outdated view is never silently accepted.
+    if expected_version is not None and expected_version != row.version:
+        raise store.StoreConflict("rule_version_conflict", http_status=412, current=rule_wire(row))
     current = {key: value for key, value in rule_out(row).items()
                if key in schemas.RuleCreate.model_fields}
-    current.update(body.model_dump(exclude_unset=True))
+    current.update({key: value for key, value in body.model_dump(exclude_unset=True).items()
+                    if key in schemas.RulePatch.model_fields})
     merged = schemas.RuleCreate.model_validate(current)
+    # Consent is needed only to enter "enabled and matches everything". A
+    # provisioned rule already in that state keeps its existing edit behaviour.
+    enters = (merged.enabled and _matches_everything(merged.match)
+              and not (row.enabled and matching.is_universal(row.match)))
+    if enters:
+        if not confirm_all_match:
+            raise store.StoreConflict("all_match_requires_confirmation", http_status=422,
+                                      current=rule_wire(row))
+        # Consent is bound to the version the owner confirmed; without one the
+        # rule may already have changed since that view.
+        if expected_version is None:
+            raise store.StoreConflict("confirm_requires_expected_version", http_status=422,
+                                      current=rule_wire(row))
     values = _rule_values(merged)
     # Nullable fields must also clear when explicitly patched to null.
     for key in ("priority", "assignee", "binding"):
@@ -89,7 +127,7 @@ def patch_rule(db, owner_id, identity, body):
         AutoLoopRule.owner_id == owner_id, AutoLoopRule.version == row.version).values(
             **values, version=row.version + 1, updated_at=utcnow()))
     if result.rowcount != 1:
-        raise store.StoreConflict("rule_version_conflict")
+        raise store.StoreConflict("rule_version_conflict", current=rule_wire(row))
     db.refresh(row)
     return rule_out(row)
 

@@ -274,9 +274,14 @@ describe('标签页标题角标', () => {
 
 describe('decisionDeepLink', () => {
   it('已在超级助手页时保留会话参数，只切换到决策弹窗并清理互斥参数', () => {
-    const hash = '#/super-assistant?conversation=c-1&ruleRouting=1&schedule=s-1&decisions=1&autoloopEvent=e-1&scheduleRun=r-1'
+    const hash = '#/super-assistant?conversation=c-1&ruleRouting=1&ruleRoutingTab=rules&schedule=s-1&decisions=1&autoloopEvent=e-1&scheduleRun=r-1'
     assert.deepEqual(decisionDeepLink(hash, 'd-1'), { pathname: '/super-assistant', search: '?conversation=c-1&decision=d-1' })
     assert.deepEqual(decisionDeepLink(hash, null), { pathname: '/super-assistant', search: '?conversation=c-1&decisions=1' })
+  })
+
+  it('规则路由分区参数 ruleRoutingTab 属于互斥参数：切换到决策弹窗后地址栏不残留分区参数', () => {
+    // 与 SuperAssistantPage.openDecisionItems 经 writeRuleRoutingLocation 的清理保持一致
+    assert.deepEqual(decisionDeepLink('#/super-assistant?ruleRoutingTab=assistant', 'd-1'), { pathname: '/super-assistant', search: '?decision=d-1' })
   })
 
   it('在其它页面时不携带该页参数；无 focusId 时打开弹窗不定位', () => {

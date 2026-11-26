@@ -11,6 +11,8 @@ import logging
 import re
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
+from contextvars import ContextVar
 from threading import Event
 from typing import Any
 
@@ -29,15 +31,35 @@ class DailyLimitExceeded(ProviderError):
 
 
 _daily_limit = Event()
+# False only inside ``daily_limit_stop_disabled``: a call that may observe the
+# daily cap without halting the process. Every other caller stops it as before.
+_daily_limit_stop = ContextVar("autoloop_daily_limit_stop", default=True)
 
 
 def daily_limit_reached() -> bool:
     return _daily_limit.is_set()
 
 
+@contextmanager
+def daily_limit_stop_disabled():
+    """Scope for an owner's trial call: the cap is reported, the process is not stopped.
+
+    The call still spends real provider quota and still raises
+    DailyLimitExceeded when the cap is answered. Only the process-wide stop is
+    withheld, so a user-initiated preview cannot halt formal AutoLoop work;
+    formal work stops itself the first time its own call observes the cap.
+    """
+    token = _daily_limit_stop.set(False)
+    try:
+        yield
+    finally:
+        _daily_limit_stop.reset(token)
+
+
 def check_daily_limit(status_code: int | None, body: Any) -> None:
     if status_code == 403 and "DAILY_LIMIT_EXCEEDED" in str(body):
-        _daily_limit.set()
+        if _daily_limit_stop.get():
+            _daily_limit.set()
         raise DailyLimitExceeded("DAILY_LIMIT_EXCEEDED") from None
 
 

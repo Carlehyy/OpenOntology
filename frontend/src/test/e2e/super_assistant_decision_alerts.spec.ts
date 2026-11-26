@@ -99,6 +99,7 @@ async function mockDecisionAlerts(page: Page, initial: DecisionItem[]) {
     const url = new URL(route.request().url())
     const path = url.pathname
     const count = (value: DecisionStatus) => state.decisions.filter(item => item.status === value).length
+    if (path === '/api/v2/super-assistant/autoloop/rules') return json(route, [])
     if (path === '/api/v2/super-assistant/autoloop/decision-items/summary') {
       state.summaryRequests++
       const counts = {
@@ -265,12 +266,15 @@ test.describe('待处理决策事项提醒', () => {
     await expect(page).toHaveTitle('OpenOntology')
   })
 
-  test('后台标签页且已授权：走系统通知且不叠加应用内提示，点击通知定位到对应事项', async ({ page }) => {
+  test('后台标签页且已授权：系统通知保护规则草稿，确认后定位到对应事项', async ({ page }) => {
     await seedAuth(page)
     await mockDesktopNotifications(page, 'granted')
     const state = await mockDecisionAlerts(page, [])
-    await page.goto('/#/super-assistant')
-    await expect(page.getByTestId('super-assistant-composer')).toBeVisible()
+    await page.goto('/#/super-assistant?conversation=c-1&ruleRouting=1&ruleRoutingTab=rules')
+    const routing = page.getByRole('dialog', { name: '规则路由', exact: true })
+    await routing.getByRole('button', { name: '新建规则', exact: true }).click()
+    const draft = routing.getByRole('textbox', { name: '规则名称', exact: true })
+    await draft.fill('规则草稿')
 
     await setPageAttention(page, 'hidden')
     state.decisions.push(decision('d-3', new Date().toISOString(), '是否扩容副本 executor'))
@@ -282,12 +286,28 @@ test.describe('待处理决策事项提醒', () => {
     await expect(page.locator('[data-sonner-toast]')).toHaveCount(0)
     await expect(page).toHaveTitle('(1) OpenOntology')
 
-    await page.evaluate(() => {
+    const clickNotification = () => page.evaluate(() => {
       const target = window as unknown as AlertWindow
       target.__decisionNotifications[0].onclick?.()
     })
+    const exit = page.getByRole('dialog', { name: '放弃未保存的规则草稿？' })
+    const detail = page.getByRole('dialog', { name: '决策事项', exact: true })
+    await clickNotification()
+    await expect(detail).toHaveCount(0)
+    await exit.getByRole('button', { name: '继续编辑', exact: true }).click()
+    await expect(exit).toHaveCount(0)
+    await expect(draft).toHaveValue('规则草稿')
+    await expect(draft).toBeFocused()
+    await expect(page).toHaveURL(/conversation=c-1/)
+    await expect(page).toHaveURL(/ruleRoutingTab=rules/)
+    await expect(page).not.toHaveURL(/decision=/)
+
+    await clickNotification()
+    await exit.getByRole('button', { name: '放弃草稿', exact: true }).click()
+    await expect(page).toHaveURL(/conversation=c-1/)
     await expect(page).toHaveURL(/decision=d-3/)
-    await expect(page.getByRole('dialog')).toBeVisible()
+    await expect(routing).toHaveCount(0)
+    await expect(detail.getByRole('heading', { name: '是否扩容副本 executor', exact: true })).toBeVisible()
     // 已经由系统通知送达：回到页面后不再补应用内提示
     await setPageAttention(page, 'focused')
     await expect(page.locator('[data-sonner-toast]')).toHaveCount(0)

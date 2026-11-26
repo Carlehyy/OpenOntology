@@ -351,7 +351,7 @@ def test_web_url_migration_rerun_and_round_trip(tmp_path, monkeypatch):
     command.downgrade(cfg, "0154_multica_profiles")
     assert "web_url" not in _columns(db_path, _PROFILES)
     command.upgrade(cfg, "head")
-    assert _version(db_path) == "0155_multica_profile_web_url"
+    assert _version(db_path) == LATEST_HEAD
     assert web_urls() == [
         ("http://api.example.com:8080/v1", "http://api.example.com:8080"),
         ("not a url", None),
@@ -599,9 +599,11 @@ def test_downgrade_rejects_unrepresentable_state_without_ddl(
     assert _version(db_path) == "0154_multica_profiles"
 
 
-def test_latest_head_is_0155(tmp_path, monkeypatch):
+def test_0155_is_in_the_single_head_chain(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     cfg = _alembic_config(_backend(), tmp_path / "head-check.db")
-    heads = ScriptDirectory.from_config(cfg).get_heads()
-    assert heads == [LATEST_HEAD]
-    assert LATEST_HEAD == "0155_multica_profile_web_url"
+    scripts = ScriptDirectory.from_config(cfg)
+    assert scripts.get_heads() == [LATEST_HEAD]
+    # 0156（AutoLoop 路由策略版本）接在 0155 之后；确切 head 由
+    # super_assistant/autoloop/test_routing_policy_migration.py 钉住。
+    assert "0155_multica_profile_web_url" in {item.revision for item in scripts.walk_revisions()}

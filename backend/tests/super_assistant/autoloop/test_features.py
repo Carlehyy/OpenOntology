@@ -141,8 +141,10 @@ def test_binding_only_bounded_extraction():
 
 def test_rule_snapshot_survives_edit_delete_and_replay(feature_sessions, owner, monkeypatch):
     with feature_sessions() as db:
-        saved = service.create_rule(db, owner, _rule())
-        service.create_rule(db, owner, _rule(name="second", position=1, titleTemplate="second"))
+        # Both fixture rules match everything while enabled, which needs consent.
+        saved = service.create_rule(db, owner, _rule(), confirm_all_match=True)
+        service.create_rule(db, owner, _rule(name="second", position=1, titleTemplate="second"),
+                            confirm_all_match=True)
         db.commit()
     event_id, work_id = _admit(feature_sessions, owner)
     with feature_sessions() as db:
@@ -509,7 +511,8 @@ def test_watchdog_assessment_cache_choice_and_conservative_fallback(feature_sess
 
 def test_routing_local_fault_rolls_back_attempt_before_fallback(feature_sessions, owner, monkeypatch):
     with feature_sessions() as db:
-        service.create_rule(db, owner, _rule())
+        # The fixture rule matches everything while enabled: consent is explicit.
+        service.create_rule(db, owner, _rule(), confirm_all_match=True)
         db.commit()
     _, work_id = _admit(feature_sessions, owner)
     original = store.append_event
@@ -540,9 +543,12 @@ def test_http_rule_array_preview_owner_summary_and_decision_replay(feature_sessi
     api.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=current[0])
     base = "/api/v2/super-assistant/autoloop"
     with TestClient(api) as client:
-        created = client.post(base + "/rules", json=_rule().model_dump(exclude_none=True))
+        # The fixture rule matches everything while enabled: consent is request-only.
+        created = client.post(base + "/rules",
+                              json={**_rule().model_dump(exclude_none=True), "confirmAllMatch": True})
         assert created.status_code == 201
         rule = created.json()
+        assert "confirmAllMatch" not in rule
         listed = client.get(base + "/rules")
         assert isinstance(listed.json(), list) and listed.json()[0]["id"] == rule["id"]
         sample = {"title": "sample", "body": "original"}
@@ -682,7 +688,7 @@ def test_schedule_thread_binding_reuses_created_issue_and_rejects_connector_drif
         return _remote_issue()
     monkeypatch.setattr(multica_client, "get_issue", get_issue)
     with feature_sessions() as db:
-        service.create_rule(db, owner, _rule())
+        service.create_rule(db, owner, _rule(), confirm_all_match=True)
         db.commit()
     task_id = str(uuid4())
     def admit():

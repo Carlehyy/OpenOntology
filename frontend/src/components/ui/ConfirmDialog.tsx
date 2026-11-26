@@ -46,7 +46,7 @@ export function ConfirmDialog({
         <DialogHeader
           icon={danger || warning ? <AlertTriangle size={18} /> : <Info size={18} />}
           iconClassName={cn(
-            danger && 'bg-[var(--color-danger-bg)] text-[var(--color-danger)]',
+            danger && 'bg-[var(--color-danger-bg)] text-[var(--color-danger-ink)]',
             warning && 'bg-[var(--color-warning-bg)] text-[var(--color-warning)]',
             !danger && !warning && 'bg-[var(--color-bg-hover)] text-[var(--color-nav-bg)]',
           )}
@@ -58,7 +58,7 @@ export function ConfirmDialog({
             asChild
             className={cn(
               'mt-0 block rounded-xl border px-4 py-3 text-sm leading-6',
-              danger && 'border-[var(--color-danger-bg)] bg-[var(--color-danger-bg)] text-[var(--color-danger)]',
+              danger && 'border-[var(--color-danger-bg)] bg-[var(--color-danger-bg)] text-[var(--color-danger-ink)]',
               warning && 'border-[var(--color-warning-bg)] bg-[var(--color-warning-bg)] text-[var(--color-warning)]',
               !danger && !warning && 'border-[var(--color-nav-light)] bg-[var(--color-nav-light)] text-[var(--color-text-secondary)]',
             )}

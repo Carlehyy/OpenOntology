@@ -9,7 +9,8 @@ from app.auth.models import User
 from app.notifications.models import NotificationIngestKey
 from app.super_assistant import multica_client, multica_service, provider
 
-from . import facts, planner, schemas, service, sourcing, store, templates
+from . import facts, planner, routing_policy, schemas, service, sourcing, store, templates
+from .matching import matches
 from .models import (
     NO_WORKSPACE,
     AutoLoopBinding,
@@ -20,31 +21,13 @@ from .models import (
 )
 
 
-def _field(payload, path):
-    value = payload
-    for part in path.split("."):
-        if not isinstance(value, dict) or part not in value:
-            return None
-        value = value[part]
-    return value
-
-
-def matches(rule, event, receipt):
-    payload = receipt.payload if receipt else event.data
-    conditions = rule.match
-    actual = {"sourceKind": event.source_kind, "sourceSystem": event.source_system,
-        "ingestKeyId": receipt.ingest_key_id if receipt else None,
-        "channel": payload.get("channel")}
-    for key, value in actual.items():
-        if conditions.get(key) is not None and conditions[key] != value:
-            return False
-    for key, field in (("titleContains", "title"), ("bodyContains", "body")):
-        if conditions.get(key) and conditions[key] not in str(payload.get(field) or ""):
-            return False
-    return all(_field(payload, item["field"]) == item["value"] for item in conditions.get("fieldEquals", []))
-
-
 def prepare(db, event):
+    """Freeze the routing decision before any provider call.
+
+    A prepared fact is immutable, so one that already exists is returned as is:
+    facts written before a policy was frozen keep routing exactly as they were
+    prepared.
+    """
     existing = db.scalar(select(AutoLoopEvent).where(AutoLoopEvent.owner_id == event.owner_id,
         AutoLoopEvent.parent_event_id == event.id, AutoLoopEvent.type == "routing.prepared"))
     if existing:
@@ -53,11 +36,17 @@ def prepare(db, event):
     rules = db.scalars(select(AutoLoopRule).where(AutoLoopRule.owner_id == event.owner_id,
         AutoLoopRule.enabled.is_(True)).order_by(AutoLoopRule.position, AutoLoopRule.id))
     rule = next((item for item in rules if matches(item, event, receipt)), None)
+    data = {"originEventId": event.id}
+    if rule is None and event.type != "decision.answered":
+        # Only a miss consults the model under the routing policy. Freeze the
+        # policy version and the model it will use now, before the provider is
+        # called; a rule hit and an answered card never read the policy.
+        data.update(routing_policy.freeze(db, event.owner_id))
     return store.append_event(db, owner_id=event.owner_id, receipt_id=event.receipt_id,
         type="routing.prepared", source_kind=event.source_kind, source_system=event.source_system,
         source_ref=event.source_ref, parent_event_id=event.id, hops=event.hops,
         action="pending", rule_id=rule.id if rule else None, rule_version=rule.version if rule else None,
-        rule_snapshot=service.rule_out(rule) if rule else None, data={"originEventId": event.id})
+        rule_snapshot=service.rule_out(rule) if rule else None, data=data)
 
 
 def source_context(db, event, receipt):
@@ -205,6 +194,11 @@ def route_event(db, event, prepared):
     payload = receipt.payload if receipt else event.data
     snapshot = prepared.rule_snapshot
     workspace_id = reference = None
+    # The policy a miss was frozen under. None for a rule hit and for facts
+    # prepared before any policy was frozen: both route as they were prepared.
+    policy = routing_policy.frozen(db, prepared)
+    audit: dict = {}
+    record = None
     provider.ensure_autoloop_available()
     attempt = db.begin_nested()
     try:
@@ -285,9 +279,17 @@ def route_event(db, event, prepared):
             plan = planner.plan_event(db, event=event, payload=payload,
                 workspace_id=workspace_id, trusted_issue=target)
         else:
-            # No rule matched: read-only assessment restricted to local outcomes.
+            # No rule matched: read-only assessment restricted to local outcomes,
+            # under the policy frozen when the event was prepared (if any).
+            record = routing_policy.record(policy)
+            if policy is not None and policy["modelConfigId"] is None:
+                # Frozen when no model was selectable. That is the frozen fact;
+                # it is not permission to pick whatever becomes available later.
+                raise planner.PlanningError("model_unavailable")
             plan = planner.plan_event(db, event=event, payload=payload,
-                workspace_id=workspace_id, decision_only=True, decision_purpose="miss")
+                workspace_id=workspace_id, decision_only=True, decision_purpose="miss",
+                model_id=policy["modelConfigId"] if policy else None,
+                routing_prompt=policy["promptText"] if policy else None, audit=audit)
             if plan.action not in {"ignore", "create_decision"} or plan.assignee or plan.issueRef:
                 raise planner.PlanningError("untrusted_readonly_plan")
 
@@ -322,6 +324,9 @@ def route_event(db, event, prepared):
         result = {"plan": plan.model_dump(exclude_none=True), "untrustedOriginal": payload}
         if issue:
             result["issue"] = issue
+        record = routing_policy.used(record, audit)
+        if record:
+            result.update(record)
         store.append_event(db, owner_id=event.owner_id, receipt_id=event.receipt_id,
             type="routing.completed", source_kind=event.source_kind, source_system=event.source_system,
             source_ref=event.source_ref, parent_event_id=event.id, hops=event.hops,
@@ -343,4 +348,4 @@ def route_event(db, event, prepared):
             source_ref=event.source_ref, parent_event_id=event.id, hops=event.hops,
             rule_id=prepared.rule_id, rule_version=prepared.rule_version, rule_snapshot=snapshot,
             action="kernel_fallback", error=reason, decision_item_id=decision.id if decision else None,
-            data={"reason": reason})
+            data={"reason": reason, **(routing_policy.used(record, audit) or {})})

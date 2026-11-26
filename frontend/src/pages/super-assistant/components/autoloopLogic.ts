@@ -133,6 +133,7 @@ export function createDecisionSession(): DecisionSession {
   return { items: new Map(), requests: new Map(), inFlight: new Set(), listeners: new Set() }
 }
 
+/** 新建规则默认停用：保存后由用户在规则列表显式启用，与事件预填草稿口径一致。 */
 export function newRule(position = 0): AutoLoopRuleCreate {
-  return { name: '', enabled: true, position, match: {}, titleTemplate: '{{ title }}', descriptionTemplate: '{{ body }}', priority: 'medium', assignee: '', binding: null }
+  return { name: '', enabled: false, position, match: {}, titleTemplate: '{{ title }}', descriptionTemplate: '{{ body }}', priority: 'medium', assignee: '', binding: null }
 }

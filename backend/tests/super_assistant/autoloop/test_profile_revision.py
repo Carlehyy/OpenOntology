@@ -125,7 +125,8 @@ def test_routing_freezes_source_reference_into_steps_and_decisions(sessions, own
     with sessions() as db:
         rule = service.create_rule(db, owner, schemas.RuleCreate.model_validate({
             "name": "route", "enabled": True, "position": 0, "match": {},
-            "titleTemplate": "[rule] {{ title }}", "descriptionTemplate": "{{ body }}"}))
+            "titleTemplate": "[rule] {{ title }}", "descriptionTemplate": "{{ body }}"}),
+            confirm_all_match=True)
         db.commit()
         rule_id = rule["id"]
     with sessions() as db:
@@ -947,7 +948,8 @@ def _plain_rule(sessions, owner_id):
     with sessions() as db:
         service.create_rule(db, owner_id, schemas.RuleCreate.model_validate({
             "name": "route", "enabled": True, "position": 0, "match": {},
-            "titleTemplate": "[rule] {{ title }}", "descriptionTemplate": "{{ body }}"}))
+            "titleTemplate": "[rule] {{ title }}", "descriptionTemplate": "{{ body }}"}),
+            confirm_all_match=True)
         db.commit()
 
 
