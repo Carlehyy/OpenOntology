@@ -1747,10 +1747,19 @@ test('AutoLoop 模拟：规则创建编辑、预览隔离、排序启停删除�
   await expect(ruleRow('草稿规则').getByText(DISABLED_RULE)).toBeVisible()
   expect(api.ruleCreates).toHaveLength(1)
   expect(api.ruleCreates[0].enabled).toBe(false)
-  const { menu: draftMenu } = await openRuleMenu(page, dialog, api.rules.find(rule => rule.name === '草稿规则')!.id)
+  const draftId = api.rules.find(rule => rule.name === '草稿规则')!.id
+  const deleteConfirm = page.getByRole('dialog', { name: '删除规则？', exact: true })
+  const { menu: draftMenu } = await openRuleMenu(page, dialog, draftId)
   await draftMenu.getByRole('button', { name: '删除 草稿规则', exact: true }).click()
-  await page.getByRole('dialog', { name: '删除规则？' }).getByRole('button', { name: '删除', exact: true }).click()
+  await deleteConfirm.getByRole('button', { name: '取消', exact: true }).click()
+  await expect(ruleRow('草稿规则').getByRole('button', { name: '编辑', exact: true })).toBeFocused()
+  expect(api.ruleDeletes).toHaveLength(0)
+  const { menu: deleteMenu } = await openRuleMenu(page, dialog, draftId)
+  await deleteMenu.getByRole('button', { name: '删除 草稿规则', exact: true }).click()
+  await deleteConfirm.getByRole('button', { name: '删除', exact: true }).click()
   await expect(ruleRow('草稿规则')).toHaveCount(0)
+  await expect(dialog.getByRole('button', { name: '新建规则', exact: true })).toBeFocused()
+  expect(api.ruleDeletes).toEqual([draftId])
   await dialog.getByRole('button', { name: '导入助手草稿（JSON）', exact: true }).click()
   await dialog.getByRole('textbox', { name: '助手规则草稿 JSON' }).fill('{"name":"不完整"}')
   await dialog.getByRole('button', { name: '导入并审阅' }).click()
@@ -1911,11 +1920,24 @@ test('规则路由：保存期间继续输入保留新草稿，再保存更新�
   await expect(name).toHaveValue('请求期间的修改')
   await expect(dialog.getByText('未保存草稿', { exact: true })).toBeVisible()
   expect(api.rules.map(rule => rule.name)).toEqual(['提交快照'])
-  await save.click()
+  let releaseReload!: () => void
+  const reloading = new Promise<void>(resolve => { releaseReload = resolve })
+  await page.route('**/api/v2/super-assistant/autoloop/rules', async route => {
+    if (route.request().method() === 'GET') await reloading
+    await route.fallback()
+  }, { times: 1 })
+  try {
+    await save.click()
+    const oldEdit = dialog.getByRole('row').filter({ hasText: '提交快照' }).getByRole('button', { name: '编辑', exact: true })
+    await expect(oldEdit).toBeDisabled()
+    await expect(oldEdit).not.toBeFocused()
+  } finally { releaseReload() }
   const savedRow = dialog.getByRole('row').filter({ hasText: '请求期间的修改' })
   await expect(savedRow).toBeVisible()
-  // 保存后焦点回到刚保存那一行的「编辑」，不停留在已卸载的表单控件上
-  await expect(savedRow.getByRole('button', { name: '编辑', exact: true })).toBeFocused()
+  // 刷新结果落地后，焦点交给已启用的编辑按钮。
+  const edit = savedRow.getByRole('button', { name: '编辑', exact: true })
+  await expect(edit).toBeEnabled()
+  await expect(edit).toBeFocused()
   expect(api.calls.map(call => [call.method, call.path])).toEqual([['POST', '/rules'], ['PATCH', '/rules/rule-created-0']])
   expect(api.rulePatches[0].body.expectedVersion).toBe(1)
   expect(api.rules.map(rule => rule.name)).toEqual(['请求期间的修改'])
@@ -2541,11 +2563,13 @@ test('规则路由：新建默认停用；列表启用全量匹配规则须确�
   await expect(confirm).toHaveCount(0)
   expect(api.rulePatches).toHaveLength(0)
   await expect(row('空条件新规则').getByText(DISABLED_RULE)).toBeVisible()
+  await expect(row('空条件新规则').getByRole('button', { name: '编辑', exact: true })).toBeFocused()
   // 确认后携带 confirmAllMatch 与读取到的版本；同意标记只在请求里，不回显到规则
   const { menu: again } = await openRuleMenu(page, dialog, created.id)
   await again.getByRole('button', { name: '启用', exact: true }).click()
   await confirm.getByRole('button', { name: '确认启用', exact: true }).click()
   await expect(row('空条件新规则').getByText('已启用', { exact: true })).toBeVisible()
+  await expect(row('空条件新规则').getByRole('button', { name: '编辑', exact: true })).toBeFocused()
   expect(api.rulePatches).toEqual([{ path: `/rules/${created.id}`, body: { enabled: true, expectedVersion: 1, confirmAllMatch: true } }])
   expect(api.rules.find(rule => rule.id === created.id)).not.toHaveProperty('confirmAllMatch')
 })
@@ -2575,10 +2599,14 @@ test('规则路由：停用携带 expectedVersion 并可在弹窗内撤销；编
   // 撤销绑定停用后的新版本
   expect(api.rulePatches.at(-1)).toEqual({ path: '/rules/r-a', body: { enabled: true, expectedVersion: 4 } })
   await expect(undo).toHaveCount(0)
+  await expect(row('规则甲').getByRole('button', { name: '编辑', exact: true })).toBeFocused()
   // 编辑已启用的窄规则并清空条件 → 放宽为全量匹配：保存前确认；取消则保留草稿且不发请求
   await row('收窄规则').getByRole('button', { name: '编辑', exact: true }).click()
+  const ruleName = dialog.getByRole('textbox', { name: '规则名称', exact: true })
+  await expect(ruleName).toBeFocused()
   const titleContains = dialog.getByRole('textbox', { name: '标题包含', exact: true })
   await titleContains.fill('')
+  await expect(dialog.getByText('这条规则没有匹配条件，会处理前序启用规则未匹配的所有入站事件。', { exact: true })).toBeVisible()
   const confirm = page.getByRole('dialog', { name: '启用全量匹配规则？', exact: true })
   const patches = api.rulePatches.length
   await dialog.getByRole('button', { name: '保存规则', exact: true }).click()
@@ -2589,10 +2617,12 @@ test('规则路由：停用携带 expectedVersion 并可在弹窗内撤销；编
   await expect(confirm).toHaveCount(0)
   expect(api.rulePatches).toHaveLength(patches)
   await expect(titleContains).toHaveValue('')
-  await expect(dialog.getByRole('textbox', { name: '规则名称', exact: true })).toHaveValue('收窄规则')
+  await expect(ruleName).toHaveValue('收窄规则')
+  await expect(ruleName).toBeFocused()
   await dialog.getByRole('button', { name: '保存规则', exact: true }).click()
   await confirm.getByRole('button', { name: '确认启用', exact: true }).click()
   await expect(row('收窄规则').getByText('已启用', { exact: true })).toBeVisible()
+  await expect(row('收窄规则').getByRole('button', { name: '编辑', exact: true })).toBeFocused()
   const widened = api.rulePatches.at(-1)!
   expect(widened.path).toBe('/rules/r-b')
   expect(widened.body).toMatchObject({ name: '收窄规则', enabled: true, expectedVersion: 3, confirmAllMatch: true })

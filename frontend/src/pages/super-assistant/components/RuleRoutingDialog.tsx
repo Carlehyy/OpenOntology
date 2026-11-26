@@ -27,6 +27,7 @@ const NAV_ITEMS: { key: Tab; label: string; icon: typeof Route }[] = [
 const TAB_KEYS = NAV_ITEMS.map(item => item.key)
 const DESKTOP = '(min-width: 768px)'
 const ruleErrorCode = (error: unknown) => (error as { detail?: { code?: string } } | undefined)?.detail?.code
+type RulesFocusTarget = 'editor' | { ruleId?: string }
 
 export default function RuleRoutingDialog({ initialDraft, location, navigationGuard, navigationPending, onLocationChange, onClose, onCloseAutoFocus, onOpenDecision }: {
   initialDraft?: AutoLoopRuleCreate | null
@@ -67,6 +68,7 @@ export default function RuleRoutingDialog({ initialDraft, location, navigationGu
   const [activation, setActivation] = useState<{ rule: AutoLoopRule; value: AutoLoopRuleCreate; run: () => void } | null>(null)
   const [undo, setUndo] = useState<AutoLoopRule | null>(null)
   const [highlightedId, setHighlightedId] = useState<string | null>(null)
+  const [rulesFocus, setRulesFocus] = useState<RulesFocusTarget | null>(null)
   const [exit, setExit] = useState<{ run: () => void; stay?: () => void; focus?: () => void; restoring?: boolean } | null>(null)
   const [drilldown, setDrilldown] = useState<TraceDrilldown | null>(null)
   const [days, setDays] = useState<7 | 30>(7)
@@ -90,6 +92,7 @@ export default function RuleRoutingDialog({ initialDraft, location, navigationGu
   const assistantPanel = useRef<HTMLDivElement>(null)
   const navRefs = useRef<(HTMLButtonElement | null)[]>([])
   const exitFocus = useRef<(() => void) | undefined>(undefined)
+  const confirmationFocus = useRef<RulesFocusTarget | null>(null)
   const mutationInFlight = useRef(false)
   const position = String(form.position)
   const snapshot = JSON.stringify({ form, fieldEquals })
@@ -99,6 +102,25 @@ export default function RuleRoutingDialog({ initialDraft, location, navigationGu
   const hasDraft = dirty || (showImport && Boolean(draftText.trim())) || policyDirty
   const busy = saving || previewing || sorting || mutating || policySaving
   const statsReady = !!summary && !statisticsError
+
+  // API completion can precede the commit that mounts and enables the list buttons.
+  useLayoutEffect(() => {
+    if (!rulesFocus || tab !== 'rules') return
+    if (rulesFocus === 'editor') {
+      const input = editorRef.current?.querySelector<HTMLInputElement>('input')
+      if (!input) return
+      input.focus()
+    } else {
+      if (editing || showImport || busy || loading) return
+      const panel = rulesPanel.current
+      const ruleId = rulesFocus.ruleId
+      const edit = ruleId ? panel?.querySelector<HTMLButtonElement>(`[data-rule-routing-rule-edit="${CSS.escape(ruleId)}"]`) : null
+      const button = edit ?? panel?.querySelector<HTMLButtonElement>('[data-rule-routing-create]')
+      if (!button || button.disabled) return
+      button.focus()
+    }
+    setRulesFocus(null)
+  }, [rulesFocus, tab, editing, showImport, busy, loading])
 
   useEffect(() => {
     const query = window.matchMedia(DESKTOP)
@@ -246,7 +268,7 @@ export default function RuleRoutingDialog({ initialDraft, location, navigationGu
     setEditing(rule ?? 'new'); setShowImport(false); setDraftText(''); setImportError(''); setHighlightedId(null)
     setSampleFromEvent(false); setSampleOpen(false)
     clearFormFeedback()
-    requestAnimationFrame(() => editorRef.current?.querySelector<HTMLElement>('input')?.focus())
+    setRulesFocus('editor')
   }
   function invalidatePreview() { setPreview(null); setPreviewError(''); previewRequest.current++ }
   function clearField(field?: RuleFormField) { if (field) setFieldErrors(previous => ({ ...previous, [field]: undefined })) }
@@ -263,24 +285,26 @@ export default function RuleRoutingDialog({ initialDraft, location, navigationGu
     else setFieldErrors({})
     return result.value
   }
-  function focusRule(ruleId?: string) {
-    const panel = rulesPanel.current
-    const rule = ruleId ? panel?.querySelector<HTMLButtonElement>(`[data-rule-routing-rule-edit="${CSS.escape(ruleId)}"]`) : null
-    ;(rule || panel?.querySelector<HTMLButtonElement>('[data-rule-routing-create]'))?.focus()
+  function restoreConfirmationFocus(event: Event) {
+    event.preventDefault()
+    const target = confirmationFocus.current
+    confirmationFocus.current = null
+    if (target) setRulesFocus(target)
   }
   async function persistRule(value: AutoLoopRuleCreate, target: AutoLoopRule | 'new' | null, confirmed = false) {
     if (mutationInFlight.current) return
     mutationInFlight.current = true
     const submitted = snapshot
     setSaving(true)
-    let focusId: string | undefined
+    let focus: RulesFocusTarget | null = confirmed ? 'editor' : null
     try {
       const saved = target && target !== 'new' ? await autoloopApi.updateRule(target.id, {
         ...value, expectedVersion: target.version, ...(confirmed ? { confirmAllMatch: true } : {}),
       }) : await autoloopApi.createRule({ ...value, enabled: false, position: nextPosition() })
-      if (currentDraft.current === submitted) { discard(); focusId = saved.id; setHighlightedId(saved.id) }
+      const unchanged = currentDraft.current === submitted
+      if (unchanged) { discard(); focus = { ruleId: saved.id }; setHighlightedId(saved.id) }
       else { setEditing(saved); setBaseline(submitted); invalidatePreview() }
-      toast.success(saved.enabled ? '规则已保存' : '规则已保存，未启用', { description: currentDraft.current === submitted ? undefined : '请求期间的新增修改仍在表单中，尚未保存。' })
+      toast.success(saved.enabled ? '规则已保存' : '规则已保存，未启用', { description: unchanged ? undefined : '请求期间的新增修改仍在表单中，尚未保存。' })
       await load()
     } catch (err) {
       const stale = ruleErrorCode(err) === 'rule_version_conflict'
@@ -288,8 +312,9 @@ export default function RuleRoutingDialog({ initialDraft, location, navigationGu
       if (stale) await load()
     } finally {
       mutationInFlight.current = false
+      if (confirmed) confirmationFocus.current = focus
+      else if (focus) setRulesFocus(focus)
       setSaving(false); setActivation(null)
-      if (focusId) requestAnimationFrame(() => focusRule(focusId))
     }
   }
   function save() {
@@ -341,9 +366,21 @@ export default function RuleRoutingDialog({ initialDraft, location, navigationGu
       if (stale) { if (undo?.id === rule.id) setUndo(null); await load() }
     } finally {
       mutationInFlight.current = false
+      const focus = enabled === undefined ? {} : { ruleId: rule.id }
+      if (confirmed || enabled === undefined) confirmationFocus.current = focus
+      else setRulesFocus(focus)
       setMutating(false); setDeleting(null); setActivation(null)
-      requestAnimationFrame(() => focusRule(enabled === undefined ? undefined : rule.id))
     }
+  }
+  function cancelDelete() {
+    if (!deleting || mutationInFlight.current) return
+    confirmationFocus.current = { ruleId: deleting.id }
+    setDeleting(null)
+  }
+  function cancelActivation() {
+    if (!activation || mutationInFlight.current) return
+    confirmationFocus.current = editing ? 'editor' : { ruleId: activation.rule.id }
+    setActivation(null)
   }
   function toggle(rule: AutoLoopRule) {
     if (busy || mutationInFlight.current) return
@@ -436,7 +473,7 @@ export default function RuleRoutingDialog({ initialDraft, location, navigationGu
             sample={sample} sampleFromEvent={sampleFromEvent} sampleOpen={sampleOpen} onSampleOpenChange={setSampleOpen}
             editing={editing} dirty={dirty} busy={busy} saving={saving} previewing={previewing}
             fieldErrors={fieldErrors} saveError={saveError} previewError={previewError} preview={preview}
-            onBack={() => guarded(() => {}, () => focusRule(editing === 'new' ? undefined : editing.id))}
+            onBack={() => guarded(() => {}, () => setRulesFocus({ ruleId: editing === 'new' ? undefined : editing.id }))}
             onFieldChange={change} onFieldEqualsChange={changeFieldEquals} onSampleChange={changeSample} onSave={save} onPreview={() => void renderPreview()}
           /> : showImport ? <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4 sm:p-5">
             <Alert>导入 JSON 后可修改或试渲染。新规则保存为停用，不会自动参与匹配。</Alert>
@@ -473,8 +510,8 @@ export default function RuleRoutingDialog({ initialDraft, location, navigationGu
         </div>
       </div>
     </DialogShell>
-    <ConfirmDialog layer="nested" open={!!deleting} onClose={() => { if (!mutating) { const key = deleting?.id; setDeleting(null); requestAnimationFrame(() => focusRule(key)) } }} onConfirm={() => deleting && void mutate(deleting)} loading={mutating} title="删除规则？" description={`删除「${deleting?.name ?? ''}」后，仅后续事件停止匹配，在途事件保留原版本。`} confirmText="删除" variant="danger" />
-    <ConfirmDialog layer="nested" open={!!activation} onClose={() => { if (!saving && !mutating) { const key = activation?.rule.id; setActivation(null); requestAnimationFrame(() => { if (editing) editorRef.current?.querySelector<HTMLElement>('input')?.focus(); else focusRule(key) }) } }} onConfirm={() => activation?.run()} loading={saving || mutating} title="启用全量匹配规则？" variant="warning" confirmText="确认启用" description={activation && <div className="space-y-2 break-words">
+    <ConfirmDialog layer="nested" open={!!deleting} onClose={cancelDelete} onCloseAutoFocus={restoreConfirmationFocus} onConfirm={() => deleting && void mutate(deleting)} loading={mutating} title="删除规则？" description={`删除「${deleting?.name ?? ''}」后，仅后续事件停止匹配，在途事件保留原版本。`} confirmText="删除" variant="danger" />
+    <ConfirmDialog layer="nested" open={!!activation} onClose={cancelActivation} onCloseAutoFocus={restoreConfirmationFocus} onConfirm={() => activation?.run()} loading={saving || mutating} title="启用全量匹配规则？" variant="warning" confirmText="确认启用" description={activation && <div className="space-y-2 break-words">
       <p>「{activation.rule.name}」会处理前序规则未匹配的所有入站事件。</p>
       <p>{activateIndex >= 0 ? `匹配顺序：第 ${activateIndex + 1} 位。` : `顺序值：${activation.rule.position}。`}{activation.value.binding ? '找到并验证关联的 Multica 任务后追加评论，否则可能创建任务。' : '命中后按规则向 Multica 写入任务或评论。'}</p>
       {shadowed && <p>前面已有启用的全量规则。请先核对顺序。</p>}
