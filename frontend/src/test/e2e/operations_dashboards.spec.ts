@@ -814,8 +814,8 @@ test('看板工作台：预览弹窗全屏按钮 success 语义色、关闭按�
   const tone = {
     light: {
       fullscreenBg: 'rgb(232, 245, 233)',
-      fullscreenText: 'rgb(45, 138, 78)',
-      fullscreenBorder: /rgba?\(45,\s*138,\s*78,\s*0\.35\)|color\(srgb[^)]*\/\s*0\.35\)/,
+      fullscreenText: 'rgb(38, 116, 66)',
+      fullscreenBorder: /rgba?\(38,\s*116,\s*66,\s*0\.35\)|color\(srgb[^)]*\/\s*0\.35\)/,
       closeBg: 'rgb(241, 243, 245)',
       closeText: 'rgb(90, 90, 114)',
       closeBorder: 'rgb(226, 228, 233)',

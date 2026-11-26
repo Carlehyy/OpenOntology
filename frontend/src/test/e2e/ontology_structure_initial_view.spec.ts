@@ -522,7 +522,7 @@ test('拖拽节点后自动保存提示按 3→2→1 倒计时并复位', async 
   releaseLayout()
   await expect(status).toContainText('布局已保存', { timeout: 3000 })
   // 成功阶段使用绿色强调（--color-success 语义令牌）
-  expect(await status.evaluate(element => getComputedStyle(element).color)).toBe('rgb(45, 138, 78)')
+  expect(await status.evaluate(element => getComputedStyle(element).color)).toBe('rgb(38, 116, 66)')
   // 成功提示短暂停留后回到空闲文案，不留存「布局已保存」
   await expect(status).toContainText('拖动后自动保存布局', { timeout: 6000 })
 

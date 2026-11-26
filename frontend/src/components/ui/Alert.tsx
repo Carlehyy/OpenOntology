@@ -21,7 +21,7 @@ const VARIANTS = {
   },
   danger: {
     icon: XCircle,
-    box: 'border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-[var(--color-danger-bg)] text-[var(--color-danger)]',
+    box: 'border-[color-mix(in_srgb,var(--color-danger)_35%,transparent)] bg-[var(--color-danger-bg)] text-[var(--color-danger-ink)]',
   },
 } as const
 
