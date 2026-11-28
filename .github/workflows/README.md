@@ -1,7 +1,8 @@
 # GitHub Actions
 
 - `ci.yml`：PR 到 `nano-ontoprompt` 的文档/仓库卫生、后端、配置中心和前端
-  验证，不部署；
+  验证，不部署。后端与发布门禁一样按已记录时长分六片，所有用例均执行；
+  新库迁移与数据库专项验收只在第一片执行，避免单作业全量超时；
 - `deploy-nano-ontoprompt.yml`：push 到自动部署分支后按改动家族验证，再进入
   部署。分类器是 fail-closed 的路径家族（见
   `scripts/ci/classify-deploy-changes.sh`），不是增量单测；未知路径仍全量。

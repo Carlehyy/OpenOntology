@@ -37,6 +37,10 @@ jobs:
 
   backend:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
     timeout-minutes: 45
     services:
       postgres:
@@ -68,10 +72,14 @@ jobs:
         working-directory: backend
 
       - name: Run regression suite
-        run: uv run pytest -q --disable-warnings -n auto --dist loadfile --ignore tests/v2/perf
+        run: >-
+          uv run pytest -q --disable-warnings -n auto --dist loadfile
+          --ignore tests/v2/perf --splits=6 --group=${{ matrix.shard }}
+          --splitting-algorithm=least_duration
         working-directory: backend
 
       - name: Validate a fresh database migration
+        if: matrix.shard == 1
         run: |
           DB_FILE="$(mktemp -u /tmp/openontology-ci-XXXXXX.db)"
           trap 'rm -f "${DB_FILE}"' EXIT
@@ -80,6 +88,7 @@ jobs:
         working-directory: backend
 
       - name: Ontology assistant PostgreSQL acceptance
+        if: matrix.shard == 1
         env:
           ENVIRONMENT: test
           DATABASE_URL: postgresql://openontology_ci:openontology_ci@127.0.0.1:5432/openontology_ci
@@ -91,7 +100,7 @@ jobs:
         working-directory: backend
 
       - name: Upload ontology assistant acceptance evidence
-        if: ${{ always() }}
+        if: always() && matrix.shard == 1
         uses: actions/upload-artifact@v4
         with:
           name: ontology-assistant-postgres-${{ github.run_id }}
@@ -100,6 +109,7 @@ jobs:
           retention-days: 14
 
       - name: Operations reports PostgreSQL acceptance
+        if: matrix.shard == 1
         env:
           ENVIRONMENT: test
           DATABASE_URL: postgresql://openontology_ci:openontology_ci@127.0.0.1:5432/openontology_ci
@@ -108,7 +118,7 @@ jobs:
         working-directory: backend
 
       - name: Upload operations reports acceptance evidence
-        if: ${{ always() }}
+        if: always() && matrix.shard == 1
         uses: actions/upload-artifact@v4
         with:
           name: operations-reports-postgres-${{ github.run_id }}
