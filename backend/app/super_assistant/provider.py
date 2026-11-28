@@ -11,6 +11,8 @@ import logging
 import re
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
+from contextvars import ContextVar
 from threading import Event
 from typing import Any
 
@@ -29,15 +31,35 @@ class DailyLimitExceeded(ProviderError):
 
 
 _daily_limit = Event()
+# False only inside ``daily_limit_stop_disabled``: a call that may observe the
+# daily cap without halting the process. Every other caller stops it as before.
+_daily_limit_stop = ContextVar("autoloop_daily_limit_stop", default=True)
 
 
 def daily_limit_reached() -> bool:
     return _daily_limit.is_set()
 
 
+@contextmanager
+def daily_limit_stop_disabled():
+    """Scope for an owner's trial call: the cap is reported, the process is not stopped.
+
+    The call still spends real provider quota and still raises
+    DailyLimitExceeded when the cap is answered. Only the process-wide stop is
+    withheld, so a user-initiated preview cannot halt formal AutoLoop work;
+    formal work stops itself the first time its own call observes the cap.
+    """
+    token = _daily_limit_stop.set(False)
+    try:
+        yield
+    finally:
+        _daily_limit_stop.reset(token)
+
+
 def check_daily_limit(status_code: int | None, body: Any) -> None:
     if status_code == 403 and "DAILY_LIMIT_EXCEEDED" in str(body):
-        _daily_limit.set()
+        if _daily_limit_stop.get():
+            _daily_limit.set()
         raise DailyLimitExceeded("DAILY_LIMIT_EXCEEDED") from None
 
 
@@ -374,17 +396,27 @@ def chat_stream(call_kwargs: dict[str, Any], messages: list[dict[str, Any]],
                 on_delta: Callable[[str], None] | None = None) -> dict[str, Any]:
     """真流式对话：文本增量实时回调 ``on_delta``，返回结构与 chat 相同。
 
-    流式建连/读取抛错时回退非流式调用，成功后把 content 一次性回调；
-    ProviderError 语义与 chat 一致。max_tokens 截断导致 tool_calls 参数
+    仅在尚未交付正文增量时回退非流式调用；已交付后出现异常则报告中断。
+    max_tokens 截断导致 tool_calls 参数
     JSON 不完整时，该 call 的 arguments 置 ``{"_truncated": True, "_raw": …}``。
     """
     provider_name = str(call_kwargs.get("provider") or "openai").lower()
+    emitted_text = False
+
+    def emit_delta(delta: str) -> None:
+        nonlocal emitted_text
+        if on_delta is not None and delta:
+            emitted_text = True
+            on_delta(delta)
+
     try:
         if provider_name == "anthropic":
-            result = _chat_stream_anthropic(call_kwargs, messages, tools, on_delta)
+            result = _chat_stream_anthropic(call_kwargs, messages, tools, emit_delta)
         else:
-            result = _chat_stream_openai(call_kwargs, messages, tools, on_delta)
-    except Exception:
+            result = _chat_stream_openai(call_kwargs, messages, tools, emit_delta)
+    except Exception as exc:
+        if emitted_text:
+            raise ProviderError("模型调用失败：流式响应中断") from exc
         result = _chat_fallback(call_kwargs, messages, tools, provider_name)
         fallback_content = result.get("content")
         if isinstance(fallback_content, str):

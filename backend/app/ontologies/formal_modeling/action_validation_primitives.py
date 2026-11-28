@@ -67,6 +67,18 @@ def _parameter_options(parameter: dict) -> list[Any] | None:
             for item in raw]
 
 
+def _number_bounds(parameter: dict) -> tuple[Any, Any]:
+    """Return ``(minimum, maximum)`` using the declared alias precedence."""
+    return (parameter.get("minimum", parameter.get("min")),
+            parameter.get("maximum", parameter.get("max")))
+
+
+def _length_bounds(parameter: dict) -> tuple[Any, Any]:
+    """Return ``(min_length, max_length)`` using the declared alias precedence."""
+    return (parameter.get("minLength", parameter.get("min_length")),
+            parameter.get("maxLength", parameter.get("max_length")))
+
+
 def _type_error(name: str, expected: str) -> str:
     return f"参数「{name}」类型错误，期望 {expected}"
 

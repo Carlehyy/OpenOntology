@@ -78,6 +78,15 @@ async function hit(target: Locator) {
     return !!top && (top === element || element.contains(top))
   }), 'The visible control must receive pointer input').toBeTruthy()
 }
+async function confirmLocalClosure(page: Page, trigger: Locator) {
+  await hit(trigger)
+  await trigger.click()
+  const confirmation = page.getByRole('dialog', { name: '关闭本地事项？', exact: true })
+  await expect(confirmation).toContainText('此操作不代表关联任务已完成')
+  const confirm = confirmation.getByRole('button', { name: '确认关闭', exact: true })
+  await hit(confirm)
+  await confirm.click()
+}
 async function cleanupRules(request: APIRequestContext, token: string, prefix: string) {
   const rules = await api<AutoLoopRule[]>(request, token, 'GET', `${base}/rules`)
   for (const rule of rules.filter(item => item.name.startsWith(prefix))) {
@@ -152,8 +161,17 @@ for (const role of ['admin', 'editor', 'viewer', 'custom'] as const) {
     const allowed = profile.menu_permissions.includes('super_assistant')
     expect(allowed).toBe(role !== 'custom')
     if (allowed) {
+      // ruleRouting 只认 1：0 等其它取值不打开弹窗（工作台本身正常可用）
+      await page.goto('/#/super-assistant?ruleRouting=0')
+      await page.reload({ waitUntil: 'domcontentloaded' })
+      await expect(page.getByRole('button', { name: '规则路由', exact: true })).toBeVisible()
+      await expect(page.getByRole('dialog')).toHaveCount(0)
+      await page.goto('/#/super-assistant?ruleRouting=1')
+      await page.reload({ waitUntil: 'domcontentloaded' })
       const dialog = page.getByRole('dialog', { name: '规则路由', exact: true })
       await expect(dialog).toBeVisible()
+      // 分区改名后的四区标签
+      await expect(dialog.getByRole('tablist', { name: '规则路由分区' }).getByRole('tab')).toHaveText(['事件流水', '路由规则', '助手研判', '事件统计'])
       await page.reload({ waitUntil: 'domcontentloaded' })
       await expect(dialog).toBeVisible()
       await page.keyboard.press('Escape')
@@ -166,7 +184,7 @@ for (const role of ['admin', 'editor', 'viewer', 'custom'] as const) {
     } else {
       const rejected = await request.get(`${API}${base}/rules`, { headers: { Authorization: `Bearer ${token}` } })
       expect(rejected.status()).toBe(403)
-      for (const search of ['ruleRouting=1', 'decisions=1', `decision=${fixture.decisionItems!.open}`, `autoloopEvent=${fixture.events!.scheduled}`]) {
+      for (const search of ['ruleRouting=1', 'ruleRouting=1&ruleRoutingTab=rules', 'decisions=1', `decision=${fixture.decisionItems!.open}`, `autoloopEvent=${fixture.events!.scheduled}`]) {
         await page.goto(`/#/super-assistant?${search}`)
         await expect(page.getByRole('heading', { name: '当前页面无法访问', exact: true })).toBeVisible()
         await expect(page.getByRole('dialog')).toHaveCount(0)
@@ -194,8 +212,8 @@ test('AutoLoop 隔离栈：助手草稿审阅、无副作用预览、确认创�
     await page.goto('/#/super-assistant?ruleRouting=1')
     const dialog = page.getByRole('dialog', { name: '规则路由', exact: true })
     await expect(dialog).toBeVisible()
-    // 默认停在事件流水区；规则草稿审阅在规则模板区
-    await dialog.getByRole('tab', { name: '规则模板', exact: true }).click()
+    // 默认停在事件流水区；规则草稿审阅在路由规则区
+    await dialog.getByRole('tab', { name: '路由规则', exact: true }).click()
     await dialog.getByRole('button', { name: '导入助手草稿（JSON）', exact: true }).click()
     await dialog.getByLabel('助手规则草稿 JSON').fill(JSON.stringify(draft))
     await dialog.getByRole('button', { name: '导入并审阅', exact: true }).click()
@@ -210,15 +228,27 @@ test('AutoLoop 隔离栈：助手草稿审阅、无副作用预览、确认创�
     expect(creates).toBe(0)
     expect((await api<AutoLoopRule[]>(request, token, 'GET', `${base}/rules`)).some(item => item.name === name)).toBe(false)
 
+    // 新建与编辑统一为「保存规则」；草稿无论是否声明启用都以停用保存
     const createdResponse = page.waitForResponse(response => new URL(response.url()).pathname === `${base}/rules` && response.request().method() === 'POST')
-    await hit(dialog.getByRole('button', { name: '确认创建规则', exact: true }))
-    await dialog.getByRole('button', { name: '确认创建规则', exact: true }).click()
+    await hit(dialog.getByRole('button', { name: '保存规则', exact: true }))
+    await dialog.getByRole('button', { name: '保存规则', exact: true }).click()
     const created = unwrap<AutoLoopRule>(await (await createdResponse).json())
     expect(created.name).toBe(name)
+    expect(created.enabled).toBe(false)
     expect(creates).toBe(1)
     const row = dialog.getByRole('row').filter({ hasText: name })
     await expect(row).toContainText('已停用')
-    await row.getByRole('button', { name: '启用', exact: true }).click()
+    // 保存后焦点回到该行的「编辑」
+    await expect(row.getByRole('button', { name: '编辑', exact: true })).toBeFocused()
+    // 启停、调序、删除收进行级「更多」菜单（Portal 渲染，从页面根定位）；启用携带读取到的版本
+    const menu = page.locator(`[data-rule-routing-rule-menu="${created.id}"]`)
+    await dialog.locator(`[data-rule-routing-rule-more="${created.id}"]`).click()
+    const enabledResponse = page.waitForResponse(response => new URL(response.url()).pathname === `${base}/rules/${created.id}` && response.request().method() === 'PATCH')
+    await menu.getByRole('button', { name: '启用', exact: true }).click()
+    const enabledRequest = await enabledResponse
+    expect(enabledRequest.request().postDataJSON()).toMatchObject({ enabled: true, expectedVersion: created.version })
+    const enabled = unwrap<AutoLoopRule>(await enabledRequest.json())
+    expect(enabled.version).toBe(created.version + 1)
     await expect(row).toContainText('已启用')
     expect((await api<AutoLoopRule>(request, token, 'GET', `${base}/rules/${created.id}`)).enabled).toBe(true)
     await row.getByRole('button', { name: '编辑', exact: true }).click()
@@ -227,7 +257,8 @@ test('AutoLoop 隔离栈：助手草稿审阅、无副作用预览、确认创�
     const updated = dialog.getByRole('row').filter({ hasText: `${name}-edited` })
     await expect(updated).toBeVisible()
     expect((await api<AutoLoopRule>(request, token, 'GET', `${base}/rules/${created.id}`)).version).toBeGreaterThan(created.version)
-    await updated.getByRole('button', { name: `删除 ${name}-edited`, exact: true }).click()
+    await updated.locator(`[data-rule-routing-rule-more="${created.id}"]`).click()
+    await menu.getByRole('button', { name: `删除 ${name}-edited`, exact: true }).click()
     const deletedResponse = page.waitForResponse(response => new URL(response.url()).pathname === `${base}/rules/${created.id}` && response.request().method() === 'DELETE')
     await page.getByRole('dialog', { name: '删除规则？', exact: true }).getByRole('button', { name: '删除', exact: true }).click()
     expect((await deletedResponse).status()).toBe(204)
@@ -303,7 +334,9 @@ test('AutoLoop 隔离栈：真实通知 key 入站、重复幂等与事件深链
     await page.goto(`/#/super-assistant?autoloopEvent=${trace.id}`)
     const dialog = page.getByRole('dialog', { name: '规则路由', exact: true })
     await expect(dialog.getByRole('heading', { name: prefix, exact: true })).toBeVisible()
-    await expect(dialog.getByText('Multica 已确认', { exact: true })).toBeVisible()
+    // 详情打开时事件列表仍挂载（hidden），已确认行内也有同文案徽标：状态断言限定在详情「处理结论」区域
+    await expect(dialog.getByRole('region', { name: '处理结论', exact: true })
+      .getByText('Multica 已确认', { exact: true })).toBeVisible()
     await expect(dialog.getByRole('region', { name: '动作步骤' })).toContainText(`Multica 任务编号 ${trace.issueRef}`)
     await expect(dialog.getByRole('button', { name: '返回流水', exact: true })).toBeVisible()
     // 详情原文折叠在「原始记录」内：展开后外部原文按原文展示但脚本不执行
@@ -357,7 +390,9 @@ test('AutoLoop 隔离栈：永久决策详情、服务端未完成计数与深�
   const dialog = page.getByRole('dialog', { name: '决策事项', exact: true })
   await expect(dialog.getByRole('heading', { name: item.title, exact: true })).toBeVisible()
   await expect(dialog.getByRole('region', { name: '待决定问题' })).toContainText(item.question)
-  await expect(dialog.getByText(`未完成 ${summary.unfinishedTotal}`, { exact: true })).toBeVisible()
+  await expect(dialog.getByRole('tab', { name: `待我处理 ${summary.openCount}`, exact: true })).toBeVisible()
+  await expect(dialog.getByRole('button', { name: `需关注 ${summary.unknownCount + summary.failedCount}`, exact: true })).toBeVisible()
+  await expect(dialog.getByRole('region', { name: '决策操作' }).getByRole('button', { name: '提交决定', exact: true })).toBeInViewport()
   await page.reload()
   await expect(dialog.getByRole('heading', { name: item.title, exact: true })).toBeVisible()
 })
@@ -375,9 +410,8 @@ test('AutoLoop 隔离栈：已人工处理只关闭本地事项，零连接器�
   const dialog = page.getByRole('dialog', { name: '决策事项', exact: true })
   await expect(dialog.getByRole('heading', { name: item.title, exact: true })).toBeVisible()
   const submit = page.waitForRequest(request => new URL(request.url()).pathname === `${base}/decision-items/${item.id}/mark-handled` && request.method() === 'POST')
-  const button = dialog.getByRole('button', { name: '已人工处理', exact: true })
-  await hit(button)
-  await button.click()
+  const button = dialog.getByRole('button', { name: '关闭本地事项', exact: true })
+  await confirmLocalClosure(page, button)
   const mutation = (await submit).postDataJSON() as { expectedContentVersion: number; idempotencyKey: string; optionId?: string; freeText?: string }
   expect(mutation.expectedContentVersion).toBe(item.contentVersion)
   expect(mutation.idempotencyKey).toMatch(/^[0-9a-f-]{36}$/i)
@@ -415,10 +449,10 @@ test('AutoLoop 隔离栈：stale-open 人工关闭412不取消先赢决定，显
   test.skip(current.contentVersion !== queued.contentVersion || current.status !== 'pending_dispatch', 'Fixture advanced before stale request; rerun with an exclusive no-claim environment')
   const captures: { expectedContentVersion: number; idempotencyKey: string }[] = []
   const responses = [412, 200]
-  const closure = dialog.getByRole('button', { name: '已人工处理', exact: true })
+  const closure = dialog.getByRole('button', { name: '关闭本地事项', exact: true })
   await hit(closure)
   const rejected = page.waitForResponse(response => new URL(response.url()).pathname === `${path}/mark-handled` && response.request().method() === 'POST')
-  await closure.click()
+  await confirmLocalClosure(page, closure)
   const rejection = await rejected
   const first = rejection.request().postDataJSON() as { expectedContentVersion: number; idempotencyKey: string }
   test.skip(first.expectedContentVersion !== original.contentVersion, 'The UI refreshed before the stale click; no stale snapshot was tested')
@@ -434,7 +468,7 @@ test('AutoLoop 隔离栈：stale-open 人工关闭412不取消先赢决定，显
   await expect(closure).toBeEnabled()
   const accepted = page.waitForResponse(response => new URL(response.url()).pathname === `${path}/mark-handled` && response.request().method() === 'POST')
   await hit(closure)
-  await closure.click()
+  await confirmLocalClosure(page, closure)
   const acceptance = await accepted
   expect(acceptance.status()).toBe(responses[1])
   captures.push(acceptance.request().postDataJSON() as { expectedContentVersion: number; idempotencyKey: string })
@@ -519,9 +553,9 @@ test('AutoLoop 隔离栈：writeback_failed 含 confirmed/unknown 步骤时旧�
   const dialog = page.getByRole('dialog', { name: '决策事项', exact: true })
   await expect(dialog.getByRole('heading', { name: original.title, exact: true })).toBeVisible()
   const blocked = page.waitForResponse(response => new URL(response.url()).pathname === `${path}/mark-handled` && response.request().method() === 'POST')
-  const closure = dialog.getByRole('button', { name: '已人工处理', exact: true })
+  const closure = dialog.getByRole('button', { name: '关闭本地事项', exact: true })
   await hit(closure)
-  await closure.click()
+  await confirmLocalClosure(page, closure)
   expect((await blocked).status()).toBe(409)
   await expect(dialog.getByRole('alert')).not.toBeEmpty()
   await expect(dialog.getByRole('status')).toContainText('请结合返回原因确认后续处理')
@@ -552,7 +586,7 @@ test('AutoLoop 隔离栈：提交决定按来源分流，保留真实写回步�
   const dialog = page.getByRole('dialog', { name: '决策事项', exact: true })
   await expect(dialog.getByRole('heading', { name: item.title, exact: true })).toBeVisible()
   const freeText = `isolated-choice-${randomUUID()}`
-  await dialog.getByLabel('自由补充', { exact: true }).fill(freeText)
+  await dialog.getByLabel(item.options.length ? '补充答复' : '你的答复', { exact: true }).fill(freeText)
   const submission = page.waitForRequest(request => new URL(request.url()).pathname === `${base}/decision-items/${item.id}/decide` && request.method() === 'POST')
   const button = dialog.getByRole('button', { name: '提交决定', exact: true })
   await hit(button)

@@ -99,6 +99,7 @@ async function mockDecisionAlerts(page: Page, initial: DecisionItem[]) {
     const url = new URL(route.request().url())
     const path = url.pathname
     const count = (value: DecisionStatus) => state.decisions.filter(item => item.status === value).length
+    if (path === '/api/v2/super-assistant/autoloop/rules') return json(route, [])
     if (path === '/api/v2/super-assistant/autoloop/decision-items/summary') {
       state.summaryRequests++
       const counts = {
@@ -250,7 +251,7 @@ test.describe('待处理决策事项提醒', () => {
 
     await arrival.getByRole('button', { name: '查看' }).click()
     await expect(page).toHaveURL(/decision=d-2/)
-    const dialog = page.getByRole('dialog')
+    const dialog = page.getByRole('dialog', { name: '决策事项', exact: true })
     await expect(dialog.getByText('是否升级镜像并重新部署').first()).toBeVisible()
 
     // 注意力脉冲只持续一小段：到点自动静止，用户打算稍后处理时不被持续打扰
@@ -259,18 +260,25 @@ test.describe('待处理决策事项提醒', () => {
     await expect(bell).toHaveCSS('animation-name', 'none')
 
     // 弹窗内处理后同步对齐：卡片与标题角标立即消失，而不是滞后到下一轮轮询
-    await dialog.getByRole('button', { name: '已人工处理' }).click()
+    await dialog.getByRole('button', { name: '关闭本地事项', exact: true }).click()
+    const confirmation = page.getByRole('dialog', { name: '关闭本地事项？', exact: true })
+    await expect(confirmation).toBeVisible()
+    expect(state.handled).toEqual([])
+    await confirmation.getByRole('button', { name: '确认关闭', exact: true }).click()
     await expect.poll(() => state.handled).toEqual(['d-2'])
     await expect(page.getByTestId('super-assistant-pending-decisions')).toHaveCount(0)
     await expect(page).toHaveTitle('OpenOntology')
   })
 
-  test('后台标签页且已授权：走系统通知且不叠加应用内提示，点击通知定位到对应事项', async ({ page }) => {
+  test('后台标签页且已授权：系统通知保护规则草稿，确认后定位到对应事项', async ({ page }) => {
     await seedAuth(page)
     await mockDesktopNotifications(page, 'granted')
     const state = await mockDecisionAlerts(page, [])
-    await page.goto('/#/super-assistant')
-    await expect(page.getByTestId('super-assistant-composer')).toBeVisible()
+    await page.goto('/#/super-assistant?conversation=c-1&ruleRouting=1&ruleRoutingTab=rules')
+    const routing = page.getByRole('dialog', { name: '规则路由', exact: true })
+    await routing.getByRole('button', { name: '新建规则', exact: true }).click()
+    const draft = routing.getByRole('textbox', { name: '规则名称', exact: true })
+    await draft.fill('规则草稿')
 
     await setPageAttention(page, 'hidden')
     state.decisions.push(decision('d-3', new Date().toISOString(), '是否扩容副本 executor'))
@@ -282,12 +290,28 @@ test.describe('待处理决策事项提醒', () => {
     await expect(page.locator('[data-sonner-toast]')).toHaveCount(0)
     await expect(page).toHaveTitle('(1) OpenOntology')
 
-    await page.evaluate(() => {
+    const clickNotification = () => page.evaluate(() => {
       const target = window as unknown as AlertWindow
       target.__decisionNotifications[0].onclick?.()
     })
+    const exit = page.getByRole('dialog', { name: '放弃未保存的规则草稿？' })
+    const detail = page.getByRole('dialog', { name: '决策事项', exact: true })
+    await clickNotification()
+    await expect(detail).toHaveCount(0)
+    await exit.getByRole('button', { name: '继续编辑', exact: true }).click()
+    await expect(exit).toHaveCount(0)
+    await expect(draft).toHaveValue('规则草稿')
+    await expect(draft).toBeFocused()
+    await expect(page).toHaveURL(/conversation=c-1/)
+    await expect(page).toHaveURL(/ruleRoutingTab=rules/)
+    await expect(page).not.toHaveURL(/decision=/)
+
+    await clickNotification()
+    await exit.getByRole('button', { name: '放弃草稿', exact: true }).click()
+    await expect(page).toHaveURL(/conversation=c-1/)
     await expect(page).toHaveURL(/decision=d-3/)
-    await expect(page.getByRole('dialog')).toBeVisible()
+    await expect(routing).toHaveCount(0)
+    await expect(detail.getByRole('heading', { name: '是否扩容副本 executor', exact: true })).toBeVisible()
     // 已经由系统通知送达：回到页面后不再补应用内提示
     await setPageAttention(page, 'focused')
     await expect(page.locator('[data-sonner-toast]')).toHaveCount(0)
@@ -409,10 +433,8 @@ test.describe('待处理决策事项提醒', () => {
     await seedAuth(page, 'custom', ['ontologies'])
     const state = await mockDecisionAlerts(page, [decision('d-7', new Date().toISOString(), '是否扩容存储')])
     await page.goto('/#/super-assistant')
-    await expect(page).toHaveTitle('OpenOntology')
-
-    // 等待页面自身的首轮请求落定，再手动触发：两种路径都不应发出决策摘要请求
-    await page.waitForTimeout(1500)
+    // 先等应用完成权限判定，再手动触发轮询，避免在入口脚本尚未加载时调用测试函数。
+    await expect(page.getByRole('heading', { name: '当前页面无法访问', exact: true })).toBeVisible()
     await refreshAlerts(page)
     await refreshAlerts(page)
     expect(state.summaryRequests).toBe(0)

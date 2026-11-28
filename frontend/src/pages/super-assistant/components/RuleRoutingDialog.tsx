@@ -1,46 +1,47 @@
-import { useEffect, useEffectEvent, useId, useRef, useState } from 'react'
-import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { useEffect, useEffectEvent, useId, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from 'react'
 import { BarChart3, Brain, Route, ScrollText } from 'lucide-react'
 import { toast } from 'sonner'
-import { autoloopApi, type AutoLoopPreview, type AutoLoopRoutingStats, type AutoLoopRule, type AutoLoopRuleCreate } from '@/api/autoloop'
+import { autoloopApi, type AutoLoopPreview, type AutoLoopRoutingPolicy, type AutoLoopRoutingStats, type AutoLoopRule, type AutoLoopRuleCreate } from '@/api/autoloop'
 import { Alert } from '@/components/ui/Alert'
 import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import type { GuardRoutingNavigation, RuleRoutingLocation, RuleRoutingTab as Tab } from '../ruleRoutingLocation'
 import { DialogShell } from './AssistantConfiguration'
 import { errorText } from './assistantPanelUtils'
 import { newRule, parseRuleDraft } from './autoloopLogic'
-import { DEFAULT_SAMPLE, draftFromTrace, parsePreviewSample, sampleFromTrace, validateRuleFormRows, type RuleFieldEqualsRow, type RuleFormErrors, type RuleFormField } from './ruleRoutingForm'
+import { DEFAULT_SAMPLE, draftFromTrace, matchesAllEvents, parsePreviewSample, sampleFromTrace, validateRuleFormRows, type RuleFieldEqualsRow, type RuleFormErrors, type RuleFormField } from './ruleRoutingForm'
 import { textAreaClass } from './AutoLoopDetails'
 import AutoLoopEventHistory, { type TraceDrilldown } from './AutoLoopEventHistory'
 import AutoLoopAssistantRouting from './AutoLoopAssistantRouting'
-// 组件默认导入与 api 层的 AutoLoopRoutingStats 数据类型重名，视图组件取 Panel 后缀。
 import AutoLoopRoutingStatsPanel from './AutoLoopRoutingStats'
+import RoutingPolicyEditor from './RoutingPolicyEditor'
 import RuleRoutingEditor from './RuleRoutingEditor'
 import RulesList from './RulesList'
 
-type Tab = 'events' | 'rules' | 'assistant' | 'stats'
-
-/** 消息通知式左栏分区：事件流水（默认）→ 规则模板 → 助手路由 → 事件统计。 */
 const NAV_ITEMS: { key: Tab; label: string; icon: typeof Route }[] = [
   { key: 'events', label: '事件流水', icon: ScrollText },
-  { key: 'rules', label: '规则模板', icon: Route },
-  { key: 'assistant', label: '助手路由', icon: Brain },
+  { key: 'rules', label: '路由规则', icon: Route },
+  { key: 'assistant', label: '助手研判', icon: Brain },
   { key: 'stats', label: '事件统计', icon: BarChart3 },
 ]
 const TAB_KEYS = NAV_ITEMS.map(item => item.key)
+const DESKTOP = '(min-width: 768px)'
+const ruleErrorCode = (error: unknown) => (error as { detail?: { code?: string } } | undefined)?.detail?.code
+type RulesFocusTarget = 'editor' | { ruleId?: string }
 
-export default function RuleRoutingDialog({ initialDraft, initialEventId, scheduledTaskId, scheduledRunId, onClose, onOpenDecision }: {
+export default function RuleRoutingDialog({ initialDraft, location, navigationGuard, navigationPending, onLocationChange, onClose, onCloseAutoFocus, onOpenDecision }: {
   initialDraft?: AutoLoopRuleCreate | null
-  initialEventId?: string | null
-  scheduledTaskId?: string | null
-  scheduledRunId?: string | null
+  location: RuleRoutingLocation
+  navigationGuard: RefObject<GuardRoutingNavigation | null>
+  navigationPending: boolean
+  onLocationChange: (view: RuleRoutingLocation) => void
   onClose: () => void
+  onCloseAutoFocus: (event: Event) => void
   onOpenDecision: (id: string) => void
 }) {
   const id = useId()
-  // 默认事件流水；聊天草稿直进规则编辑；已有事件/日程深链优先于草稿。
-  const deepLinked = !!(initialEventId || scheduledTaskId || scheduledRunId)
-  const [tab, setTab] = useState<Tab>(initialDraft && !deepLinked ? 'rules' : 'events')
+  const { tab, eventId, scheduledTaskId, scheduledRunId } = location
+  const [vertical, setVertical] = useState(() => window.matchMedia(DESKTOP).matches)
   const [rules, setRules] = useState<AutoLoopRule[]>([])
   const [loading, setLoading] = useState(true)
   const [listLoadError, setListLoadError] = useState('')
@@ -50,8 +51,7 @@ export default function RuleRoutingDialog({ initialDraft, initialEventId, schedu
   const [previewError, setPreviewError] = useState('')
   const [fieldErrors, setFieldErrors] = useState<RuleFormErrors>({})
   const [editing, setEditing] = useState<AutoLoopRule | 'new' | null>(initialDraft ? 'new' : null)
-  const [form, setForm] = useState<AutoLoopRuleCreate>(initialDraft ?? newRule())
-  const [position, setPosition] = useState(String(initialDraft?.position ?? 0))
+  const [form, setForm] = useState<AutoLoopRuleCreate>(() => initialDraft ? { ...initialDraft, enabled: false } : newRule())
   const [fieldEquals, setFieldEquals] = useState<RuleFieldEqualsRow[]>(initialDraft?.match.fieldEquals ?? [])
   const [baseline, setBaseline] = useState('')
   const [sample, setSample] = useState(DEFAULT_SAMPLE)
@@ -65,29 +65,78 @@ export default function RuleRoutingDialog({ initialDraft, initialEventId, schedu
   const [sorting, setSorting] = useState(false)
   const [mutating, setMutating] = useState(false)
   const [deleting, setDeleting] = useState<AutoLoopRule | null>(null)
-  const [exit, setExit] = useState<{ run: () => void; destination?: Tab } | null>(null)
-  // 流水列表与助手研判共用选中事件，切换分区时保留流水筛选和分页。
-  const [selectedEventId, setSelectedEventId] = useState<string | null>(initialEventId ?? null)
+  const [activation, setActivation] = useState<{ rule: AutoLoopRule; value: AutoLoopRuleCreate; run: () => void } | null>(null)
+  const [undo, setUndo] = useState<AutoLoopRule | null>(null)
+  const [highlightedId, setHighlightedId] = useState<string | null>(null)
+  const [rulesFocus, setRulesFocus] = useState<RulesFocusTarget | null>(null)
+  const [exit, setExit] = useState<{ run: () => void; stay?: () => void; focus?: () => void; restoring?: boolean } | null>(null)
   const [drilldown, setDrilldown] = useState<TraceDrilldown | null>(null)
-  // 统计由本弹窗统一持有：规则列表与事件统计共用同一份窗口摘要，失败不当作 0。
   const [days, setDays] = useState<7 | 30>(7)
   const [summary, setSummary] = useState<AutoLoopRoutingStats | null>(null)
   const [statisticsLoading, setStatisticsLoading] = useState(true)
   const [statisticsError, setStatisticsError] = useState('')
+  const [policy, setPolicy] = useState<AutoLoopRoutingPolicy | null>(null)
+  const [policyLoading, setPolicyLoading] = useState(true)
+  const [policyError, setPolicyError] = useState('')
+  const [policyEditing, setPolicyEditing] = useState(false)
+  const [policyDirty, setPolicyDirty] = useState(false)
+  const [policySaving, setPolicySaving] = useState(false)
   const request = useRef(0)
   const previewRequest = useRef(0)
   const statsRequest = useRef(0)
+  const policyRequest = useRef(0)
   const previousDraft = useRef(initialDraft)
   const editorRef = useRef<HTMLDivElement>(null)
   const previewHeading = useRef<HTMLHeadingElement>(null)
+  const rulesPanel = useRef<HTMLDivElement>(null)
+  const assistantPanel = useRef<HTMLDivElement>(null)
   const navRefs = useRef<(HTMLButtonElement | null)[]>([])
-  const confirmedDestination = useRef<Tab | undefined>(undefined)
-  const snapshot = JSON.stringify({ form, fieldEquals, position })
+  const exitFocus = useRef<(() => void) | undefined>(undefined)
+  const confirmationFocus = useRef<RulesFocusTarget | null>(null)
+  const mutationInFlight = useRef(false)
+  const position = String(form.position)
+  const snapshot = JSON.stringify({ form, fieldEquals })
   const currentDraft = useRef(snapshot)
-  useEffect(() => { currentDraft.current = snapshot }, [snapshot])
+  useLayoutEffect(() => { currentDraft.current = snapshot }, [snapshot])
   const dirty = !!editing && baseline !== snapshot
-  const busy = saving || previewing || sorting || mutating
+  const hasDraft = dirty || (showImport && Boolean(draftText.trim())) || policyDirty
+  const busy = saving || previewing || sorting || mutating || policySaving
   const statsReady = !!summary && !statisticsError
+
+  // API completion can precede the commit that mounts and enables the list buttons.
+  useLayoutEffect(() => {
+    if (!rulesFocus || tab !== 'rules') return
+    if (rulesFocus === 'editor') {
+      const input = editorRef.current?.querySelector<HTMLInputElement>('input')
+      if (!input) return
+      input.focus()
+    } else {
+      if (editing || showImport || busy || loading) return
+      const panel = rulesPanel.current
+      const ruleId = rulesFocus.ruleId
+      const edit = ruleId ? panel?.querySelector<HTMLButtonElement>(`[data-rule-routing-rule-edit="${CSS.escape(ruleId)}"]`) : null
+      const button = edit ?? panel?.querySelector<HTMLButtonElement>('[data-rule-routing-create]')
+      if (!button || button.disabled) return
+      button.focus()
+    }
+    setRulesFocus(null)
+  }, [rulesFocus, tab, editing, showImport, busy, loading])
+
+  useEffect(() => {
+    const query = window.matchMedia(DESKTOP)
+    const update = () => setVertical(query.matches)
+    query.addEventListener('change', update)
+    return () => query.removeEventListener('change', update)
+  }, [])
+  useEffect(() => {
+    if (!hasDraft) return
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = '' }
+    window.addEventListener('beforeunload', warn)
+    return () => window.removeEventListener('beforeunload', warn)
+  }, [hasDraft])
+  useEffect(() => {
+    if (!vertical) navRefs.current[TAB_KEYS.indexOf(tab)]?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  }, [tab, vertical])
 
   async function load() {
     const generation = ++request.current
@@ -108,29 +157,31 @@ export default function RuleRoutingDialog({ initialDraft, initialEventId, schedu
       const result = await autoloopApi.routingStats(days)
       if (generation === statsRequest.current) setSummary(result)
     } catch (err) {
-      // 失败清空摘要：列表与统计区呈现错误/未知，而不是把失败渲染成 0。
       if (generation === statsRequest.current) { setSummary(null); setStatisticsError(errorText(err, '统计加载失败')) }
     } finally { if (generation === statsRequest.current) setStatisticsLoading(false) }
   }
   useEffect(() => { void loadStatistics(); return () => { statsRequest.current++ } }, [days])
 
+  async function loadPolicy() {
+    const generation = ++policyRequest.current
+    setPolicyLoading(true); setPolicyError('')
+    try {
+      const result = await autoloopApi.getRoutingPolicy()
+      if (generation === policyRequest.current) setPolicy(result)
+    } catch {
+      if (generation === policyRequest.current) setPolicyError('研判提示词加载失败。')
+    } finally { if (generation === policyRequest.current) setPolicyLoading(false) }
+  }
+  useEffect(() => {
+    if (tab === 'assistant') void loadPolicy()
+    return () => { policyRequest.current++ }
+  }, [tab])
+
   useEffect(() => {
     if (preview) { previewHeading.current?.scrollIntoView({ block: 'start' }); previewHeading.current?.focus({ preventScroll: true }) }
   }, [preview])
 
-  const syncLinkedEvent = useEffectEvent(() => {
-    // 已在事件流水（含首次打开的深链）时不再打扰；仅在其它分区时带守卫跳回。
-    if (tab === 'events') return
-    guarded(() => { setTab('events') }, 'events')
-  })
-  useEffect(() => {
-    if (initialEventId) setSelectedEventId(initialEventId)
-    // 仅在存在事件/日程深链时才跳转；挂载时（如聊天草稿直进规则编辑）不得打扰。
-    if (!initialEventId && !scheduledTaskId && !scheduledRunId) return
-    syncLinkedEvent()
-  }, [initialEventId, scheduledTaskId, scheduledRunId])
-
-  const fillIncomingDraft = useEffectEvent((draft: AutoLoopRuleCreate) => { guarded(() => { start(undefined, draft); setTab('rules') }, 'rules') })
+  const fillIncomingDraft = useEffectEvent((draft: AutoLoopRuleCreate) => { guarded(() => start(undefined, draft)) })
   useEffect(() => {
     if (initialDraft && initialDraft !== previousDraft.current) fillIncomingDraft(initialDraft)
     previousDraft.current = initialDraft
@@ -139,86 +190,93 @@ export default function RuleRoutingDialog({ initialDraft, initialEventId, schedu
   function clearFormFeedback() { setSaveError(''); setPreviewError(''); setFieldErrors({}); setPreview(null); previewRequest.current++ }
   function discard() {
     setEditing(null); setBaseline(''); setShowImport(false); setDraftText(''); setImportError('')
-    setSampleFromEvent(false); setSampleOpen(false)
-    clearFormFeedback()
+    setSampleFromEvent(false); setSampleOpen(false); clearFormFeedback()
+    setPolicyEditing(false); setPolicyDirty(false)
   }
-  function focusTab(key: Tab) {
-    requestAnimationFrame(() => navRefs.current[TAB_KEYS.indexOf(key)]?.focus())
-  }
-  function guarded(action: () => void, destination?: Tab) {
-    if (busy) return
-    if (dirty || (showImport && draftText.trim())) {
-      setExit({ run: () => { discard(); action() }, destination })
+  function guarded(action: () => void, focus?: () => void, stay?: () => void) {
+    if (busy || mutationInFlight.current || activation || deleting) { stay?.(); return }
+    const opener = document.activeElement
+    if (hasDraft) {
+      setExit({ run: () => { discard(); action() }, stay, focus })
+      if (!exit) exitFocus.current = () => { if (opener instanceof HTMLElement && opener.isConnected) opener.focus() }
       return
     }
-    action()
-    if (destination) focusTab(destination)
+    discard(); action()
+    if (focus) requestAnimationFrame(focus)
   }
+  useLayoutEffect(() => {
+    navigationGuard.current = (proceed, stay) => guarded(proceed, undefined, stay)
+    return () => { navigationGuard.current = null }
+  })
+  // The browser URL changes before HashRouter commits it. Keep the modal in place
+  // until the router accepts the restored view, so a repeat link is a new navigation.
+  useEffect(() => {
+    if (!navigationPending) setExit(current => current?.stay ? null : current)
+  }, [navigationPending])
   function confirmExit() {
-    if (!exit) return
-    confirmedDestination.current = exit.destination
+    if (!exit || exit.restoring) return
+    exitFocus.current = exit.focus
     setExit(null)
     exit.run()
   }
+  function cancelExit() {
+    if (!exit || exit.restoring) return
+    if (exit.stay && navigationPending) {
+      setExit({ ...exit, restoring: true })
+      exit.stay()
+    } else setExit(null)
+  }
   function restoreExitFocus(event: Event) {
-    const destination = confirmedDestination.current
-    confirmedDestination.current = undefined
-    if (!destination) return
-    // 确认层开始恢复焦点后再聚焦目标标签，避免被尚未释放的焦点陷阱拦截。
+    const focus = exitFocus.current
+    exitFocus.current = undefined
+    if (!focus) return
     event.preventDefault()
-    focusTab(destination)
+    requestAnimationFrame(focus)
+  }
+  function focusTab(key: Tab) { navRefs.current[TAB_KEYS.indexOf(key)]?.focus() }
+  function goTo(key: Tab, selected: string | null = null) {
+    onLocationChange({ ...location, tab: key, eventId: selected })
   }
   function selectTab(key: Tab) {
-    if (key === tab) return
-    guarded(() => { discard(); setTab(key) }, key)
+    if (key !== tab) guarded(() => goTo(key), () => focusTab(key))
   }
   function showEvents(next: TraceDrilldown) {
-    guarded(() => {
-      setSelectedEventId(null)
-      setDrilldown({ ...next })
-      setTab('events')
-    }, 'events')
+    guarded(() => { setDrilldown({ ...next }); goTo('events') }, () => focusTab('events'))
   }
-  function openEvent(eventId: string) {
-    guarded(() => { setSelectedEventId(eventId); setDrilldown(null); setTab('events') }, 'events')
+  function openEvent(event: string) {
+    guarded(() => { setDrilldown(null); goTo('events', event) })
   }
-  function createFromTrace(trace?: {
-    title?: string | null
-    source?: { kind?: string | null; system?: string | null; ref?: string | null } | null
-    untrustedOriginal?: unknown
-  }) {
+  function nextPosition() { return Math.max(-1, ...rules.map(item => item.position)) + 1 }
+  function createFromTrace(trace?: Parameters<typeof draftFromTrace>[0]) {
     guarded(() => {
-      const next = Math.max(-1, ...rules.map(item => item.position)) + 1
       if (trace) {
-        // 事件预填：白名单字段进条件、原始载荷进样例；默认停用、不自动保存。
-        start(undefined, draftFromTrace(trace, next))
+        start(undefined, draftFromTrace(trace, nextPosition()))
         setSample(sampleFromTrace(trace)); setSampleFromEvent(true); setSampleOpen(true)
       } else start()
-      setTab('rules')
-    }, 'rules')
+      goTo('rules')
+    })
   }
   function start(rule?: AutoLoopRule, imported?: AutoLoopRuleCreate) {
-    const value = imported ?? (rule ? {
+    const value = rule ? {
       name: rule.name, enabled: rule.enabled, position: rule.position, match: rule.match,
       titleTemplate: rule.titleTemplate, descriptionTemplate: rule.descriptionTemplate,
       priority: rule.priority, assignee: rule.assignee, binding: rule.binding,
-    } : newRule(Math.max(-1, ...rules.map(item => item.position)) + 1))
+    } : imported ? { ...imported, enabled: false, position: nextPosition() } : newRule(nextPosition())
     const rows = value.match.fieldEquals ?? []
-    setForm(value); setPosition(String(value.position)); setFieldEquals(rows)
-    setBaseline(imported ? '' : JSON.stringify({ form: value, fieldEquals: rows, position: String(value.position) }))
-    setEditing(rule ?? 'new'); setShowImport(false); setDraftText(''); setImportError('')
+    setForm(value); setFieldEquals(rows); setSample(DEFAULT_SAMPLE)
+    setBaseline(imported ? '' : JSON.stringify({ form: value, fieldEquals: rows }))
+    setEditing(rule ?? 'new'); setShowImport(false); setDraftText(''); setImportError(''); setHighlightedId(null)
     setSampleFromEvent(false); setSampleOpen(false)
     clearFormFeedback()
+    setRulesFocus('editor')
   }
   function invalidatePreview() { setPreview(null); setPreviewError(''); previewRequest.current++ }
   function clearField(field?: RuleFormField) { if (field) setFieldErrors(previous => ({ ...previous, [field]: undefined })) }
   function change(next: AutoLoopRuleCreate, field?: RuleFormField) { setForm(next); invalidatePreview(); clearField(field) }
   function changeFieldEquals(rows: RuleFieldEqualsRow[]) { setFieldEquals(rows); invalidatePreview(); clearField('fieldEquals') }
-  function changePosition(value: string) { setPosition(value); change({ ...form, position: Number(value) }, 'position') }
   function changeSample(text: string) { setSample(text); setSampleFromEvent(false); invalidatePreview(); clearField('sample') }
   function focusInvalid(errors: RuleFormErrors) {
     setFieldErrors(errors)
-    // 等待内联错误挂载后，按 DOM 顺序聚焦并滚动到首个错误字段。
     requestAnimationFrame(() => editorRef.current?.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus())
   }
   function validated() {
@@ -227,22 +285,47 @@ export default function RuleRoutingDialog({ initialDraft, initialEventId, schedu
     else setFieldErrors({})
     return result.value
   }
-  async function save() {
-    if (busy) return
+  function restoreConfirmationFocus(event: Event) {
+    event.preventDefault()
+    const target = confirmationFocus.current
+    confirmationFocus.current = null
+    if (target) setRulesFocus(target)
+  }
+  async function persistRule(value: AutoLoopRuleCreate, target: AutoLoopRule | 'new' | null, confirmed = false) {
+    if (mutationInFlight.current) return
+    mutationInFlight.current = true
+    const submitted = snapshot
+    setSaving(true)
+    let focus: RulesFocusTarget | null = confirmed ? 'editor' : null
+    try {
+      const saved = target && target !== 'new' ? await autoloopApi.updateRule(target.id, {
+        ...value, expectedVersion: target.version, ...(confirmed ? { confirmAllMatch: true } : {}),
+      }) : await autoloopApi.createRule({ ...value, enabled: false, position: nextPosition() })
+      const unchanged = currentDraft.current === submitted
+      if (unchanged) { discard(); focus = { ruleId: saved.id }; setHighlightedId(saved.id) }
+      else { setEditing(saved); setBaseline(submitted); invalidatePreview() }
+      toast.success(saved.enabled ? '规则已保存' : '规则已保存，未启用', { description: unchanged ? undefined : '请求期间的新增修改仍在表单中，尚未保存。' })
+      await load()
+    } catch (err) {
+      const stale = ruleErrorCode(err) === 'rule_version_conflict'
+      setSaveError(stale ? '规则已被更新。本次修改未保存。请返回列表刷新后重新编辑。' : `保存失败，表单已保留：${errorText(err, '请稍后重试')}`)
+      if (stale) await load()
+    } finally {
+      mutationInFlight.current = false
+      if (confirmed) confirmationFocus.current = focus
+      else if (focus) setRulesFocus(focus)
+      setSaving(false); setActivation(null)
+    }
+  }
+  function save() {
+    if (busy || mutationInFlight.current) return
     setSaveError('')
     const value = validated()
     if (!value) return
-    const submitted = snapshot
-    const target = editing
-    setSaving(true)
-    try {
-      const saved = target && target !== 'new' ? await autoloopApi.updateRule(target.id, value) : await autoloopApi.createRule(value)
-      if (currentDraft.current === submitted) discard()
-      else { setEditing(saved); setBaseline(submitted); invalidatePreview() }
-      toast.success('规则已保存', { description: currentDraft.current === submitted ? '仅影响后续事件' : '请求期间的新增修改仍在表单中，尚未保存' })
-      await load()
-    } catch (err) { setSaveError(`保存失败，表单已保留：${errorText(err, '请稍后重试')}`) }
-    finally { setSaving(false) }
+    if (editing && editing !== 'new' && value.enabled && matchesAllEvents(value.match) && !matchesAllEvents(editing.match)) {
+      const target = editing
+      setActivation({ rule: target, value, run: () => void persistRule(value, target, true) })
+    } else void persistRule(value, editing)
   }
   async function renderPreview() {
     if (busy) return
@@ -262,33 +345,67 @@ export default function RuleRoutingDialog({ initialDraft, initialEventId, schedu
     } catch (err) { if (generation === previewRequest.current) setPreviewError(errorText(err, '预览失败')) }
     finally { setPreviewing(false) }
   }
-  async function mutate(rule: AutoLoopRule, patch?: Partial<AutoLoopRuleCreate>) {
+  async function mutate(rule: AutoLoopRule, enabled?: boolean, confirmed = false) {
+    if (busy || mutationInFlight.current) return
+    mutationInFlight.current = true
     setMutating(true); setListActionError('')
     try {
-      if (patch) await autoloopApi.updateRule(rule.id, patch)
-      else { await autoloopApi.deleteRule(rule.id); setDeleting(null) }
-      toast.success(patch ? '规则已更新' : '规则已删除')
+      if (enabled === undefined) {
+        await autoloopApi.deleteRule(rule.id)
+        toast.success(`已删除「${rule.name}」`)
+      } else {
+        const saved = await autoloopApi.updateRule(rule.id, { enabled, expectedVersion: rule.version, ...(confirmed ? { confirmAllMatch: true } : {}) })
+        if (!enabled) setUndo(saved)
+        toast.success(`${enabled ? '已启用' : '已停用'}「${rule.name}」`)
+      }
+      if (enabled !== false && undo?.id === rule.id) setUndo(null)
       await load()
-    } catch (err) { setListActionError(errorText(err, '规则更新失败')) }
-    finally { setMutating(false) }
+    } catch (err) {
+      const stale = ruleErrorCode(err) === 'rule_version_conflict'
+      setListActionError(stale ? '规则已变化。已刷新列表，请核对后再操作。' : errorText(err, '规则更新失败'))
+      if (stale) { if (undo?.id === rule.id) setUndo(null); await load() }
+    } finally {
+      mutationInFlight.current = false
+      const focus = enabled === undefined ? {} : { ruleId: rule.id }
+      if (confirmed || enabled === undefined) confirmationFocus.current = focus
+      else setRulesFocus(focus)
+      setMutating(false); setDeleting(null); setActivation(null)
+    }
+  }
+  function cancelDelete() {
+    if (!deleting || mutationInFlight.current) return
+    confirmationFocus.current = { ruleId: deleting.id }
+    setDeleting(null)
+  }
+  function cancelActivation() {
+    if (!activation || mutationInFlight.current) return
+    confirmationFocus.current = editing ? 'editor' : { ruleId: activation.rule.id }
+    setActivation(null)
+  }
+  function toggle(rule: AutoLoopRule) {
+    if (busy || mutationInFlight.current) return
+    if (!rule.enabled && matchesAllEvents(rule.match)) {
+      setActivation({ rule, value: { ...rule, enabled: true }, run: () => void mutate(rule, true, true) })
+    } else void mutate(rule, !rule.enabled)
   }
   async function move(index: number, direction: -1 | 1) {
     const order = [...rules]
     const destination = index + direction
-    if (busy || destination < 0 || destination >= order.length) return
+    if (busy || mutationInFlight.current || destination < 0 || destination >= order.length) return
+    mutationInFlight.current = true
     ;[order[index], order[destination]] = [order[destination], order[index]]
     setSorting(true); setListActionError('')
     try {
       // 每条 PATCH 独立提交；失败后重读服务器事实，不宣称已回滚。
-      for (const [position, rule] of order.entries()) if (rule.position !== position) await autoloopApi.updateRule(rule.id, { position })
-      toast.success('规则顺序已更新')
-    } catch (err) { setListActionError(`部分顺序已更新，请检查后重试：${errorText(err, '排序未全部保存')}`) }
-    finally { await load(); setSorting(false) }
+      for (const [position, rule] of order.entries()) if (rule.position !== position) await autoloopApi.updateRule(rule.id, { position, expectedVersion: rule.version })
+      toast.success('规则顺序已更新', { description: '靠前的启用规则优先命中。' })
+    } catch (err) { setListActionError(`顺序可能只保存了部分，请重新核对：${errorText(err, '排序未全部保存')}`) }
+    finally { await load(); setSorting(false); mutationInFlight.current = false }
   }
   function handleNavKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>, index: number) {
     let next: Tab | null = null
-    if (event.key === 'ArrowDown' || event.key === 'ArrowRight') next = TAB_KEYS[(index + 1) % TAB_KEYS.length]
-    else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') next = TAB_KEYS[(index - 1 + TAB_KEYS.length) % TAB_KEYS.length]
+    if (event.key === (vertical ? 'ArrowDown' : 'ArrowRight')) next = TAB_KEYS[(index + 1) % TAB_KEYS.length]
+    else if (event.key === (vertical ? 'ArrowUp' : 'ArrowLeft')) next = TAB_KEYS[(index - 1 + TAB_KEYS.length) % TAB_KEYS.length]
     else if (event.key === 'Home') next = TAB_KEYS[0]
     else if (event.key === 'End') next = TAB_KEYS[TAB_KEYS.length - 1]
     if (!next) return
@@ -296,27 +413,31 @@ export default function RuleRoutingDialog({ initialDraft, initialEventId, schedu
     selectTab(next)
   }
 
-  // 命中数：统计成功后缺失条目按 0 计（真 0）；统计失败/未就绪返回 null 显示「—」。
   function hitFor(ruleId: string): number | null {
     if (!statsReady || !summary) return null
     return summary.rules.find(item => item.ruleId === ruleId)?.hits ?? 0
   }
+  function focusPolicy() { assistantPanel.current?.querySelector<HTMLButtonElement>('[data-rule-routing-edit-policy]')?.focus() }
+  function backFromPolicy() { guarded(() => {}, focusPolicy) }
   const hitsLabel = statsReady && summary ? `近 ${summary.days} 天命中` : null
   const hitsRange = summary ? `${summary.since} ~ ${summary.until}` : undefined
+  const editIndex = editing && editing !== 'new' ? rules.findIndex(rule => rule.id === editing.id) : -1
+  const activateIndex = activation ? rules.findIndex(rule => rule.id === activation.rule.id) : -1
+  const shadowed = activateIndex > 0 && rules.slice(0, activateIndex).some(rule => rule.enabled && matchesAllEvents(rule.match))
 
   return <>
     <DialogShell
       title="规则路由"
-      description="我的规则：处理发送给当前用户的后续事件。按匹配顺序首条命中，未命中交由助手研判。"
+      description="管理当前账号的入站事件、路由规则与助手研判。"
       size="xwide"
       icon={<Route size={18} />}
       onClose={() => guarded(onClose)}
-      // 遮罩空白点击与右上关闭同路：guarded 先守卫脏稿（与定时任务弹窗同惯例）
-      contentClassName="h-[88dvh]"
+      onOpenAutoFocus={event => { event.preventDefault(); focusTab(tab) }}
+      onCloseAutoFocus={onCloseAutoFocus}
+      contentClassName="h-[min(88dvh,52rem)] max-md:left-0 max-md:top-0 max-md:h-dvh max-md:max-h-none max-md:w-full max-md:translate-x-0 max-md:translate-y-0 max-md:rounded-none max-md:border-0 max-md:pb-[env(safe-area-inset-bottom)] max-md:pt-[env(safe-area-inset-top)] max-md:[&>button:last-child]:size-11"
     >
       <div className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[auto_minmax(0,1fr)] md:grid-cols-[9.5rem_minmax(0,1fr)] md:grid-rows-[minmax(0,1fr)]">
-        {/* 窄屏导航保持单行的自然高度，剩余空间留给可滚动的面板。 */}
-        <nav role="tablist" aria-label="规则路由分区" className="scrollbar-none flex min-h-0 shrink-0 flex-row gap-1 overflow-x-auto border-b border-[var(--color-border)] p-2 md:flex-col md:overflow-x-visible md:border-b-0 md:border-r">
+        <nav role="tablist" aria-label="规则路由分区" aria-orientation={vertical ? 'vertical' : 'horizontal'} className="scrollbar-none flex min-h-0 shrink-0 gap-1 overflow-x-auto border-b border-border p-2 md:flex-col md:overflow-x-visible md:border-b-0 md:border-r md:py-3 md:pl-2.5">
           {NAV_ITEMS.map(({ key, label, icon: Icon }, index) => (
             <button
               key={key}
@@ -330,97 +451,71 @@ export default function RuleRoutingDialog({ initialDraft, initialEventId, schedu
               onKeyDown={event => handleNavKeyDown(event, index)}
               ref={element => { navRefs.current[index] = element }}
               data-rule-routing-nav={key}
-              className={`flex min-h-10 shrink-0 items-center gap-1.5 rounded-lg px-1.5 text-left text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:px-2.5 ${
-                tab === key
-                  ? 'bg-brand-soft font-medium text-brand-ink'
-                  : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)]'
-              }`}
+              className={`flex h-11 shrink-0 items-center gap-2 rounded-lg px-2 text-left text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring md:h-10 md:px-2.5 md:text-sm ${tab === key ? 'bg-brand-soft font-medium text-brand-ink' : 'text-muted-foreground hover:bg-muted hover:text-foreground'}`}
             >
-              <Icon size={15} className="shrink-0" aria-hidden="true" />
-              <span className="min-w-0 flex-1 whitespace-nowrap md:truncate">{label}</span>
+              <Icon size={16} className="shrink-0" aria-hidden="true" />
+              <span className="whitespace-nowrap">{label}</span>
             </button>
           ))}
         </nav>
-        {/* 事件流水与规则模板常挂载（hidden 时不产生 grid item）：切换分区保留流水筛选、
-            选中事件与编辑器滚动位置；深链/显式打开才通过 props 重定位。 */}
-        <div id={`${id}-panel-events`} role="tabpanel" aria-labelledby={`${id}-tab-events`} hidden={tab !== 'events'} className={tab === 'events' ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
+        {/* 流水保持挂载，退出详情或切换分区时不会丢失已筛选的列表。 */}
+        <div id={`${id}-panel-events`} role="tabpanel" aria-labelledby={`${id}-tab-events`} hidden={tab !== 'events'} className={tab === 'events' ? 'flex min-h-0 min-w-0 flex-col' : 'hidden'}>
           <AutoLoopEventHistory
-            active={tab === 'events'}
-            selectedId={selectedEventId}
-            onSelectEvent={setSelectedEventId}
-            scheduledTaskId={scheduledTaskId}
-            scheduledRunId={scheduledRunId}
-            rules={rules}
-            drilldown={drilldown}
-            onCreateRule={trace => createFromTrace(trace)}
-            onOpenDecision={identity => guarded(() => onOpenDecision(identity))}
+            active={tab === 'events'} selectedId={eventId} onSelectEvent={event => goTo('events', event)}
+            scheduledTaskId={scheduledTaskId} scheduledRunId={scheduledRunId} rules={rules} drilldown={drilldown}
+            onCreateRule={createFromTrace} onOpenDecision={identity => guarded(() => onOpenDecision(identity))}
           />
         </div>
-        <div id={`${id}-panel-rules`} role="tabpanel" aria-labelledby={`${id}-tab-rules`} hidden={tab !== 'rules'} className={tab === 'rules' ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
+        <div ref={rulesPanel} id={`${id}-panel-rules`} role="tabpanel" aria-labelledby={`${id}-tab-rules`} hidden={tab !== 'rules'} className={tab === 'rules' ? 'flex min-h-0 min-w-0 flex-col' : 'hidden'}>
           {editing ? <RuleRoutingEditor
-            idPrefix={id}
-            editorRef={editorRef}
-            previewHeadingRef={previewHeading}
-            form={form}
-            fieldEquals={fieldEquals}
-            position={position}
-            sample={sample}
-            sampleFromEvent={sampleFromEvent}
-            sampleOpen={sampleOpen}
-            onSampleOpenChange={setSampleOpen}
-            editing={editing}
-            dirty={dirty}
-            busy={busy}
-            saving={saving}
-            previewing={previewing}
-            fieldErrors={fieldErrors}
-            saveError={saveError}
-            previewError={previewError}
-            preview={preview}
-            onBack={() => guarded(discard)}
-            onFieldChange={change}
-            onPositionChange={changePosition}
-            onFieldEqualsChange={changeFieldEquals}
-            onSampleChange={changeSample}
-            onSave={() => void save()}
-            onPreview={() => void renderPreview()}
-          /> : <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-5">
-            {showImport ? <div className="space-y-4">
-              <Alert>粘贴助手在会话中给出的规则 JSON。导入会填入编辑表单，可先修改和试渲染。规则保存并启用后才参与匹配。</Alert>
-              <div className="min-w-0 space-y-1.5 text-xs font-medium"><label htmlFor={`${id}-import`}>助手规则草稿 JSON</label><textarea id={`${id}-import`} data-rule-routing-import-text aria-invalid={!!importError} aria-describedby={importError ? `${id}-import-error` : undefined} value={draftText} onChange={event => { setDraftText(event.target.value); setImportError('') }} className={textAreaClass} rows={10} /></div>
-              {importError && <Alert id={`${id}-import-error`} variant="danger" role="alert">{importError}</Alert>}
-              <div className="flex flex-wrap gap-2"><Button onClick={() => { try { start(undefined, parseRuleDraft(draftText)) } catch (err) { setImportError(errorText(err, '草稿校验失败')); document.getElementById(`${id}-import`)?.focus() } }} data-rule-routing-import-confirm>导入并审阅</Button><Button variant="ghost" onClick={() => guarded(discard)} data-rule-routing-import-cancel>取消</Button></div>
-            </div> : <RulesList
-              rules={rules}
-              loading={loading}
-              busy={busy}
-              sorting={sorting}
-              listLoadError={listLoadError}
-              listActionError={listActionError}
-              hitsLabel={hitsLabel}
-              hitsRange={hitsRange}
-              hitFor={hitFor}
+            idPrefix={id} editorRef={editorRef} previewHeadingRef={previewHeading}
+            form={form} fieldEquals={fieldEquals} position={position} positionLabel={editing === 'new' ? '保存后排到最后' : editIndex >= 0 ? `第 ${editIndex + 1} 位（共 ${rules.length} 条）` : undefined}
+            sample={sample} sampleFromEvent={sampleFromEvent} sampleOpen={sampleOpen} onSampleOpenChange={setSampleOpen}
+            editing={editing} dirty={dirty} busy={busy} saving={saving} previewing={previewing}
+            fieldErrors={fieldErrors} saveError={saveError} previewError={previewError} preview={preview}
+            onBack={() => guarded(() => {}, () => setRulesFocus({ ruleId: editing === 'new' ? undefined : editing.id }))}
+            onFieldChange={change} onFieldEqualsChange={changeFieldEquals} onSampleChange={changeSample} onSave={save} onPreview={() => void renderPreview()}
+          /> : showImport ? <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4 sm:p-5">
+            <Alert>导入 JSON 后可修改或试渲染。新规则保存为停用，不会自动参与匹配。</Alert>
+            <div className="min-w-0 space-y-1.5 text-sm font-medium"><label htmlFor={`${id}-import`}>助手规则草稿 JSON</label><textarea id={`${id}-import`} data-rule-routing-import-text aria-invalid={!!importError} aria-describedby={importError ? `${id}-import-error` : undefined} value={draftText} onChange={event => { setDraftText(event.target.value); setImportError('') }} className={textAreaClass} rows={10} /></div>
+            {importError && <Alert id={`${id}-import-error`} variant="danger" role="alert">{importError}</Alert>}
+            <div className="flex flex-wrap gap-2"><Button onClick={() => { try { start(undefined, parseRuleDraft(draftText)) } catch (err) { setImportError(errorText(err, '草稿校验失败')); document.getElementById(`${id}-import`)?.focus() } }} data-rule-routing-import-confirm>导入并审阅</Button><Button variant="ghost" onClick={() => guarded(() => {}, () => rulesPanel.current?.querySelector<HTMLButtonElement>('[data-rule-routing-import]')?.focus())} data-rule-routing-import-cancel>取消</Button></div>
+          </div> : <>
+            {undo && <Alert variant="success" className="mx-4 mt-3 shrink-0 sm:mx-5">
+              <div className="flex flex-wrap items-center justify-between gap-2"><span>已停用「{undo.name}」</span><Button type="button" variant="outline" size="sm" className="max-md:h-11" disabled={busy} onClick={() => toggle(undo)}>撤销</Button></div>
+            </Alert>}
+            <RulesList
+              rules={rules} loading={loading} busy={busy} sorting={sorting} listLoadError={listLoadError} listActionError={listActionError}
+              hitsLabel={hitsLabel} hitsRange={hitsRange} hitFor={hitFor} highlightedId={highlightedId}
+              statisticsLoading={statisticsLoading} statisticsError={statisticsError} onRetryStatistics={() => void loadStatistics()}
               onCreate={() => start()}
-              onImport={() => { setShowImport(true); setImportError('') }}
-              onRefresh={() => { setListActionError(''); void load() }}
-              onEdit={rule => start(rule)}
-              onToggle={rule => void mutate(rule, { enabled: !rule.enabled })}
-              onMove={(index, direction) => void move(index, direction)}
-              onDelete={setDeleting}
+              onImport={() => { setShowImport(true); setImportError(''); requestAnimationFrame(() => document.getElementById(`${id}-import`)?.focus()) }}
+              onRefresh={() => { setListActionError(''); void load() }} onEdit={rule => start(rule)} onToggle={toggle}
+              onMove={(index, direction) => void move(index, direction)} onDelete={setDeleting}
               onViewHits={rule => { if (summary) showEvents({ ruleId: rule.id, since: summary.since, until: summary.until, ruleName: rule.name }) }}
-            />}
-          </div>}
+            />
+          </>}
         </div>
-        {/* 助手路由/事件统计为自带头部与滚动的 flex section，面板容器仅做透传定位。 */}
-        {tab === 'assistant' && <div id={`${id}-panel-assistant`} role="tabpanel" aria-labelledby={`${id}-tab-assistant`} className="flex min-h-0 flex-1 flex-col">
-          <AutoLoopAssistantRouting onOpenEvent={openEvent} onOpenDecision={identity => guarded(() => onOpenDecision(identity))} onViewAll={() => showEvents({ route: 'assistant' })} />
-        </div>}
-        {tab === 'stats' && <div id={`${id}-panel-stats`} role="tabpanel" aria-labelledby={`${id}-tab-stats`} className="flex min-h-0 flex-1 flex-col">
-          <AutoLoopRoutingStatsPanel summary={summary} loading={statisticsLoading} error={statisticsError} days={days} onDaysChange={setDays} onRefresh={() => void loadStatistics()} onDrilldown={showEvents} />
-        </div>}
+        <div ref={assistantPanel} id={`${id}-panel-assistant`} role="tabpanel" aria-labelledby={`${id}-tab-assistant`} hidden={tab !== 'assistant'} className={tab === 'assistant' ? 'flex min-h-0 min-w-0 flex-col' : 'hidden'}>
+          {tab === 'assistant' && (policyEditing && policy ? <RoutingPolicyEditor
+            policy={policy} onPolicyChange={setPolicy} onDirtyChange={setPolicyDirty} onSavingChange={setPolicySaving}
+            onBack={backFromPolicy} onSaved={() => { setPolicyEditing(false); requestAnimationFrame(focusPolicy) }}
+          /> : <AutoLoopAssistantRouting
+            onOpenEvent={openEvent} onOpenDecision={identity => guarded(() => onOpenDecision(identity))} onViewAll={() => showEvents({ route: 'assistant' })}
+            policy={policy} policyLoading={policyLoading} policyError={policyError} onEditPolicy={() => setPolicyEditing(true)} onRetryPolicy={() => void loadPolicy()}
+          />)}
+        </div>
+        <div id={`${id}-panel-stats`} role="tabpanel" aria-labelledby={`${id}-tab-stats`} hidden={tab !== 'stats'} className={tab === 'stats' ? 'flex min-h-0 min-w-0 flex-col' : 'hidden'}>
+          {tab === 'stats' && <AutoLoopRoutingStatsPanel summary={summary} loading={statisticsLoading} error={statisticsError} days={days} onDaysChange={setDays} onRefresh={() => void loadStatistics()} onDrilldown={showEvents} />}
+        </div>
       </div>
     </DialogShell>
-    <ConfirmDialog open={!!deleting} onClose={() => setDeleting(null)} onConfirm={() => deleting && void mutate(deleting)} loading={mutating} title="删除规则？" description={`删除“${deleting?.name ?? ''}”后，仅后续事件停止匹配，在途事件保留原版本。`} confirmText="删除" variant="danger" />
-    <ConfirmDialog open={!!exit} onClose={() => setExit(null)} onConfirm={confirmExit} onCloseAutoFocus={restoreExitFocus} title="放弃未保存的规则草稿？" description="表单中的修改尚未保存。" confirmText="放弃草稿" cancelText="继续编辑" variant="warning" />
+    <ConfirmDialog layer="nested" open={!!deleting} onClose={cancelDelete} onCloseAutoFocus={restoreConfirmationFocus} onConfirm={() => deleting && void mutate(deleting)} loading={mutating} title="删除规则？" description={`删除「${deleting?.name ?? ''}」后，仅后续事件停止匹配，在途事件保留原版本。`} confirmText="删除" variant="danger" />
+    <ConfirmDialog layer="nested" open={!!activation} onClose={cancelActivation} onCloseAutoFocus={restoreConfirmationFocus} onConfirm={() => activation?.run()} loading={saving || mutating} title="启用全量匹配规则？" variant="warning" confirmText="确认启用" description={activation && <div className="space-y-2 break-words">
+      <p>「{activation.rule.name}」会处理前序规则未匹配的所有入站事件。</p>
+      <p>{activateIndex >= 0 ? `匹配顺序：第 ${activateIndex + 1} 位。` : `顺序值：${activation.rule.position}。`}{activation.value.binding ? '找到并验证关联的 Multica 任务后追加评论，否则可能创建任务。' : '命中后按规则向 Multica 写入任务或评论。'}</p>
+      {shadowed && <p>前面已有启用的全量规则。请先核对顺序。</p>}
+    </div>} />
+    <ConfirmDialog layer="nested" open={!!exit} onClose={cancelExit} onConfirm={confirmExit} onCloseAutoFocus={restoreExitFocus} title={policyDirty ? '放弃未保存的研判提示词？' : '放弃未保存的规则草稿？'} description="表单中的修改尚未保存。" confirmText="放弃草稿" cancelText="继续编辑" variant="warning" loading={exit?.restoring} />
   </>
 }

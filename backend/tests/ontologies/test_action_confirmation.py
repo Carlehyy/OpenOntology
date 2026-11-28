@@ -1,4 +1,9 @@
-"""动作确认协议契约测试（YIYA-36）：prepare 幂等、一次确认、guard、执行幂等。"""
+"""动作确认协议契约测试（YIYA-36）：prepare 幂等、一次确认、guard、执行幂等。
+
+另含真实提案链路：发布版回合里由 propose_action 生成提案，再经
+prepare / approve / execute 确认 API 执行，逐步读回业务事实。
+"""
+from types import SimpleNamespace
 import uuid
 
 import pytest
@@ -473,6 +478,211 @@ def test_cross_user_get_returns_404(client, auth_headers, modeled,
         params={"session_kind": "ontology_agent",
                 "session_id": conversation["conv"].id})
     assert r.status_code == 404
+
+
+
+# ------------------------------------- 真实提案：propose → prepare/approve/execute 业务读回
+
+
+def _propose_in_real_turn(db, modeled, admin_user, monkeypatch, *, action,
+                          question):
+    """发布版真实回合里由模型发起一次 propose_action（引擎 dry-run）。
+
+    返回 (真实提案, 会话 id)。提案随助手消息持久化，是 HTTP prepare 的
+    clientSubmissionId 映射目标；这里不手写提案，走真实 ToolRunner。
+    """
+    from app.ontologies.agent_runtime import orchestrator, turn_model
+
+    monkeypatch.setattr(orchestrator, "select_llm_model_config",
+                        lambda *_args, **_kwargs: SimpleNamespace(id="fixture-model"))
+    monkeypatch.setattr(orchestrator, "llm_call_kwargs",
+                        lambda _cfg: {"model": "fixture-model"})
+
+    def model(_call_kwargs, messages, _tools):
+        if any(message.get("role") == "tool" for message in messages):
+            return {"content": "已生成提案卡片，等待你确认后才会执行。",
+                    "tool_calls": []}
+        return {"content": None, "tool_calls": [{
+            "id": "call-propose", "name": "propose_action",
+            "arguments": {"action": action["name"],
+                          "target_instance_id": "inst-o1",
+                          "parameters": action["parameters"]}}]}
+
+    monkeypatch.setattr(turn_model.llm_bridge, "chat", model)
+    events = list(orchestrator.run_agent_turn(
+        db, modeled["oid"], admin_user, question,
+        release_id=modeled["releaseId"]))
+    steps = [event for event in events if event["type"] == "step"]
+    assert [step["tool"] for step in steps] == ["propose_action"]
+    assert "error" not in steps[0]
+    proposals = next(event for event in events
+                     if event["type"] == "answer")["proposals"]
+    assert len(proposals) == 1
+    return proposals[0], next(
+        event for event in events if event["type"] == "meta")["conversationId"]
+
+
+def _prepare_real_proposal(client, auth_headers, modeled, session, proposal):
+    """像界面回放提案卡片那样 prepare：载荷全部取自真实提案。"""
+    return client.post(
+        f"{_fo(modeled['oid'])}/agent/proposals", headers=auth_headers,
+        json={"sessionKind": "ontology_agent", "sessionId": session["conv"].id,
+              "clientSubmissionId": proposal["proposalId"],
+              "actionId": proposal["actionId"], "releaseId": proposal["releaseId"],
+              "targetInstanceId": proposal["targetInstanceId"],
+              "parameters": proposal["parameters"]})
+
+
+def _read_order(db, modeled, user):
+    """经发布版真实 ToolRunner 读回订单 SO-001：当前 status 与动作写入的 status 事实。"""
+    from app.ontologies.agent_runtime.boundary import build_scope
+    from app.ontologies.agent_runtime.toolkit import ToolRunner
+
+    db.expire_all()
+    _, _, scope = build_scope(db, modeled["oid"], release_id=modeled["releaseId"])
+    runner = ToolRunner(db, scope, user=user)
+    current = runner.run("get_object", {"instance_id": "inst-o1"})["properties"]["status"]
+    history = runner.run("get_object_history",
+                         {"instance_id": "inst-o1", "property_name": "status"})
+    return current, sorted(
+        (fact["value"], fact["source"]) for fact in history["facts"]
+        if str(fact["source"]).startswith("action://"))
+
+
+def _engine_logs(db, modeled):
+    """本本体的引擎日志 [(dry_run, status, idempotency_key)]，按执行先后。"""
+    from app.ontologies.formal_modeling.models import ActionExecutionLog
+
+    db.expire_all()
+    return [(bool(log.dry_run), log.status, log.idempotency_key)
+            for log in db.query(ActionExecutionLog).filter_by(
+                ontology_id=modeled["oid"]).order_by(
+                    ActionExecutionLog.executed_at).all()]
+
+
+def test_real_proposal_changes_business_fact_once_after_confirmation(
+        client, auth_headers, modeled, db, admin_user, monkeypatch):
+    """真实 propose_action → prepare → approve → execute：确认前业务事实不变，真实执行恰好一次。"""
+    parameters = {"note": "用户要求", "level": 2}
+    proposal, session_id = _propose_in_real_turn(
+        db, modeled, admin_user, monkeypatch,
+        action={"name": "mark_paid", "parameters": parameters},
+        question="把 SO-001 标记为已支付")
+    session = {"conv": SimpleNamespace(id=session_id)}
+
+    # 预演只留下 dry-run 审计日志；当前值与事实流都还没有被动作改动
+    assert (proposal["releaseId"], proposal["targetInstanceId"],
+            proposal["parameters"]) == (modeled["releaseId"], "inst-o1", parameters)
+    unchanged = ("pending", [])
+    assert _read_order(db, modeled, admin_user) == unchanged
+    dry_run_only = [(True, "success", None)]
+    assert _engine_logs(db, modeled) == dry_run_only
+
+    r = _prepare_real_proposal(client, auth_headers, modeled, session, proposal)
+    assert r.status_code == 201, r.text
+    data = r.json()["data"]
+    cid = data["confirmationId"]
+    assert data["state"] == "prepared"
+    assert data["display"]["release"]["id"] == modeled["releaseId"]
+    assert data["display"]["target"]["id"] == "inst-o1"
+    assert {item["name"]: item["value"]
+            for item in data["display"]["parameters"]} == parameters
+    confirmation = _confirmation(db, cid)
+    assert (confirmation.source_call_id, confirmation.release_id,
+            confirmation.action_id, confirmation.final_parameters) == (
+        proposal["proposalId"], modeled["releaseId"], "act-1", parameters)
+    assert _read_order(db, modeled, admin_user) == unchanged
+    assert _engine_logs(db, modeled) == dry_run_only
+
+    r = _decide(client, auth_headers, modeled, session, cid,
+                data["payloadHash"], "approve")
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["state"] == "dispatch_queued"
+    assert _read_order(db, modeled, admin_user) == unchanged    # 批准只入派发队列
+    assert _engine_logs(db, modeled) == dry_run_only
+
+    r = _execute(client, auth_headers, modeled, session, cid)
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["state"] == "succeeded"
+    # 真实执行恰好一次：一条非 dry-run 成功日志、一条 status=paid 事实
+    executed = ("paid", [("paid", "action://mark_paid")])
+    executed_logs = dry_run_only + [(False, "success", f"proposal:{cid}")]
+    assert _read_order(db, modeled, admin_user) == executed
+    assert _engine_logs(db, modeled) == executed_logs
+    assert [operation.state for operation in db.query(CM.ActionOperation).all()] == [
+        "succeeded"]
+
+    # 重复执行、重复批准都是重放：不产生第二条日志或事实
+    assert _execute(client, auth_headers, modeled, session, cid).json()["data"][
+        "state"] == "succeeded"
+    assert _decide(client, auth_headers, modeled, session, cid,
+                   data["payloadHash"], "approve").status_code == 200
+    assert _read_order(db, modeled, admin_user) == executed
+    assert _engine_logs(db, modeled) == executed_logs
+
+
+def test_real_approval_proposal_executes_once_after_human_decision(
+        client, auth_headers, modeled, db, admin_user, monkeypatch):
+    """需审批动作：用户确认只送入审批，管理员批准后才真实执行，且恰好一次。"""
+    proposal, session_id = _propose_in_real_turn(
+        db, modeled, admin_user, monkeypatch,
+        action={"name": "cancel_order", "parameters": {}},
+        question="取消订单 SO-001")
+    session = {"conv": SimpleNamespace(id=session_id)}
+    assert proposal["requiresApproval"] is True
+    unchanged = ("pending", [])
+    dry_run_only = [(True, "success", None)]
+    assert _read_order(db, modeled, admin_user) == unchanged
+    assert _engine_logs(db, modeled) == dry_run_only
+
+    r = _prepare_real_proposal(client, auth_headers, modeled, session, proposal)
+    assert r.status_code == 201, r.text
+    data = r.json()["data"]
+    cid = data["confirmationId"]
+    assert data["state"] == "prepared" and data["requiresApproval"] is True
+    r = _decide(client, auth_headers, modeled, session, cid,
+                data["payloadHash"], "approve")
+    assert r.status_code == 200, r.text
+    r = _execute(client, auth_headers, modeled, session, cid)
+    assert r.status_code == 200, r.text
+    waiting = r.json()["data"]
+    assert waiting["state"] == "pending_approval"
+    assert waiting["executionLogId"] is None
+
+    # 用户确认不等于执行：引擎只落一条待审日志，业务事实仍未变
+    waiting_logs = dry_run_only + [(False, "pending", f"proposal:{cid}")]
+    assert _read_order(db, modeled, admin_user) == unchanged
+    assert _engine_logs(db, modeled) == waiting_logs
+    # 待审期间重复 execute 不会二次进入审批
+    r = _execute(client, auth_headers, modeled, session, cid)
+    assert r.json()["data"]["state"] == "pending_approval"
+    assert _engine_logs(db, modeled) == waiting_logs
+
+    # 管理员批准后才真正执行，且恰好一次
+    r = client.post(
+        f"{_fo(modeled['oid'])}/action-logs/{waiting['approvalLogId']}/decide",
+        headers=auth_headers,
+        json={"decision": "approved", "reason": "人工复核通过",
+              "releaseId": modeled["releaseId"]})
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["executionLog"]["status"] == "success"
+    executed = ("cancelled", [("cancelled", "action://cancel_order")])
+    executed_logs = [
+        (True, "success", None),
+        (False, "approved", f"proposal:{cid}"),
+        (False, "success", f"approval-execution:{waiting['approvalLogId']}"),
+    ]
+    assert _read_order(db, modeled, admin_user) == executed
+    assert _engine_logs(db, modeled) == executed_logs
+    # 已处理的审批不能再次决策，也就不会再次执行
+    r = client.post(
+        f"{_fo(modeled['oid'])}/action-logs/{waiting['approvalLogId']}/decide",
+        headers=auth_headers,
+        json={"decision": "approved", "reason": "重复点击",
+              "releaseId": modeled["releaseId"]})
+    assert r.status_code == 409
+    assert _read_order(db, modeled, admin_user) == executed
+    assert _engine_logs(db, modeled) == executed_logs
 
 
 

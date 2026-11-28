@@ -5,4 +5,4 @@ of duplicating a literal. Update it only when a new migration becomes the
 single head; the tests still assert the exact revision and chain, so a broken
 or unmerged migration graph cannot pass by accident.
 """
-LATEST_HEAD = "0155_multica_profile_web_url"
+LATEST_HEAD = "0156_autoloop_routing_policy"

@@ -39,7 +39,9 @@ class RuleBinding(Contract):
 
 class RuleCreate(Contract):
     name: str = Field(min_length=1, max_length=255)
-    enabled: bool = True
+    # A rule is created paused. Enabling it, or widening an enabled rule to
+    # match everything, is a deliberate act that needs explicit consent.
+    enabled: bool = False
     position: int = Field(default=0, ge=0, strict=True)
     match: RuleMatch = Field(default_factory=RuleMatch)
     titleTemplate: str = Field(min_length=1, max_length=16384)
@@ -74,6 +76,25 @@ class RuleOut(RuleCreate):
     updatedAt: str
 
 
+class RuleCreateRequest(RuleCreate):
+    """POST body: request-only consent to enable a rule that matches everything.
+
+    Consent is never stored, echoed or snapshotted; responses stay RuleOut.
+    """
+    confirmAllMatch: bool = False
+
+
+class RulePatchRequest(RulePatch):
+    """PATCH body plus request-only fields; responses stay RuleOut.
+
+    expectedVersion binds the edit to the version the owner last read.
+    confirmAllMatch is the explicit consent to move the rule into "enabled and
+    matches everything", and only counts together with a current expectedVersion.
+    """
+    expectedVersion: int | None = Field(default=None, ge=1, strict=True)
+    confirmAllMatch: bool = False
+
+
 class StoredPreview(Contract):
     sampleEvent: dict[str, Any]
 
@@ -91,6 +112,38 @@ class PreviewOut(Contract):
     bindingTarget: str | None = None
     ruleVersion: int
     warnings: list[str]
+
+
+class RoutingPolicyPatch(Contract):
+    """Version 0 is the built-in default; a null prompt returns to it."""
+    expectedVersion: int = Field(ge=0, strict=True)
+    promptText: str | None = Field(max_length=8000)
+
+
+class RoutingPolicyOut(Contract):
+    version: int
+    promptText: str | None
+    updatedAt: str | None = None
+    updatedBy: str | None = None
+    modelConfigId: str | None = None
+    policySummary: str
+
+
+class RoutingPolicyPreview(RoutingPolicyPatch):
+    # The event type names the inbound source; it is mapped to the received
+    # fact type a real event of that source carries.
+    eventType: Literal["notification", "schedule"]
+    # Untrusted data. It only ever fills the event slot of the planner's input.
+    sampleEvent: dict[str, Any]
+
+
+class RoutingPolicyPreviewOut(Contract):
+    action: Literal["create_decision", "ignore"]
+    reason: str
+    modelConfigId: str
+    # The stored version for a saved policy, otherwise the base that was sent.
+    routingPromptVersion: int
+    isDraft: bool
 
 
 class StepOut(Contract):
@@ -164,6 +217,10 @@ class EventTraceOut(Contract):
     scheduledTaskId: str | None = None
     scheduledRunId: str | None = None
     reason: str | None = None
+    # The routing policy and model a miss was assessed under. Null for rule
+    # routes, pending traces and facts written before the policy was frozen.
+    routingPromptVersion: int | None = None
+    modelConfigId: str | None = None
 
 
 class TraceAuditEventOut(Contract):

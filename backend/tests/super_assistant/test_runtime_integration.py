@@ -534,17 +534,24 @@ def test_failed_round_keeps_only_user_source(tmp_path, monkeypatch):
         )
         db.commit()
 
-    def failing_stream(*_args, **_kwargs):
-        raise RuntimeError("模型不可用")
+    def failing_stream(_kwargs, _messages, _tools, on_delta):
+        on_delta("部分答复")
+        raise ConnectionError("stream reset")
 
-    monkeypatch.setattr(runtime.provider, "chat_stream", failing_stream)
+    monkeypatch.setattr(runtime.provider, "_chat_stream_openai", failing_stream)
+    monkeypatch.setattr(runtime.provider, "_chat_fallback", lambda *_args: _text("完整答复"))
     events = "".join(runtime.stream_chat(**_stream_args(ids)))
-    assert "event: error" in events
+    assert events.count("event: text_delta") == 1
+    assert events.index("部分答复") < events.index("event: error")
+    assert "完整答复" not in events
+    assert "event: message_end" not in events
     with TestingSession() as db:
         roles = [s.role for s in db.query(SuperAssistantMemorySource).all()]
         assert roles == ["user"]
         assistant = db.get(SuperAssistantMessage, ids["assistant_message_id"])
         assert assistant.status == "error"
+        assert "流式响应中断" in assistant.content
+        assert assistant.completed_at is None
 
 
 def test_cancelled_round_keeps_only_user_source(tmp_path, monkeypatch):

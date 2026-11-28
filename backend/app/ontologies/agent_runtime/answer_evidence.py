@@ -69,15 +69,25 @@ def _sources(query: dict, scope) -> Optional[dict[str, Any]]:
 
 
 def _property_visible(scope, object_type, prop: str) -> bool:
-    """只在 source 自己的对象类型上解析属性，禁止跨类型同名字段兜底。"""
-    for item in getattr(object_type, "properties", None) or []:
+    """只接纳能在原 source 上证明字段身份的历史引用。"""
+    definitions = getattr(object_type, "properties", None) or []
+    allowed = scope.allowed_property_names(object_type.id)
+    for item in definitions:
         if not isinstance(item, dict) or not item.get("name"):
             continue
         if prop not in (item.get("name"), item.get("displayName"),
                         item.get("display_name")):
             continue
-        allowed = scope.allowed_property_names(object_type.id)
-        return allowed is None or item["name"] in allowed
+        if getattr(scope, "release_id", None) is None:
+            return allowed is None or item["name"] in allowed
+        if item["name"] != prop or (allowed is not None and prop not in allowed):
+            return False
+        # 旧执行按声明顺序命中 name 或显示名。即使现在规范名优先，
+        # 同名历史计划也不能证明旧结果实际使用了哪个字段。
+        return not any(other is not item and isinstance(other, dict)
+                       and prop in (other.get("name"), other.get("displayName"),
+                                    other.get("display_name"))
+                       for other in definitions)
     return False
 
 

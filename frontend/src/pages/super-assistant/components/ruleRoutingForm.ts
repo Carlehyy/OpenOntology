@@ -1,8 +1,46 @@
-import type { AutoLoopRuleCreate } from '../../../api/autoloop.ts'
+import type { AutoLoopRuleCreate, AutoLoopRuleMatch } from '../../../api/autoloop.ts'
 
 export type RuleFormField = 'name' | 'position' | 'sourceKind' | 'ingestKeyId' | 'sourceSystem' | 'channel' | 'titleContains' | 'bodyContains' | 'fieldEquals' | 'titleTemplate' | 'descriptionTemplate' | 'assignee' | 'pattern' | 'targetIssue' | 'sample'
 export type RuleFormErrors = Partial<Record<RuleFormField, string>>
 export type RuleFieldEqualsRow = { field: string; value: string }
+
+/**
+ * 匹配条件口径与服务端 routing.matches 同构，是列表条件摘要与编辑器提示的唯一定义：
+ * 精确键只要不为 null 就是生效条件（空串同样收窄匹配，不推断为「全部」），
+ * 包含键与 fieldEquals 为空时不收窄。binding 不是匹配键，不参与判定。
+ */
+const EXACT_MATCH_KEYS = ['sourceKind', 'ingestKeyId', 'sourceSystem', 'channel'] as const
+const CONTAINS_MATCH_KEYS = ['titleContains', 'bodyContains'] as const
+export type MatchKey = typeof EXACT_MATCH_KEYS[number] | typeof CONTAINS_MATCH_KEYS[number]
+export type MatchCondition =
+  | { key: MatchKey; value: string }
+  | { key: 'fieldEquals'; value: RuleFieldEqualsRow[] }
+
+/** 匹配条件名称：编辑器字段标签与列表条件摘要共用同一命名。 */
+export const MATCH_LABEL = {
+  sourceKind: '来源类型', ingestKeyId: '来源 Key 标识（已验证）', sourceSystem: '来源系统（弱过滤）',
+  channel: '渠道', titleContains: '标题包含', bodyContains: '正文包含', fieldEquals: '字段等值',
+} as const satisfies Record<MatchCondition['key'], string>
+
+function textConditions(keys: readonly MatchKey[], match: AutoLoopRuleMatch, active: (value: string) => boolean): MatchCondition[] {
+  const conditions: MatchCondition[] = []
+  for (const key of keys) {
+    const value = match[key]
+    if (typeof value === 'string' && active(value)) conditions.push({ key, value })
+  }
+  return conditions
+}
+
+/** 生效中的匹配条件，顺序固定；空串条件原样返回，由展示方说明。 */
+export function activeMatchConditions(match: AutoLoopRuleMatch): MatchCondition[] {
+  const equals: MatchCondition[] = match.fieldEquals?.length ? [{ key: 'fieldEquals', value: match.fieldEquals }] : []
+  return [...textConditions(EXACT_MATCH_KEYS, match, () => true), ...textConditions(CONTAINS_MATCH_KEYS, match, value => value.length > 0), ...equals]
+}
+
+/** 唯一的「匹配全部路由事件」判定：没有任何生效条件。 */
+export function matchesAllEvents(match: AutoLoopRuleMatch): boolean {
+  return activeMatchConditions(match).length === 0
+}
 
 /** 试渲染样例的空白起点：编辑器初始值与兜底路径共用，保证口径一致。 */
 export const DEFAULT_SAMPLE = '{"title":"示例标题","body":"示例正文"}'

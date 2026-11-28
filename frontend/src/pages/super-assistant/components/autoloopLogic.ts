@@ -2,13 +2,27 @@ import type { AutoLoopRuleCreate, DecisionItem, DecisionStatus } from '../../../
 import { parseRuleJson, validateRuleForm } from './ruleRoutingForm.ts'
 
 export const UNFINISHED_STATUSES: DecisionStatus[] = ['open', 'pending_dispatch', 'sending', 'writeback_unknown', 'writeback_failed']
-export const DECISION_GROUPS = {
-  pending: { label: '待处理', status: 'open' },
-  processing: { label: '处理中', status: 'pending_dispatch,sending' },
-  failed: { label: '失败 / 未知', status: 'writeback_unknown,writeback_failed' },
-  history: { label: '历史', status: 'completed,withdrawn,handled' },
+const DECISION_RECORD_STATUS = 'pending_dispatch,sending,writeback_unknown,writeback_failed,completed,withdrawn,handled'
+
+/** 面向用户的第一层入口：先区分“需要我行动”和“处理记录”。 */
+export const DECISION_VIEWS = {
+  pending: { label: '待我处理', status: 'open' },
+  records: { label: '处理记录', status: DECISION_RECORD_STATUS },
 } as const
-export type DecisionGroup = keyof typeof DECISION_GROUPS
+export type DecisionView = keyof typeof DECISION_VIEWS
+
+/** 处理记录内部按执行阶段筛选，底层状态仍由服务端返回并在详情中展示。 */
+export const DECISION_RECORD_FILTERS = {
+  all: { label: '全部', status: DECISION_RECORD_STATUS },
+  processing: { label: '处理中', status: 'pending_dispatch,sending' },
+  attention: { label: '需关注', status: 'writeback_unknown,writeback_failed' },
+  finished: { label: '已结束', status: 'completed,withdrawn,handled' },
+} as const
+export type DecisionRecordFilter = keyof typeof DECISION_RECORD_FILTERS
+
+export function isRecommendedLabel(label: string): boolean {
+  return /(?:（推荐）|\(推荐\))\s*$/.test(label.trim())
+}
 export const DECISION_STATUS_LABEL: Record<DecisionStatus, string> = {
   open: '待处理', pending_dispatch: '待派发', sending: '发送中', writeback_unknown: '结果未知',
   writeback_failed: '写回失败', completed: '已完成', withdrawn: '已撤回', handled: '已人工处理',
@@ -133,6 +147,7 @@ export function createDecisionSession(): DecisionSession {
   return { items: new Map(), requests: new Map(), inFlight: new Set(), listeners: new Set() }
 }
 
+/** 新建规则默认停用：保存后由用户在规则列表显式启用，与事件预填草稿口径一致。 */
 export function newRule(position = 0): AutoLoopRuleCreate {
-  return { name: '', enabled: true, position, match: {}, titleTemplate: '{{ title }}', descriptionTemplate: '{{ body }}', priority: 'medium', assignee: '', binding: null }
+  return { name: '', enabled: false, position, match: {}, titleTemplate: '{{ title }}', descriptionTemplate: '{{ body }}', priority: 'medium', assignee: '', binding: null }
 }

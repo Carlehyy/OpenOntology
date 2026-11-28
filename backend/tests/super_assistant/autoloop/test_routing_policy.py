@@ -16,6 +16,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import sessionmaker
 
 from app.auth.models import User
+from app.model_configs.models import ModelConfig
 from app.super_assistant import multica_client, multica_service, provider
 from app.super_assistant.models import (
     SuperAssistantMulticaConfig,
@@ -33,8 +34,10 @@ from app.super_assistant.autoloop.models import (
 @pytest.fixture
 def feature_sessions(pg_engine):
     # Same disposable-schema pattern as test_features; only tables used here.
+    # A miss freezes the selected model when it is prepared, so the model
+    # registry is read on the miss path too.
     for table in (SuperAssistantMulticaConfig, SuperAssistantMulticaProfile,
-                  SuperAssistantMulticaProfileRevision):
+                  SuperAssistantMulticaProfileRevision, ModelConfig):
         table.__table__.create(pg_engine, checkfirst=True)
     return sessionmaker(bind=pg_engine, expire_on_commit=False)
 
@@ -46,6 +49,10 @@ def owner(feature_sessions):
         db.add(User(id=identity, username=identity, email=f"{identity}@test.invalid",
                     password_hash="fixture-no-login", is_active=True))
         db.flush()
+        # A miss is frozen with the model it will be assessed by; without an
+        # enabled model it is refused before the planner is ever consulted.
+        db.add(ModelConfig(id="fixture-model", name="fixture", provider="openai", models=["fixture"],
+                           created_by=identity, enabled=True, config_type="llm"))
         multica_service.save_config(db, identity, MulticaConfigUpdate(
             base_url="http://127.0.0.1:18002", workspace_id="workspace-a",
             token="isolated-fixture-token", enabled=True))
@@ -261,9 +268,11 @@ def test_rule_matching_answered_event_keeps_rule_authorization(feature_sessions,
 
 def test_bound_rule_with_empty_description_uses_original_in_comment(feature_sessions, owner, monkeypatch):
     with feature_sessions() as db:
+        # Binding never narrows a match: this rule matches everything while
+        # enabled, and a rule is paused unless enabling is explicit.
         rule = service.create_rule(db, owner, schemas.RuleCreate.model_validate({"name": "append",
-            "titleTemplate": "{{ title }}", "descriptionTemplate": "",
-            "binding": {"mode": "extract", "targetIssue": "TASK-1"}}))
+            "enabled": True, "titleTemplate": "{{ title }}", "descriptionTemplate": "",
+            "binding": {"mode": "extract", "targetIssue": "TASK-1"}}), confirm_all_match=True)
         db.commit()
     monkeypatch.setattr(planner, "plan_event",
         lambda *a, **k: pytest.fail("a matching rule must not call the model"))

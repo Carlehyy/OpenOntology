@@ -4,19 +4,20 @@ export type AutoLoopPriority = 'low' | 'medium' | 'high'
 export type DecisionStatus = 'open' | 'pending_dispatch' | 'sending' | 'writeback_unknown' | 'writeback_failed' | 'completed' | 'withdrawn' | 'handled'
 export type ActionStepState = 'never_sent' | 'queued' | 'sending' | 'unknown' | 'failed' | 'confirmed'
 export interface AutoLoopPage<T> { items: T[]; nextCursor: string | null; hasMore: boolean }
+export interface AutoLoopRuleMatch {
+  sourceKind?: string | null
+  ingestKeyId?: string | null
+  sourceSystem?: string | null
+  channel?: string | null
+  titleContains?: string | null
+  bodyContains?: string | null
+  fieldEquals?: { field: string; value: string }[]
+}
 export interface AutoLoopRuleCreate {
   name: string
   enabled: boolean
   position: number
-  match: {
-    sourceKind?: string | null
-    ingestKeyId?: string | null
-    sourceSystem?: string | null
-    channel?: string | null
-    titleContains?: string | null
-    bodyContains?: string | null
-    fieldEquals?: { field: string; value: string }[]
-  }
+  match: AutoLoopRuleMatch
   titleTemplate: string
   descriptionTemplate: string
   priority?: AutoLoopPriority | null
@@ -29,6 +30,29 @@ export interface AutoLoopRule extends AutoLoopRuleCreate {
   createdAt: string
   updatedAt: string
 }
+export type AutoLoopRulePatch = Partial<AutoLoopRuleCreate> & { expectedVersion?: number; confirmAllMatch?: boolean }
+
+export interface AutoLoopRoutingPolicy {
+  version: number
+  promptText: string | null
+  updatedAt: string | null
+  updatedBy: string | null
+  modelConfigId: string | null
+  policySummary: string
+}
+export interface AutoLoopRoutingPolicyUpdate { expectedVersion: number; promptText: string | null }
+export interface AutoLoopRoutingPolicyPreviewInput extends AutoLoopRoutingPolicyUpdate {
+  eventType: 'notification' | 'schedule'
+  sampleEvent: Record<string, unknown>
+}
+export interface AutoLoopRoutingPolicyPreview {
+  action: 'create_decision' | 'ignore'
+  reason: string
+  modelConfigId: string
+  routingPromptVersion: number
+  isDraft: boolean
+}
+
 export interface AutoLoopPreview {
   renderedTitle: string
   renderedDescription: string
@@ -117,6 +141,8 @@ export interface AutoLoopEventTrace {
   scheduledTaskId?: string | null
   scheduledRunId?: string | null
   reason?: string | null
+  routingPromptVersion?: number | null
+  modelConfigId?: string | null
 }
 
 export interface AutoLoopTraceStep extends AutoLoopStep {
@@ -163,7 +189,11 @@ export const autoloopApi = {
   listRules: () => apiClientV2.get<AutoLoopRule[]>(`${base}/rules`),
   getRule: (id: string) => apiClientV2.get<AutoLoopRule>(`${base}/rules/${encodeURIComponent(id)}`),
   createRule: (rule: AutoLoopRuleCreate) => apiClientV2.post<AutoLoopRule>(`${base}/rules`, rule),
-  updateRule: (id: string, rule: Partial<AutoLoopRuleCreate>) => apiClientV2.patch<AutoLoopRule>(`${base}/rules/${encodeURIComponent(id)}`, rule),
+  updateRule: (id: string, rule: AutoLoopRulePatch) => apiClientV2.patch<AutoLoopRule>(`${base}/rules/${encodeURIComponent(id)}`, rule),
+  getRoutingPolicy: () => apiClientV2.get<AutoLoopRoutingPolicy>(`${base}/routing-policy`),
+  updateRoutingPolicy: (body: AutoLoopRoutingPolicyUpdate) => apiClientV2.patch<AutoLoopRoutingPolicy>(`${base}/routing-policy`, body),
+  previewRoutingPolicy: (body: AutoLoopRoutingPolicyPreviewInput, signal?: AbortSignal) =>
+    apiClientV2.post<AutoLoopRoutingPolicyPreview>(`${base}/routing-policy/preview`, body, { signal }),
   deleteRule: (id: string) => apiClientV2.delete<void>(`${base}/rules/${encodeURIComponent(id)}`),
   previewRule: (rule: AutoLoopRuleCreate, sampleEvent: unknown) => apiClientV2.post<AutoLoopPreview>(`${base}/rules/preview`, { rule, sampleEvent }),
   previewStoredRule: (id: string, sampleEvent: unknown) => apiClientV2.post<AutoLoopPreview>(`${base}/rules/${encodeURIComponent(id)}/preview`, { sampleEvent }),

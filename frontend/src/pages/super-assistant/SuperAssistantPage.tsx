@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ElementRef } from 'react'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState, type ElementRef } from 'react'
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { Sender } from '@ant-design/x'
 import { ConfigProvider, theme as antdTheme } from 'antd'
 import {
@@ -33,6 +33,7 @@ import QuickInputMenu from './components/QuickInputMenu'
 import QuickInputsDialog from './components/QuickInputsDialog'
 import ConversationSummaryDialog from './components/ConversationSummaryDialog'
 import RuleRoutingDialog from './components/RuleRoutingDialog'
+import { ruleRoutingLocation, sameRuleRoutingLocation, writeRuleRoutingLocation, type GuardRoutingNavigation, type RuleRoutingLocation } from './ruleRoutingLocation'
 import DecisionItemsDialog, { useDecisionSummary } from './components/DecisionItemsDialog'
 import type { AutoLoopRuleCreate } from '@/api/autoloop'
 import { createDecisionSession } from './components/autoloopLogic'
@@ -136,6 +137,7 @@ export default function SuperAssistantPage() {
   const dark = useThemeStore(state => state.theme === 'dark')
   const navigate = useNavigate()
   const user = useAuthStore(state => state.user)
+  const { key: navigationKey } = useLocation()
   const [searchParams, setSearchParams] = useSearchParams()
   // ?conversation= 双向绑定：悬浮窗跳转可携带（初次加载优先选中，参数变化继续跟随）；
   // 页内选中的会话也回写参数，地址栏始终标识当前会话，复制到其它浏览器可直达
@@ -150,9 +152,6 @@ export default function SuperAssistantPage() {
   const [taskInstanceId, setTaskInstanceId] = useState<string | null>(null)
   // 能力拓展入口（聊天区域右键菜单）打开的常开弹层；保存后刷新 multica 配置
   const [integrationsOpen, setIntegrationsOpen] = useState(false)
-  useEffect(() => {
-    if (scheduleId) setScheduledOpen(true)
-  }, [scheduleId])
   // 刷新后侧栏「近期会话」先用上次快照秒开（stale-while-revalidate）：
   // 网络返回与 2s 轮询立即纠正为最新；无快照/损坏快照回退空列表，行为同旧版。
   // 快照按 user.id 隔离，见 conversationCache.ts。
@@ -197,11 +196,15 @@ export default function SuperAssistantPage() {
   // 工具步骤完全独立，记忆故障不作为聊天 error 呈现，仅以独立状态条可见
   const [memoryStatus, setMemoryStatus] = useState<MemoryStatusSnapshot | null>(null)
   const canUseAutoLoop = hasMenuAccess(user, 'super_assistant')
-  const eventId = searchParams.get('autoloopEvent')
   const decisionId = searchParams.get('decision')
-  const [ruleRoutingOpen, setRuleRoutingOpen] = useState(Boolean(eventId || searchParams.get('ruleRouting')))
-  const [decisionsOpen, setDecisionsOpen] = useState(Boolean(decisionId || searchParams.get('decisions')))
-  const [ruleDraft, setRuleDraft] = useState<AutoLoopRuleCreate | null>(null)
+  const decisionRequested = canUseAutoLoop && Boolean(decisionId || searchParams.get('decisions'))
+  const requestedRoutingView = canUseAutoLoop && !decisionRequested ? ruleRoutingLocation(searchParams) : null
+  const [routingView, setRoutingView] = useState(requestedRoutingView)
+  const routingNavigationPending = !!routingView && !sameRuleRoutingLocation(routingView, requestedRoutingView)
+  const routingNavigationGuard = useRef<GuardRoutingNavigation | null>(null)
+  const routingOpener = useRef<HTMLElement | null>(null)
+  const [decisionsOpen, setDecisionsOpen] = useState(decisionRequested)
+  const [ruleDraft, setRuleDraft] = useState<{ owner: string | undefined; value: AutoLoopRuleCreate } | null>(null)
   const [decisionSession, setDecisionSession] = useState(createDecisionSession)
   useEffect(() => { setDecisionSession(createDecisionSession()) }, [user?.id])
   const { summary: decisionSummary, refresh: refreshDecisionSummary } = useDecisionSummary(canUseAutoLoop)
@@ -215,37 +218,59 @@ export default function SuperAssistantPage() {
     noteDecisionDialogState(decisionDialogActive)
     return () => noteDecisionDialogState(false)
   }, [decisionDialogActive])
-  useEffect(() => {
-    const decisions = canUseAutoLoop && Boolean(decisionId || searchParams.get('decisions'))
-    const routing = canUseAutoLoop && !decisions && Boolean(eventId || searchParams.get('ruleRouting'))
-    setDecisionsOpen(decisions); setRuleRoutingOpen(routing)
-    if (decisions || routing) setScheduledOpen(false)
-  }, [eventId, decisionId, searchParams, canUseAutoLoop])
+  const syncAutoLoopLocation = useEffectEvent(() => {
+    const adopt = () => {
+      if (!sameRuleRoutingLocation(routingView, requestedRoutingView)) setRoutingView(requestedRoutingView)
+      if (!requestedRoutingView) setRuleDraft(null)
+      setDecisionsOpen(decisionRequested)
+      if (requestedRoutingView || decisionRequested) setScheduledOpen(false)
+      else if (scheduleId) setScheduledOpen(true)
+    }
+    // Keep the current dialog mounted while a same-page link asks to leave a draft.
+    if (canUseAutoLoop && routingView && routingNavigationPending && routingNavigationGuard.current) {
+      routingNavigationGuard.current(adopt, () => setSearchParams(previous => {
+        const next = writeRuleRoutingLocation(previous, routingView)
+        next.delete('decision'); next.delete('decisions')
+        return next
+      }, { replace: true }))
+    } else adopt()
+  })
+  useEffect(() => { syncAutoLoopLocation() }, [searchParams, navigationKey, canUseAutoLoop])
+
+  function openRoutingView(view: RuleRoutingLocation) {
+    if (!canUseAutoLoop) return
+    if (!routingView && document.activeElement instanceof HTMLElement) routingOpener.current = document.activeElement
+    setRoutingView(view); setDecisionsOpen(false); setScheduledOpen(false)
+    setSearchParams(previous => {
+      const next = writeRuleRoutingLocation(previous, view)
+      next.delete('decision'); next.delete('decisions')
+      return next
+    }, { replace: true })
+  }
+  function closeRoutingView() {
+    setRoutingView(null); setRuleDraft(null)
+    setSearchParams(previous => {
+      const next = writeRuleRoutingLocation(previous, null)
+      next.delete('schedule'); next.delete('scheduleRun')
+      return next
+    }, { replace: true })
+  }
   const openDecisionItems = (id?: string) => {
     if (!canUseAutoLoop) return
-    setRuleRoutingOpen(false); setDecisionsOpen(true)
+    setRoutingView(null); setRuleDraft(null); setDecisionsOpen(true)
     setSearchParams(previous => {
-      const next = new URLSearchParams(previous)
-      next.delete('autoloopEvent'); next.delete('ruleRouting'); next.delete('decision'); next.delete('decisions'); next.delete('schedule'); next.delete('scheduleRun')
+      const next = writeRuleRoutingLocation(previous, null)
+      next.delete('decision'); next.delete('decisions'); next.delete('schedule'); next.delete('scheduleRun')
       if (id) next.set('decision', id)
       else next.set('decisions', '1')
       return next
     }, { replace: true })
   }
-  const openAutoLoopEvent = (id: string) => {
-    if (!canUseAutoLoop) return
-    setScheduledOpen(false); setDecisionsOpen(false); setRuleRoutingOpen(true)
-    setSearchParams(previous => {
-      const next = new URLSearchParams(previous)
-      next.set('autoloopEvent', id)
-      next.delete('decision'); next.delete('decisions')
-      return next
-    }, { replace: true })
-  }
+  const openAutoLoopEvent = (id: string) => openRoutingView({ tab: 'events', eventId: id, scheduledTaskId: scheduleId, scheduledRunId: scheduleRunId })
   const fillRuleDraft = (value: AutoLoopRuleCreate) => {
     if (!canUseAutoLoop) return
-    setRuleDraft(value); setRuleRoutingOpen(true); setDecisionsOpen(false); setScheduledOpen(false)
-    setSearchParams(previous => { const next = new URLSearchParams(previous); next.delete('autoloopEvent'); next.delete('decision'); next.delete('decisions'); next.delete('schedule'); next.delete('scheduleRun'); next.set('ruleRouting', '1'); return next }, { replace: true })
+    setRuleDraft({ owner: user?.id, value })
+    openRoutingView({ tab: 'rules', eventId: null, scheduledTaskId: null, scheduledRunId: null })
   }
   // 知识库（WeKnora）：页面加载只读后端返回的原生 Web URL；入口不依赖 state、
   // 知识库或模型可用性，也不代表知识检索已就绪。聊天区右键菜单「领域知识」点击走
@@ -1603,10 +1628,7 @@ export default function SuperAssistantPage() {
         }}
         onSetArchived={(id, archived) => void setConversationArchived(id, archived)}
         onOpenSearch={() => setSearchOpen(true)}
-        onOpenRuleRouting={() => {
-          setRuleRoutingOpen(true)
-          setSearchParams(previous => { const next = new URLSearchParams(previous); next.set('ruleRouting', '1'); return next }, { replace: true })
-        }}
+        onOpenRuleRouting={() => openRoutingView({ tab: 'events', eventId: null, scheduledTaskId: null, scheduledRunId: null })}
         onOpenNotifications={() => setNotificationsOpen(true)}
         onRename={setRenamingConversation}
         onExport={item => void exportConversation(item)}
@@ -1633,7 +1655,7 @@ export default function SuperAssistantPage() {
         />
       )}
       <ScheduledTasksDialog
-        open={scheduledOpen}
+        open={scheduledOpen && !routingView && !decisionsOpen}
         initialTaskId={scheduleId}
         initialRunId={scheduleRunId}
         onOpenAutoLoopEvent={openAutoLoopEvent}
@@ -1678,11 +1700,26 @@ export default function SuperAssistantPage() {
         models={models}
         refreshKey={summaryRefreshKey}
       />
-      {canUseAutoLoop && ruleRoutingOpen && (
-        <RuleRoutingDialog initialDraft={ruleDraft} initialEventId={eventId} scheduledTaskId={eventId ? scheduleId : null} scheduledRunId={eventId ? scheduleRunId : null} onOpenDecision={openDecisionItems} onClose={() => {
-          setRuleRoutingOpen(false); setRuleDraft(null)
-          setSearchParams(previous => { const next = new URLSearchParams(previous); next.delete('ruleRouting'); next.delete('autoloopEvent'); next.delete('schedule'); next.delete('scheduleRun'); return next }, { replace: true })
-        }} />
+      {canUseAutoLoop && routingView && (
+        <RuleRoutingDialog
+          key={user?.id}
+          location={routingView}
+          navigationGuard={routingNavigationGuard}
+          navigationPending={routingNavigationPending}
+          initialDraft={ruleDraft && ruleDraft.owner === user?.id ? ruleDraft.value : null}
+          onLocationChange={openRoutingView}
+          onOpenDecision={openDecisionItems}
+          onClose={closeRoutingView}
+          onCloseAutoFocus={event => {
+            event.preventDefault()
+            const opener = routingOpener.current
+            routingOpener.current = null
+            if (document.querySelector('[role="dialog"][data-state="open"]')) return
+            const narrow = window.matchMedia('(max-width: 767px)').matches
+            if (opener?.isConnected && opener !== document.body && !(narrow && opener.closest('aside'))) opener.focus()
+            else document.querySelector<HTMLElement>(narrow ? '[aria-label="打开工作台导航"]' : '[data-workbench-rule-routing]')?.focus()
+          }}
+        />
       )}
       {canUseAutoLoop && decisionsOpen && <DecisionItemsDialog initialId={decisionId} summary={decisionSummary} session={decisionSession} onSelect={id => {
         setSearchParams(previous => { const next = new URLSearchParams(previous); next.delete('decision'); next.delete('decisions'); if (id) next.set('decision', id); else next.set('decisions', '1'); return next }, { replace: true })

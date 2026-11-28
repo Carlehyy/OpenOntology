@@ -67,8 +67,9 @@ description: >-
 
 ### 2.3 语义色
 
-success `--color-success #2d8a4e` · warning `#c9861a` · danger
-`--destructive #c23b3b`（深 `#e5534b`）· info `#2563eb`；各自配 *-bg 浅底。
+浅色档：success `--color-success #267442`、warning `#b45309`、info `#1d4ed8`，
+各自配 `*-bg` 语义底色。危险徽章和提示在 `--color-danger-bg` 上使用
+`--color-danger-ink`，与实色危险按钮的 `--destructive` 分开，保证小字对比度。
 success 经 Tailwind 语义类 `text-success`/`bg-success`/`bg-success-bg` 引用
 （映射见 `tailwind.config.ts`，取值明暗自适应），勿用绿色族原生色板类。
 状态表达优先「浅底 + 深字」组合，而非大面积实色。

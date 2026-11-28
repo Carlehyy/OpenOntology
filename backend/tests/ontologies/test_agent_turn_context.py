@@ -26,6 +26,133 @@ def test_catalog_discovers_only_visible_properties_without_counting():
     assert "实例数=" not in text
 
 
+def test_released_catalog_prioritizes_mentions_within_authorized_budget(monkeypatch):
+    from app.ontologies.agent_runtime.boundary import AgentScope
+    from app.ontologies.agent_runtime import prompting, query_coverage
+
+    order = {
+        "id": "t-order", "name": "Order", "displayName": "订单",
+        "description": "描述正文不得带出未授权信息", "primaryKey": "p-no",
+        "properties": [
+            {"name": f"field_{i}", "type": "string"} for i in range(6)
+        ] + [
+            {"name": "paid_at", "displayName": "付款时间", "type": "timestamp"},
+            {"id": "p-no", "name": "order_no", "displayName": "订单号"},
+            {"name": "unmapped", "displayName": "未映射字段"},
+            {"name": "private_cost", "displayName": "内部成本"},
+        ],
+    }
+    supplier = {"id": "t-supplier", "name": "Supplier", "displayName": "供应商"}
+    hidden = {"id": "t-hidden", "name": "Hidden", "displayName": "隐藏类型"}
+    snapshot = {
+        "objectTypes": [
+            {"id": f"other-{i}", "name": f"Other{i}", "displayName": f"其它类型{i}"}
+            for i in range(60)
+        ] + [supplier, order, hidden],
+        "linkTypes": [
+            {"id": "l-supplier", "name": "order_supplier", "displayName": "供货关系",
+             "sourceObjectTypeId": "t-order", "targetObjectTypeId": "t-supplier"},
+            {"id": "l-hidden", "name": "hidden_relation", "displayName": "隐藏关系",
+             "sourceObjectTypeId": "t-order", "targetObjectTypeId": "t-hidden"},
+        ],
+        "actions": [],
+    }
+    profile = SimpleNamespace(
+        allowed_object_type_ids=[item["id"] for item in snapshot["objectTypes"][:-1]],
+        allowed_link_type_ids=None, allowed_action_ids=[], allow_action_proposals=False,
+        allowed_properties={"t-order": [p["name"] for p in order["properties"]
+                                         if p["name"] != "private_cost"]},
+        system_prompt_extra="",
+    )
+    scope = AgentScope(None, SimpleNamespace(id="o1", name="供应链本体"), profile,
+                       SimpleNamespace(id="rel-1", snapshot=snapshot))
+    scope.query_coverage = query_coverage.QueryCoverage(scope, {"t-order"})
+    scope.query_coverage._object_facts = set(scope.object_types) - {"t-order"}
+    scans = []
+
+    def mapped(actual_scope, ids):
+        assert actual_scope is scope and ids == {"t-order"}
+        scans.append(ids)
+        return {"t-order": {"reason": None, "queryable": {p["name"] for p in order["properties"]
+                                                         if p["name"] != "unmapped"}}}
+
+    monkeypatch.setattr(query_coverage, "remote_binding_states", mapped)
+    monkeypatch.setattr(context_policy, "limit", lambda _: 3900)
+    question = "按供货关系查看订单的付款时间。内部成本、未映射字段、隐藏类型。独有指令原文"
+    text = context_policy.ontology_catalog(scope, question=question)
+    assert len(text) <= 1300 and "rel-1" in text and "describe_objects" in text
+    assert "paid_at" in text and "timestamp" in text and "order_no" in text
+    assert "order_supplier" in text and "t-order" in text and "t-supplier" in text
+    assert text.index("paid_at") < text.index("Other0")
+    assert all(name not in text for name in ("unmapped", "private_cost", "hidden_relation",
+                                            "隐藏类型", "独有指令原文", order["description"]))
+    assert scans == [{"t-order"}]
+    prompt = prompting._system_prompt(scope, question=question)
+    assert "paid_at" in prompt and "独有指令原文" not in prompt
+    assert "多人登记" not in prompt and "澄清" in prompt
+    assert "get_data_time_range 显式传入与查询相同的 time_property" in prompt
+
+
+def test_released_catalog_keeps_named_links_and_actions_in_a_crowded_focus(monkeypatch):
+    from app.ontologies.agent_runtime.boundary import AgentScope
+
+    snapshot = {
+        "objectTypes": [
+            {"id": f"other-{i}", "name": f"Other{i}", "displayName": "附加类型"}
+            for i in range(40)
+        ] + [
+            {"id": "order", "name": "Order", "displayName": "订单",
+             "properties": [{"name": "order_no"}]},
+            {"id": "supplier", "name": "Supplier", "displayName": "供应商"},
+        ],
+        "linkTypes": [
+            {"id": f"extra-link-{i}", "name": f"extra_link_{i}", "displayName": "附加关系",
+             "sourceObjectTypeId": "other-0", "targetObjectTypeId": f"other-{i}"}
+            for i in range(1, 40)
+        ] + [
+            {"id": "sourcing", "name": "order_supplier", "displayName": "供货关系",
+             "sourceObjectTypeId": "order", "targetObjectTypeId": "supplier"},
+        ],
+        "actions": [
+            {"id": "visible", "name": "mark_paid", "displayName": "标记已支付",
+             "objectTypeId": "order", "requiresApproval": True,
+             "parameters": [{"name": "status", "type": "string", "required": True,
+                             "options": ["paid"], "defaultValue": "paid"}]},
+            {"id": "hidden", "name": "mark_refund", "displayName": "标记已退款",
+             "objectTypeId": "order"},
+        ],
+    }
+    profile = SimpleNamespace(
+        allowed_object_type_ids=None, allowed_link_type_ids=None,
+        allowed_action_ids=["visible"], allowed_properties=None, allow_action_proposals=True,
+    )
+    scope = AgentScope(None, SimpleNamespace(id="o1"), profile,
+                       SimpleNamespace(id="rel-1", snapshot=snapshot))
+    from app.ontologies.agent_runtime.query_coverage import QueryCoverage
+
+    scope.query_coverage = QueryCoverage(scope, set())
+    scope.query_coverage._object_facts = set(scope.object_types)
+    scope.query_coverage._link_facts = set(scope.link_types)
+    monkeypatch.setattr(context_policy, "limit", lambda _: 3900)
+    question = "比较附加类型；通过供货关系查询订单和供应商，并标记已支付而非标记已退款。"
+    catalog = context_policy.ontology_catalog(scope, question=question)
+    records = [json.loads(line) for line in catalog.splitlines() if line.startswith("{")]
+    assert len(catalog) <= 1300 and "describe_objects" in catalog
+    assert "Other39" not in catalog and "mark_refund" not in catalog
+    orders = next(item for item in records if item.get("name") == "Order")
+    assert orders["properties"][0]["name"] == "order_no"
+    relation = next(item for item in records if item.get("linkType") == "order_supplier")
+    assert (relation["sourceObjectTypeId"], relation["targetObjectTypeId"]) == ("order", "supplier")
+    action = next(item for item in records if item.get("action") == "mark_paid")
+    assert action["objectTypeId"] == "order" and action["requiresApproval"] is True
+    assert action["parameters"] == [
+        {"name": "status", "type": "string", "required": True,
+         "default": "paid", "options": ["paid"]},
+    ]
+    profile.allow_action_proposals = False
+    assert "mark_paid" not in context_policy.ontology_catalog(scope, question=question)
+
+
 def test_tool_preview_remains_json_and_keeps_completeness_separate():
     result = {"rows": [{"name": "订单" * 200, "amount": i} for i in range(50)],
               "totalRowCount": 50, "exact": True, "partial": False,

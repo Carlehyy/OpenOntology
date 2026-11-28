@@ -188,7 +188,16 @@ def _summary(value):
     return value if len(value) <= REASON_SUMMARY_CHARS else value[:REASON_SUMMARY_CHARS - 1] + "…"
 
 
-def _item(row, payload, *, reason=None):
+def _policy(fact):
+    """The policy version and model a miss was assessed under, as its terminal
+    fact recorded them. Facts written before the policy was frozen carry none."""
+    if not isinstance(fact, AutoLoopEvent) or not isinstance(fact.data, dict):
+        return None
+    return {"routingPromptVersion": fact.data.get("routingPromptVersion"),
+            "modelConfigId": fact.data.get("modelConfigId")}
+
+
+def _item(row, payload, *, reason=None, policy=None):
     ref = row.source_ref or ""
     if row.source_kind == "notification" and isinstance(payload, dict):
         ref = payload.get("notificationId") or ref
@@ -203,17 +212,21 @@ def _item(row, payload, *, reason=None):
         "route": row.route, "outcome": row.outcome, "rule": rule,
         "action": row.terminal_action, "decisionItemId": row.decision_item_id,
         "issueRef": row.issue_ref, "scheduledTaskId": row.scheduled_task_id,
-        "scheduledRunId": row.scheduled_run_id, "reason": reason}
+        "scheduledRunId": row.scheduled_run_id, "reason": reason, **(policy or _NO_POLICY)}
 
 
-def _assistant_reasons(db, rows):
+# Explicit nulls: a trace never reads as assessed under a policy it did not use.
+_NO_POLICY = {"routingPromptVersion": None, "modelConfigId": None}
+
+
+def _assistant_facts(db, rows):
     """Bounded page-side fetch: terminal facts of assistant-routed rows only."""
     identities = [row.terminal_id for row in rows
                   if row.route == "assistant" and row.terminal_id]
     if not identities:
         return {}
-    facts = db.scalars(select(AutoLoopEvent).where(AutoLoopEvent.id.in_(identities)))
-    return {fact.id: _summary(_reason(fact)) for fact in facts}
+    return {fact.id: fact for fact in db.scalars(
+        select(AutoLoopEvent).where(AutoLoopEvent.id.in_(identities)))}
 
 
 def list_traces(db: Session, owner_id, *, cursor=None, limit=20, source=None,
@@ -257,15 +270,18 @@ def list_traces(db: Session, owner_id, *, cursor=None, limit=20, source=None,
     rows = db.execute(query.order_by(
         anchor.c.received_at.desc(), anchor.c.event_id.desc()).limit(limit + 1)).all()
     more, rows = len(rows) > limit, rows[:limit]
-    payloads, reasons = {}, {}
+    payloads, facts = {}, {}
     if rows:
         payloads = dict(db.execute(select(AutoLoopReceipt.id, AutoLoopReceipt.payload).where(
             AutoLoopReceipt.id.in_([row.receipt_id for row in rows]))).all())
-        reasons = _assistant_reasons(db, rows)
+        facts = _assistant_facts(db, rows)
     items = []
     for row in rows:
-        reason = reasons.get(row.terminal_id) if row.route == "assistant" else None
-        items.append(_item(row, payloads.get(row.receipt_id), reason=reason))
+        # Only an assistant route assesses under the policy, so only its
+        # terminal fact is read: one bounded lookup per page, never per row.
+        fact = facts.get(row.terminal_id) if row.route == "assistant" else None
+        items.append(_item(row, payloads.get(row.receipt_id),
+                           reason=_summary(_reason(fact)) if fact else None, policy=_policy(fact)))
     next_cursor = None
     if more and rows:
         last = rows[-1]
@@ -341,7 +357,7 @@ def get_trace(db: Session, owner_id, event_id):
     audit = list(db.scalars(select(AutoLoopEvent).where(
         AutoLoopEvent.parent_event_id == anchor_event.id, AutoLoopEvent.owner_id == owner_id)
         .order_by(AutoLoopEvent.seq.desc()).limit(AUDIT_LIMIT)))
-    result = _item(row, receipt.payload)
+    result = _item(row, receipt.payload, policy=_policy(terminal))
     result.update(untrustedOriginal=receipt.payload, reason=_reason(terminal),
         error=row.terminal_error,
         issueUrl=service._issue_url(db, owner_id, {"issue": issue}) if issue else None,

@@ -8,6 +8,7 @@
 """
 import json
 import uuid
+from types import SimpleNamespace
 
 import pytest
 
@@ -1180,6 +1181,46 @@ def test_property_scope_guard(client, auth_headers, modeled_ontology, db):
                                                "group_by": "状态"})
     assert {g["group"]: g["value"] for g in grouped["groups"]} == {"pending": 1, "paid": 1}
     assert grouped["partial"] is False and grouped["scanned"] == 2
+
+
+def test_released_references_prefer_canonical_names_and_reject_ambiguous_labels():
+    from app.ontologies.agent_runtime.boundary import AgentScope, ToolError
+
+    order = SimpleNamespace(id="ot-order", name="Order", display_name="订单")
+    archive = SimpleNamespace(id="ot-archive", name="Archive", display_name="Order")
+    current = SimpleNamespace(id="ot-current", name="Current", display_name="订单")
+    scope = AgentScope.__new__(AgentScope)
+    scope.release = SimpleNamespace(id="released")
+    scope.object_types = {item.id: item for item in (archive, order, current)}
+
+    assert scope.require_object_type("Order") is order
+    assert scope.require_object_type("ot-current") is current
+    with pytest.raises(ToolError, match="歧义") as exc:
+        scope.require_object_type("订单")
+    assert "ot-order" in str(exc.value) and "ot-current" in str(exc.value)
+    assert "ot-archive" not in str(exc.value)
+
+    scope.profile = SimpleNamespace(allowed_properties={order.id: ["state", "status", "total"]})
+    order.properties = [
+        {"name": "state", "displayName": "status"},
+        {"name": "status", "displayName": "状态"},
+        {"name": "total", "displayName": "状态"},
+        {"name": "internal", "displayName": "状态"},
+    ]
+    assert scope.resolve_property(order, "status") == "status"
+    with pytest.raises(ToolError, match="歧义") as exc:
+        scope.resolve_property(order, "状态")
+    assert "status" in str(exc.value) and "total" in str(exc.value)
+    assert "internal" not in str(exc.value)
+    order.properties[0]["displayName"] = "internal"
+    with pytest.raises(ToolError, match="授权范围内"):
+        scope.resolve_property(order, "internal")
+    scope.profile.allowed_properties[order.id] = ["status"]
+    assert scope.resolve_property(order, "状态") == "status"
+
+    # 无发布绑定的委派保留原有名称解析，不与这次直达改进混在一起。
+    scope.release = None
+    assert scope.require_object_type("Order") is archive
 
 
 # ---------------------------------------------------------------- 决策推演

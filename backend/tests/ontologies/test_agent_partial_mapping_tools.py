@@ -278,6 +278,15 @@ def test_describe_objects_reports_capability_of_types_and_relations(
     _assert_capability(links["order_supplier"], True, "materialized")
     _assert_capability(links[_BACKUP_SUPPLIER], False, "unmapped",
                        _RELATION_UNMAPPED)
+    if view == "pinned":
+        from app.ontologies.agent_runtime.context_policy import ontology_catalog
+
+        catalog = ontology_catalog(runner.scope, question="查询优惠券和订单的备选供应商")
+        records = [json.loads(line) for line in catalog.splitlines() if line.startswith("{")]
+        coupon = next(item for item in records if item.get("objectTypeId") == _COUPON)
+        relationship = next(item for item in records if item.get("linkType") == _BACKUP_SUPPLIER)
+        _assert_capability(coupon, False, "unmapped", _OBJECT_UNMAPPED)
+        _assert_capability(relationship, False, "unmapped", _RELATION_UNMAPPED)
 
 
 def test_describe_objects_marks_remote_binding_and_mixed_relation(

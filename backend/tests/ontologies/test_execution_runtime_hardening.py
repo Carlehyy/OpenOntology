@@ -50,7 +50,11 @@ from app.services.sentinel.evaluator import (
     resume_sentinel_match_claim,
 )
 from app.ontologies.formal_modeling.router import decide_pending_action, list_pending_actions
-from app.ontologies.formal_modeling.schemas import DecisionRequest
+from app.ontologies.formal_modeling.action_validation import (
+    action_parameter_hints,
+    prepare_action_parameters,
+)
+from app.ontologies.formal_modeling.schemas import ActionTypeCreate, DecisionRequest
 from app.ontologies.versions.evolution_service import snapshot_hash
 from app.ontologies.versions.router import _snapshot_formal
 from fastapi import HTTPException
@@ -730,6 +734,90 @@ def test_action_parameter_contract_applies_defaults_and_rejects_bad_input(db):
     assert any("未声明参数" in item for item in unknown["validationErrors"])
     assert out_of_range["status"] == "failed"
     assert any("不得大于" in item for item in out_of_range["validationErrors"])
+
+    # Hints are a second projection of the same contract: canonical keys only,
+    # aliases resolved exactly as execution resolves them.
+    hints = [
+        {"name": "status", "type": "string", "required": True,
+         "default": "ready", "options": ["ready", "done"]},
+        {"name": "score", "type": "number", "required": False, "min": 1, "max": 10},
+    ]
+    assert action_parameter_hints(action) == hints
+    # Published releases hand the assistant snapshot namespaces, not ORM rows.
+    snapshot_action = SimpleNamespace(**ActionTypeCreate.model_validate({
+        "name": action.name, "displayName": action.display_name,
+        "parameters": action.parameters,
+    }).model_dump())
+    assert action_parameter_hints(snapshot_action) == hints
+    assert action_parameter_hints(SimpleNamespace(parameters=None)) == []
+
+    guarded = SimpleNamespace(parameters=[
+        {"id": "p1", "name": "priority", "displayName": "Priority",
+         "description": "free text", "type": " STRING ",
+         "allowedValues": [{"label": "Low", "value": "low"}, "high"],
+         "default_value": "low", "minimum": "1.5", "maximum": 3},
+        {"name": "note", "min_length": 1, "maxLength": "20", "default": None},
+        {"name": "note", "default": "a duplicate definition loses"},
+        {"name": "customer", "type": "reference", "defaultValue": "order-1"},
+        {"name": "owner", "type": "reference", "options": ["u1", "u2"]},
+        {"name": "payload", "type": "object", "defaultValue": {"a": 1}},
+        {"name": "api_key", "defaultValue": "demo", "options": ["demo"]},
+        {"name": "access_key", "defaultValue": "demo"},
+        {"name": "big", "defaultValue": 10 ** 30, "options": [10 ** 30],
+         "max": 10 ** 30, "maxLength": 10 ** 30},
+        {"name": "nan", "defaultValue": float("nan"), "min": float("inf")},
+        {"name": "comment", "defaultValue": "short free text"},
+        {"name": "tags", "options": [["a"], "b"]},
+        {"name": "region", "options": [f"r{index}" for index in range(21)],
+         "defaultValue": "r0"},
+        {"name": "broken", "options": []},
+        {"name": " "}, "not a mapping",
+    ])
+    assert action_parameter_hints(guarded) == [
+        {"name": "priority", "type": "string", "required": False,
+         "default": "low", "options": ["low", "high"], "min": 1.5, "max": 3},
+        # A declared null default stays distinct from "no default declared".
+        {"name": "note", "type": "string", "required": False, "default": None,
+         "minLength": 1, "maxLength": 20},
+        {"name": "customer", "type": "reference", "required": False,
+         "defaultOmitted": True},
+        {"name": "owner", "type": "reference", "required": False,
+         "optionsOmitted": True},
+        {"name": "payload", "type": "object", "required": False,
+         "defaultOmitted": True},
+        {"name": "api_key", "type": "string", "required": False, "sensitive": True,
+         "defaultOmitted": True, "optionsOmitted": True},
+        {"name": "access_key", "type": "string", "required": False,
+         "sensitive": True, "defaultOmitted": True},
+        # No huge or non-finite number reaches the model, as a value or a bound.
+        {"name": "big", "type": "string", "required": False,
+         "defaultOmitted": True, "optionsOmitted": True},
+        {"name": "nan", "type": "string", "required": False,
+         "defaultOmitted": True},
+        {"name": "comment", "type": "string", "required": False,
+         "defaultOmitted": True},
+        {"name": "tags", "type": "string", "required": False,
+         "optionsOmitted": True},
+        {"name": "region", "type": "string", "required": False,
+         "defaultOmitted": True, "optionsOmitted": True},
+        {"name": "broken", "type": "string", "required": False,
+         "optionsOmitted": True},
+    ]
+
+    # Both projections resolve the same aliases; execution keeps enforcing each
+    # spelling of every bound.
+    lengthy = SimpleNamespace(parameters=[
+        {"name": "note", "minLength": 2, "max_length": 5}])
+    assert prepare_action_parameters(lengthy, {"note": "a"})[1] == [
+        "参数「note」长度不得小于 2"]
+    assert prepare_action_parameters(lengthy, {"note": "toolong"})[1] == [
+        "参数「note」长度不得大于 5"]
+    bounded = SimpleNamespace(parameters=[
+        {"name": "level", "type": "number", "minimum": 1, "maximum": 5}])
+    assert prepare_action_parameters(bounded, {"level": 0})[1] == [
+        "参数「level」不得小于 1"]
+    assert prepare_action_parameters(bounded, {"level": 6})[1] == [
+        "参数「level」不得大于 5"]
 
 
 def test_static_action_gate_checks_action_and_rule_validation_function_types():

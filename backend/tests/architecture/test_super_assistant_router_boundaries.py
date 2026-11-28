@@ -731,12 +731,15 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     all_paths = app.openapi()["paths"]
     for path, methods in memory_operations.items():
         assert set(all_paths[path]) == methods
-    # AutoLoop retains its audit endpoints and adds three read-only workbench endpoints.
+    # AutoLoop retains its audit endpoints and adds the read-only workbench
+    # endpoints plus the owner routing policy (read, update, preview).
     autoloop_operations = {
         f"{prefix}/autoloop/rules": {"get", "post"},
         f"{prefix}/autoloop/rules/{{identity}}": {"get", "patch", "delete"},
         f"{prefix}/autoloop/rules/{{identity}}/preview": {"post"},
         f"{prefix}/autoloop/rules/preview": {"post"},
+        f"{prefix}/autoloop/routing-policy": {"get", "patch"},
+        f"{prefix}/autoloop/routing-policy/preview": {"post"},
         f"{prefix}/autoloop/events": {"get"},
         f"{prefix}/autoloop/events/{{identity}}": {"get"},
         f"{prefix}/autoloop/event-traces": {"get"},
@@ -750,7 +753,7 @@ def test_super_assistant_openapi_matches_pre_extraction_baseline():
     }
     assert {path: set(value) for path, value in all_paths.items()
             if path.startswith(f"{prefix}/autoloop/")} == autoloop_operations
-    assert sum(map(len, autoloop_operations.values())) == 17
+    assert sum(map(len, autoloop_operations.values())) == 20
     weknora_operations = {
         f"{prefix}/weknora/mcp-endpoints": {"get"},
         f"{prefix}/weknora/mcp-initialize": {"post"},

@@ -207,9 +207,19 @@ class AgentScope:
         ref = (ref or "").strip()
         if ref in pool:
             return pool[ref]
-        for item in pool.values():
-            if item.name == ref or item.display_name == ref:
-                return item
+        if self.release is not None:
+            matches = [item for item in pool.values() if item.name == ref]
+            if not matches:
+                matches = [item for item in pool.values() if item.display_name == ref]
+            if len(matches) == 1:
+                return matches[0]
+            if matches:
+                candidates = "、".join(f"{item.name} (id={item.id})" for item in matches)
+                raise ToolError(f"{kind}「{ref}」存在歧义；请使用候选 ID：{candidates}")
+        else:
+            for item in pool.values():
+                if item.name == ref or item.display_name == ref:
+                    return item
         names = "、".join(f"{i.display_name}({i.name})" for i in pool.values()) or "（无）"
         raise ToolError(f"{kind}「{ref}」不存在或不在授权范围内。可用{kind}：{names}")
 
@@ -237,15 +247,30 @@ class AgentScope:
         allowed = self.allowed_property_names(ot.id)
         definitions = [p for p in (ot.properties or [])
                        if isinstance(p, dict) and p.get("name")]
-        queryable = self.queryable_property_names(ot)
-        for p in definitions:
-            if ref not in (p.get("name"), p.get("displayName"), p.get("display_name")):
-                continue
-            name = p.get("name")
-            if allowed is not None and name not in allowed:
+        if self.release is not None:
+            # 规范名即使未授权也不降格为另一个字段的显示名。
+            matches = [p for p in definitions if p["name"] == ref]
+            if not matches:
+                matches = [p for p in definitions
+                           if ref in (p.get("displayName"), p.get("display_name"))]
+            names = sorted({p["name"] for p in matches
+                            if allowed is None or p["name"] in allowed})
+            if len(names) > 1:
+                raise ToolError(f"属性「{ref}」存在歧义；请使用候选规范名：{'、'.join(names)}")
+            if names:
+                return names[0]
+            if matches:
                 raise ToolError(
                     f"属性「{ref}」不在对象类型「{ot.display_name}」的授权范围内")
-            return name
+        else:
+            for p in definitions:
+                if ref not in (p["name"], p.get("displayName"), p.get("display_name")):
+                    continue
+                if allowed is not None and p["name"] not in allowed:
+                    raise ToolError(
+                        f"属性「{ref}」不在对象类型「{ot.display_name}」的授权范围内")
+                return p["name"]
+        queryable = self.queryable_property_names(ot)
         visible = set(queryable) if queryable is not None else {
             str(p["name"]) for p in definitions
             if allowed is None or p["name"] in allowed
@@ -260,11 +285,21 @@ class AgentScope:
     def query_coverage(self) -> QueryCoverage:
         return QueryCoverage(self, remote_object_type_ids(self))
 
-    def queryable_property_names(self, ot: Any) -> set[str] | None:
-        """授权声明属性与当前远程列映射的交集；本地类型返回 None。"""
-        if ot.id not in self.query_coverage.remote_ids:
-            return None
-        state = self.query_coverage.property_states[ot.id]
+    def queryable_property_names(self, ot: Any, *,
+                                 remote_states: dict[str, dict] | None = None) -> set[str] | None:
+        """授权声明属性与当前远程列映射的交集；本地类型返回 None。
+
+        批量调用可传入包含每个远程类型（含不可查询类型）的映射状态。
+        """
+        type_id = str(ot.id)
+        if remote_states is None:
+            if type_id not in self.query_coverage.remote_ids:
+                return None
+            state = self.query_coverage.property_states[type_id]
+        else:
+            if type_id not in remote_states:
+                return None
+            state = remote_states[type_id]
         allowed = self.allowed_property_names(ot.id)
         declared = {str(p["name"]) for p in (ot.properties or [])
                     if isinstance(p, dict) and p.get("name")

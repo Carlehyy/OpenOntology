@@ -1,6 +1,7 @@
 """AutoLoop facts and mutable projections.
 
-Facts are append-only (also enforced by migration triggers). Network operations
+Facts are append-only (also enforced by migration triggers), and so is the
+routing-policy version history. Network operations
 must use a committed ActionStep identity; a lease expiring never proves that the
 remote side effect did not happen. Missing workspaces use an owner-scoped key.
 """
@@ -292,6 +293,22 @@ class AutoLoopConsumedNeed(Base):
     )
 
 
+class AutoLoopRoutingPolicy(Base):
+    """Immutable routing-policy versions; version 0 is the built-in default.
+
+    One row per accepted change per owner, never updated or deleted. A prepared
+    event cites a version, so the prompt it was routed under stays readable
+    after later changes. A null prompt is a stored return to the default.
+    """
+    __tablename__ = "sa_autoloop_routing_policies"
+    owner_id = Column(String(36), ForeignKey("users.id"), primary_key=True)
+    version = Column(Integer, primary_key=True)
+    prompt_text = Column(Text, nullable=True)
+    created_by = Column(String(36), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    __table_args__ = (CheckConstraint("version > 0", name="ck_sa_al_routing_policy_version"),)
+
+
 FACT_TABLES = (
     AutoLoopReceipt.__table__, AutoLoopEvent.__table__,
     AutoLoopDecisionRequest.__table__, AutoLoopEvidence.__table__,
@@ -302,6 +319,7 @@ AUTOLOOP_TABLES = (
     AutoLoopRule.__table__, AutoLoopBinding.__table__, AutoLoopDecision.__table__,
     AutoLoopDecisionRequest.__table__, AutoLoopAction.__table__, AutoLoopActionStep.__table__,
     AutoLoopIssueProgress.__table__, AutoLoopEvidence.__table__, AutoLoopConsumedNeed.__table__,
+    AutoLoopRoutingPolicy.__table__,
 )
 
 
@@ -309,7 +327,13 @@ def _immutable_fact(_mapper, _connection, _target):
     raise ValueError("AutoLoop facts are append-only")
 
 
-for _model in (AutoLoopReceipt, AutoLoopEvent, AutoLoopDecisionRequest, AutoLoopEvidence, AutoLoopConsumedNeed):
+# The 0147 facts and the routing-policy versions share one append-only mechanism.
+APPEND_ONLY_MODELS = (
+    AutoLoopReceipt, AutoLoopEvent, AutoLoopDecisionRequest, AutoLoopEvidence,
+    AutoLoopConsumedNeed, AutoLoopRoutingPolicy,
+)
+
+for _model in APPEND_ONLY_MODELS:
     event.listen(_model, "before_update", _immutable_fact)
     event.listen(_model, "before_delete", _immutable_fact)
     for _operation in ("UPDATE", "DELETE"):

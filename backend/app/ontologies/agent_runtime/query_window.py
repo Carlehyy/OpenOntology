@@ -25,6 +25,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.ontologies.agent_runtime.boundary import ToolError
 
+TEMPORAL_PROPERTY_TYPES = frozenset({"date", "datetime", "timestamp", "time"})
 _DATE_TYPES = {"date"}
 _UNITS = {
     "second": "second", "seconds": "second",

@@ -89,8 +89,8 @@
   --color-border-active: #1a1a2e;
 
   /* ── 语义色 ── */
-  --color-success: #2d8a4e;
-  --color-success-hover: #247a3e;
+  --color-success: #267442;
+  --color-success-hover: #216739;
   --color-success-bg: #e8f5e9;
   /* 文字级警示（12px 小字常态使用）须过 AA 4.5:1：旧值 #c9861a 对白底仅 3.04 */
   --color-warning: #b45309;
@@ -98,7 +98,8 @@
   --color-danger: var(--destructive);
   --color-danger-hover: #a83232;
   --color-danger-bg: #fde8e8;
-  --color-info: #2563eb;
+  --color-danger-ink: #b63434;
+  --color-info: #1d4ed8;
   --color-info-bg: #dbeafe;
 
   /* ── 代码块面（深色代码/命令面板，明暗两态近同的近黑底） ── */
@@ -274,6 +275,7 @@
   --color-warning-bg: rgba(210, 153, 34, 0.14);
   --color-danger-hover: #ef6f66;
   --color-danger-bg: rgba(229, 83, 75, 0.14);
+  --color-danger-ink: #ff8176;
   --color-info: #58a6ff;
   --color-info-bg: rgba(88, 166, 255, 0.14);
 

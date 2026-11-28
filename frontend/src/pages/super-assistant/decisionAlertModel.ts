@@ -193,7 +193,7 @@ export const baseDocumentTitle = (title: string) => title.replace(TITLE_BADGE, '
 export const decisionDocumentTitle = (base: string, attention: number) => (attention > 0 ? `(${attention}) ${base}` : base)
 
 /** 与决策弹窗互斥的 URL 参数，和 SuperAssistantPage.openDecisionItems 的清理保持一致 */
-const DECISION_DIALOG_PARAMS = ['autoloopEvent', 'ruleRouting', 'decision', 'decisions', 'schedule', 'scheduleRun']
+const DECISION_DIALOG_PARAMS = ['autoloopEvent', 'ruleRouting', 'ruleRoutingTab', 'decision', 'decisions', 'schedule', 'scheduleRun']
 
 /**
  * 提醒点击的落点：超级助手页既有的 ?decision=<id> / ?decisions=1 深链（页面据此打开弹窗）。

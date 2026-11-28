@@ -2,13 +2,20 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import { newRule } from '../../pages/super-assistant/components/autoloopLogic.ts'
 import {
-  DEFAULT_SAMPLE, draftFromTrace, parsePreviewSample, parseRuleJson, sampleFromTrace,
+  DEFAULT_SAMPLE, MATCH_LABEL, activeMatchConditions, draftFromTrace, matchesAllEvents, parsePreviewSample, parseRuleJson, sampleFromTrace,
   validateRuleForm, validateRuleFormRows,
 } from '../../pages/super-assistant/components/ruleRoutingForm.ts'
 
 const validate = (overrides = {}, fields = '[]', position = '0', editing = true) => validateRuleForm({ ...newRule(), name: '告警路由', ...overrides }, fields, position, editing)
 
 describe('规则表单：字段校验与 API 负载', () => {
+  it('新建规则默认停用：表单没有启用开关，启用只能在规则列表显式完成', () => {
+    assert.equal(newRule().enabled, false)
+    assert.equal(newRule(3).position, 3)
+    // 校验出口原样透传 enabled，不替用户打开
+    assert.equal(validate({}).value?.enabled, false)
+    assert.equal(validate({ enabled: true }).value?.enabled, true)
+  })
   it('编辑清空指派发送显式 null，新建仍省略空指派', () => {
     assert.equal(validate({ assignee: '' }).value?.assignee, null)
     assert.equal(validate({ assignee: '  ' }).value?.assignee, null)
@@ -30,7 +37,7 @@ describe('规则表单：字段校验与 API 负载', () => {
     assert.match(validate({ match: { ingestKeyId: 'x'.repeat(37), sourceKind: 'x'.repeat(41) } }).errors.ingestKeyId!, /36/)
     assert.match(validate({ binding: { mode: 'extract', pattern: 'x'.repeat(257), targetIssue: 'x'.repeat(256) } }).errors.pattern!, /256/)
     const value = validate({ titleTemplate: '  {{ title }}  ' }).value!
-    assert.equal(value.enabled, true)
+    assert.equal(value.enabled, false)
     assert.equal(value.titleTemplate, '  {{ title }}  ')
     assert.equal(value.descriptionTemplate, '{{ body }}')
     assert.equal(value.priority, 'medium')
@@ -42,6 +49,35 @@ describe('规则表单：字段校验与 API 负载', () => {
     }
     assert.match(validate({}, JSON.stringify(Array.from({ length: 51 }, () => ({ field: 'severity', value: 'high' })))).errors.fieldEquals!, /50/)
     assert.deepEqual(validate({}, '[{"field":"payload.severity","value":"high"}]').value?.match.fieldEquals, [{ field: 'payload.severity', value: 'high' }])
+  })
+})
+
+describe('匹配条件口径：生效条件与「匹配全部路由事件」', () => {
+  it('没有任何生效条件即匹配全部路由事件（启用前须确认范围的唯一判定）', () => {
+    assert.equal(matchesAllEvents({}), true)
+    assert.equal(matchesAllEvents({ sourceKind: null, ingestKeyId: null, sourceSystem: null, channel: null, titleContains: '', bodyContains: '', fieldEquals: [] }), true)
+    assert.deepEqual(activeMatchConditions({ sourceKind: null, titleContains: '', fieldEquals: [] }), [])
+  })
+  it('精确键非 null 即生效（空串同样收窄）；包含键与等值数组须非空', () => {
+    assert.equal(matchesAllEvents({ sourceKind: '' }), false)
+    assert.equal(matchesAllEvents({ ingestKeyId: 'key-1' }), false)
+    assert.equal(matchesAllEvents({ channel: 'email', bodyContains: '' }), false)
+    assert.equal(matchesAllEvents({ titleContains: '告警' }), false)
+    assert.equal(matchesAllEvents({ fieldEquals: [{ field: 'severity', value: 'high' }] }), false)
+  })
+  it('生效条件顺序固定，空串条件原样返回由展示方说明', () => {
+    assert.deepEqual(activeMatchConditions({
+      bodyContains: '正文', fieldEquals: [{ field: 'severity', value: 'high' }], channel: 'email', sourceKind: 'notification',
+      sourceSystem: '', titleContains: '标题', ingestKeyId: null,
+    }), [
+      { key: 'sourceKind', value: 'notification' }, { key: 'sourceSystem', value: '' }, { key: 'channel', value: 'email' },
+      { key: 'titleContains', value: '标题' }, { key: 'bodyContains', value: '正文' },
+      { key: 'fieldEquals', value: [{ field: 'severity', value: 'high' }] },
+    ])
+  })
+  it('条件名称覆盖全部匹配键，编辑器标签与列表摘要共用同一命名', () => {
+    assert.deepEqual(Object.keys(MATCH_LABEL), ['sourceKind', 'ingestKeyId', 'sourceSystem', 'channel', 'titleContains', 'bodyContains', 'fieldEquals'])
+    assert.ok(Object.values(MATCH_LABEL).every(label => label.trim().length > 0))
   })
 })
 

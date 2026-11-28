@@ -485,6 +485,49 @@ def test_openai_stream_midstream_error_is_not_retried(monkeypatch, sleeps):
     assert deltas == ["回退内容"]  # 半截内容滞留 think 前缀缓冲，未提前透出
 
 
+def test_openai_stream_does_not_fallback_after_emitting_text(monkeypatch, sleeps):
+    import openai
+
+    partial = "部分答复" * 150  # 超过 think 前缀窗口，断流前已交给调用方
+
+    def _broken_stream():
+        yield _chunk(content=partial)
+        raise _connection_error(openai.APIConnectionError)
+
+    completions = _ScriptedCompletions([_broken_stream, _completion(partial + "完整结尾")])
+    _patch_openai(monkeypatch, completions)
+    deltas: list[str] = []
+    with pytest.raises(provider.ProviderError, match="流式响应中断"):
+        provider.chat_stream(_CALL_KWARGS, _MESSAGES, [], deltas.append)
+    assert deltas == [partial]
+    assert completions.stream_calls == 1
+    assert completions.calls == 0
+    assert sleeps == []
+
+
+def test_anthropic_stream_does_not_fallback_after_emitting_text(monkeypatch):
+    partial = "部分答复"
+
+    def _broken_events():
+        yield SimpleNamespace(
+            type="content_block_delta", index=0,
+            delta=SimpleNamespace(type="text_delta", text=f"<think>推理</think>{partial}"),
+        )
+        raise ConnectionError("stream reset")
+
+    recorded = _patch_anthropic_scripted(
+        monkeypatch,
+        stream_steps=[_FakeAnthropicStream(_broken_events(), None)],
+        create_steps=[SimpleNamespace(content=[SimpleNamespace(type="text", text="完整答复")], usage=None)],
+    )
+    deltas: list[str] = []
+    with pytest.raises(provider.ProviderError, match="流式响应中断"):
+        provider.chat_stream(_anthropic_kwargs(), _MESSAGES, [], deltas.append)
+    assert deltas == [partial]
+    assert len(recorded["stream"]) == 1
+    assert recorded["create"] == []
+
+
 def test_openai_stream_requests_usage_via_stream_options(monkeypatch):
     """OpenAI 规范下流式 usage 需显式请求：不发送 stream_options 则对端不给。"""
     completions = _ScriptedCompletions([

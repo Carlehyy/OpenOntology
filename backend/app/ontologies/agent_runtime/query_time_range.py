@@ -10,10 +10,8 @@ from app.ontologies.agent_runtime.query_planning import (
     _definition_type, _definitions,
 )
 from app.ontologies.agent_runtime.query_window import (
-    resolve_window, window_filters, window_for_result,
+    TEMPORAL_PROPERTY_TYPES, resolve_window, window_filters, window_for_result,
 )
-
-_TEMPORAL_TYPES = {"date", "datetime", "timestamp", "time"}
 
 
 def get_data_time_range(db, scope, user, session_id: str, ot,
@@ -41,7 +39,7 @@ def get_data_time_range(db, scope, user, session_id: str, ot,
 
     queryable = scope.queryable_property_names(ot)
     temporal = [name for name, p in _definitions(ot).items()
-                if name in queryable and str(p.get("type") or "").lower() in _TEMPORAL_TYPES]
+                if name in queryable and str(p.get("type") or "").lower() in TEMPORAL_PROPERTY_TYPES]
     if not temporal and prop is None:
         raise ToolError(f"data_time_range_no_temporal: 对象「{ot.display_name}」没有"
                         "可用的 date/datetime/timestamp 映射属性")
