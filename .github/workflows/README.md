@@ -7,6 +7,12 @@
   `scripts/ci/classify-deploy-changes.sh`），不是增量单测；未知路径仍全量。
   SSH 传输参数与生产依赖 `PROD_*` 均来自 Repository secrets/variables，清单
   在 runner 上物化。
+- `retain-debezium-image.yml`：留存官方 Debezium 多架构镜像到项目 GHCR，
+  由 `fix/debezium-image-*` 分支的摘要变更或手动触发，不部署、不清理旧版本。
+  从 `main` 手动运行时检出 `nano-ontoprompt`，其他分支使用所选分支的固定摘要。
+- `check-retained-images.yml`：每日 UTC 03:23 在默认分支启动，检出
+  `nano-ontoprompt`，匿名核验该发布分支固定镜像的索引、架构和全部镜像层。
+  失败时保留 artifact，管理员应开启 Actions 失败通知；不自动改摘要或部署。
 
 工作流必须使用与源码相同的 Python/Node 版本和锁文件。文档与仓库卫生门禁
 始终运行；后端六分片、前端单测/E2E/feature 边界只在分类器打开对应开关时
