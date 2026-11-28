@@ -28,11 +28,12 @@ from typing import Iterator, Optional
 from sqlalchemy.orm import Session
 
 from app.model_configs.selector import select_llm_model_config, llm_call_kwargs
-from app.ontologies.agent_runtime import llm_bridge
+from app.ontologies.agent_runtime import llm_bridge, query_window
 from app.ontologies.agent_runtime import answer_verifier
 from app.ontologies.agent_runtime.answer_masks import derived_notice, incomplete_notice
 from app.ontologies.agent_runtime import answer_evidence
 from app.ontologies.agent_runtime.context_policy import tool_payload
+from app.ontologies.agent_runtime.partial_answer import TurnCoverage
 from app.ontologies.agent_runtime.prompting import _system_prompt
 from app.ontologies.agent_runtime.tool_execution import _execute_tool_calls
 from app.ontologies.agent_runtime.turn_presenter import _audit_result, _display_result, _summarize
@@ -202,11 +203,12 @@ def _run(db: Session, ontology_id: str, user, question: str,
         "created_by": user_id,
         "model_config_id": getattr(cfg, "id", None),
         "call_kwargs": call_kwargs,
-    }, world_model_context={"user": user}, user=user, query_session_id=conv.id)
+    }, world_model_context={"user": user}, user=user, query_session_id=conv.id,
+        window_reference_time=query_window.utc_now())
     try:
         yield from _execute_rounds(
             db, conv, runner, call_kwargs, messages, profile, run_id, execution,
-            history_evidence)
+            history_evidence, question=question)
     finally:
         runner.close_queries()
 
@@ -214,9 +216,11 @@ def _run(db: Session, ontology_id: str, user, question: str,
 def _execute_rounds(db: Session, conv: AgentConversation, runner: ToolRunner,
                     call_kwargs: dict, messages: list[dict], profile: AgentProfile,
                     run_id: Optional[str], execution,
-                    history_evidence: Optional[list[dict]] = None) -> Iterator[dict]:
+                    history_evidence: Optional[list[dict]] = None, *,
+                    question: str) -> Iterator[dict]:
     steps: list[dict] = []
     evidence_steps: list[dict] = list(history_evidence or [])
+    coverage = TurnCoverage(runner.scope, question)
     usage_total = {"inputTokens": 0, "outputTokens": 0}
     answer: Optional[str] = None
     verification: Optional[answer_verifier.VerificationResult] = None
@@ -232,9 +236,14 @@ def _execute_rounds(db: Session, conv: AgentConversation, runner: ToolRunner,
             return
         try:
             resp = None
+            draft_deltas = []
             for model_event in model_events(call_kwargs, messages, TOOL_DEFS, execution):
                 if "final" in model_event:
                     resp = model_event["final"]
+                elif model_event.get("type") == "delta" and model_event.get("content"):
+                    # The stream can emit text before it declares its tool calls.
+                    if not coverage.pending:
+                        draft_deltas.append(model_event)
                 else:
                     yield model_event
             if cancelled():
@@ -243,7 +252,8 @@ def _execute_rounds(db: Session, conv: AgentConversation, runner: ToolRunner,
             if resp is None:
                 raise llm_bridge.LLMError("模型流在最终响应前结束，请重试本轮问题。")
         except llm_bridge.LLMError as e:
-            answer = None
+            if coverage.pending:
+                break
             _persist_assistant(db, conv, f"[执行中断] {e}", steps, runner, call_kwargs,
                                usage_total, commit=execution is None)
             yield {"type": "error", "message": str(e)}
@@ -258,6 +268,9 @@ def _execute_rounds(db: Session, conv: AgentConversation, runner: ToolRunner,
             return
 
         if not resp["tool_calls"]:
+            if coverage.pending:
+                break
+            yield from draft_deltas
             answer = resp.get("content") or "（模型未给出回答）"
             # ── 确定性结论校验：数字断言必须能对应到完整工具结果 ──
             if evidence_steps and answer:
@@ -313,7 +326,8 @@ def _execute_rounds(db: Session, conv: AgentConversation, runner: ToolRunner,
                          "tool_calls": resp["tool_calls"]})
         # 一批只读工具调用并行执行（远程统一查询按用户串行），结果按序产出。
         for tc, (result, task_citations, duration) in zip(
-                resp["tool_calls"], _execute_tool_calls(runner, resp["tool_calls"])):
+                resp["tool_calls"], _execute_tool_calls(
+                    runner, resp["tool_calls"], blocked=coverage.blocked)):
             if cancelled():
                 yield from _finish_cancelled(db, conv, steps, runner, call_kwargs, usage_total, execution)
                 return
@@ -325,6 +339,7 @@ def _execute_rounds(db: Session, conv: AgentConversation, runner: ToolRunner,
                     runner._cited.add(instance_id)
                     runner.citations.append(citation)
 
+            coverage.observe(tc, result)
             display_result = _display_result(result)
             step = {"tool": tc["name"], "arguments": tc.get("arguments") or {},
                     "summary": _summarize(tc["name"], result), "durationMs": duration,
@@ -344,6 +359,11 @@ def _execute_rounds(db: Session, conv: AgentConversation, runner: ToolRunner,
     else:
         answer = f"已达到单回合最大步数（{max_steps} 步）仍未得出结论。请把问题拆小一点，或在边界配置中调大 max_steps。"
 
+    if cancelled():
+        yield from _finish_cancelled(db, conv, steps, runner, call_kwargs, usage_total, execution)
+        return
+    if coverage.pending:
+        answer = coverage.render()
     if verification is not None and verification.derived:
         answer = (answer or "") + derived_notice(verification.derived)
     answer = (answer or "") + incomplete_notice(answer or "", steps)

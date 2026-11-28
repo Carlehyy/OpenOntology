@@ -33,6 +33,7 @@ from app.config import settings
 from app.models.ontology import OntologyProject
 from app.models.ontology_formal import LinkInstance, ObjectInstance
 from app.ontologies.agent_query import schemas as QS
+from app.ontologies.agent_query.errors import QueryError
 from app.ontologies.agent_query.models import AgentQueryRow, AgentQuerySnapshot
 from app.ontologies.agent_runtime.boundary import (
     ToolError, build_scope, get_or_create_profile,
@@ -60,33 +61,6 @@ _BOOLEAN_TYPES = {"boolean", "bool"}
 _STRING_TYPES = {"string", "text", "date", "datetime", "uuid", "enum"}
 
 _COUNTS_SCOPE = "complete_snapshot"
-
-
-class QueryError(Exception):
-    """查询面可识别错误 — 携带 HTTP 状态与机器可读 code。
-
-    ``extra`` 会进入助手门面（FacadeError/tool JSON）与内部调用；其中
-    ``assistant_private_keys`` 标记的键是助手恢复链路的受控元数据：只经
-    助手门面提供，不进入公共直查 HTTP ``detail``（直查保持既有
-    ``{code, message}`` + 既有公共 extra 的形状）。
-    """
-
-    def __init__(self, status: int, code: str, message: str, *,
-                 assistant_private_keys: tuple[str, ...] = (), **extra):
-        super().__init__(message)
-        self.status = status
-        self.code = code
-        self.message = message
-        self.extra = extra
-        self.assistant_private_keys = tuple(assistant_private_keys)
-
-    def detail(self) -> dict:
-        payload: dict[str, Any] = {"code": self.code, "message": self.message}
-        private = set(self.assistant_private_keys)
-        payload.update(
-            {key: value for key, value in self.extra.items()
-             if key not in private})
-        return payload
 
 
 def _canonical_json(value: Any) -> str:

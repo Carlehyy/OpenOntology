@@ -19,6 +19,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.ontologies.agent_runtime.limits import limit
+from app.ontologies.agent_runtime.query_coverage import coverage_metadata
 from app.ontologies.agent_runtime.run_models import AgentRun, AgentRunEvent
 
 
@@ -234,6 +235,8 @@ def bounded_step_event(event: dict) -> dict:
     }
     payload = _strip_transport(_json_safe(payload))
     result = payload.get("result")
+    if isinstance(result, dict):
+        result.update(coverage_metadata(result))
     if _is_window_result(result):
         # Window results are aggregate summaries; never persist source-detail
         # carriers even when the whole event fits below the size cap.
@@ -258,6 +261,8 @@ def bounded_step_event(event: dict) -> dict:
     else:
         compacted = _compact_result(result)
     payload["result"] = compacted
+    if isinstance(result, dict):
+        payload["result"].update(coverage_metadata(result, keep=3))
     if _size(payload) > cap:
         arguments = payload.get("arguments")
         if isinstance(arguments, dict):
@@ -272,20 +277,19 @@ def bounded_step_event(event: dict) -> dict:
     if _size(payload) > cap:
         if has_query_spec:
             payload = _shrink_query_payload(payload)
-            if _size(payload) > cap:
-                raise RunEventPayloadTooLarge(
-                    "run_event_payload_too_large: querySpec + columns/metadata "
-                    "超出 run 事件上限，拒绝静默丢查询计划"
-                )
         else:
-            payload["result"] = {
-                "_truncated": True,
-                "summary": payload.get("summary"),
-            }
-            if _size(payload) > cap:
-                raise RunEventPayloadTooLarge(
-                    "run_event_payload_too_large: 步骤载荷超出 run 事件上限"
-                )
+            payload["result"] = {"_truncated": True, "summary": payload.get("summary")}
+        if isinstance(result, dict):
+            for keep in (1, 0):
+                payload["result"].update(coverage_metadata(result, keep=keep))
+                if _size(payload) <= cap:
+                    break
+        if _size(payload) > cap:
+            raise RunEventPayloadTooLarge(
+                "run_event_payload_too_large: querySpec + columns/metadata "
+                "超出 run 事件上限，拒绝静默丢查询计划" if has_query_spec else
+                "run_event_payload_too_large: 步骤载荷超出 run 事件上限"
+            )
     return payload
 
 

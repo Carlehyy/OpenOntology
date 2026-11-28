@@ -3,25 +3,23 @@
 为什么需要独立工具：每轮注入全量 skill card 会把大量类型和属性塞进上下文，
 模型仍可能猜字段。``describe_objects`` 默认只列授权类型摘要（分页），
 显式点名 1-8 个类型时返回该类型的完整授权属性、已发布链接与动作摘要。
-本工具不统计实例数（实例计数可能昂贵且不是结构发现），也不读取 profile
-之外的任何表。
+结构定义与数据覆盖分开标注；不统计实例数、不探测外部源。
 """
 from __future__ import annotations
 
-from app.ontologies.agent_runtime.boundary import ToolError, remote_object_type_ids
-from app.ontologies.agent_runtime.property_visibility import (
-    remote_binding_states as _remote_binding_states,
-)
+from app.ontologies.agent_runtime.boundary import ToolError
 
 _SUMMARY_PAGE = 12
 _MAX_DETAIL_TYPES = 8
 
 
-def _property_payload(ot, allowed, remote_state=None) -> list[dict]:
+def _property_payload(scope, ot) -> list[dict]:
     primary = str(getattr(ot, "primary_key", "") or "")
-    remote = remote_state is not None
-    queryable = remote_state.get("queryable") if remote else None
-    reason = remote_state.get("reason") if remote else None
+    allowed = scope.allowed_property_names(ot.id)
+    names = [item["name"] for item in (ot.properties or [])
+             if isinstance(item, dict) and item.get("name")
+             and (allowed is None or item["name"] in allowed)]
+    coverage = scope.query_coverage.properties(ot, names)
     properties = []
     for item in ot.properties or []:
         if not isinstance(item, dict) or not item.get("name"):
@@ -40,10 +38,7 @@ def _property_payload(ot, allowed, remote_state=None) -> list[dict]:
                              or item.get("computed")),
             "description": item.get("description"),
         }
-        if remote:
-            entry["queryable"] = bool(name in (queryable or set()))
-            if not entry["queryable"]:
-                entry["unqueryableReason"] = reason or "remote_property_unmapped"
+        entry.update(coverage[name].payload())
         properties.append(entry)
     return properties
 
@@ -71,6 +66,7 @@ def _link_payload(scope, ot) -> list[dict]:
                                 else other_id),
             "cardinality": getattr(link, "cardinality", None),
             "description": getattr(link, "description", None),
+            **scope.query_coverage.link(link).payload(),
         })
     links.sort(key=lambda item: (item["otherObjectType"] or "",
                                  item["displayName"] or ""))
@@ -106,7 +102,8 @@ def _action_payload(scope, ot) -> list[dict]:
     return actions
 
 
-def _summary(scope, ot, remote_ids) -> dict:
+def _summary(scope, ot) -> dict:
+    access = scope.query_coverage.object(ot)
     allowed = scope.allowed_property_names(ot.id)
     return {
         "id": ot.id,
@@ -114,35 +111,23 @@ def _summary(scope, ot, remote_ids) -> dict:
         "displayName": ot.display_name,
         "description": getattr(ot, "description", None),
         "primaryKey": getattr(ot, "primary_key", None),
-        "propertyCount": len(_property_payload(ot, allowed)),
-        "linkCount": len(_link_payload(scope, ot)),
-        "remote": ot.id in remote_ids,
+        "propertyCount": sum(1 for item in (ot.properties or [])
+                             if isinstance(item, dict) and item.get("name")
+                             and (allowed is None or item["name"] in allowed)),
+        "linkCount": sum(1 for link in scope.link_types.values()
+                         if ot.id in (link.source_object_type_id, link.target_object_type_id)),
+        "remote": access.mode == "remote",
+        **access.payload(),
     }
 
 
-def _detail(scope, ot, remote_ids, remote_states) -> dict:
-    allowed = scope.allowed_property_names(ot.id)
-    links = _link_payload(scope, ot)
+def _detail(scope, ot) -> dict:
+    payload = _summary(scope, ot)
+    properties = _property_payload(scope, ot)
     actions = _action_payload(scope, ot)
-    state = remote_states.get(ot.id) if ot.id in remote_ids else None
-    properties = _property_payload(ot, allowed, remote_state=state)
-    payload = {
-        "id": ot.id,
-        "name": ot.name,
-        "displayName": ot.display_name,
-        "description": getattr(ot, "description", None),
-        "primaryKey": getattr(ot, "primary_key", None),
-        "remote": ot.id in remote_ids,
-        "properties": properties,
-        "links": links,
-        "actions": actions,
-        "propertyCount": len(properties),
-        "linkCount": len(links),
-        "actionCount": len(actions),
-    }
-    if state is not None:
-        payload["queryablePropertyCount"] = sum(
-            1 for item in properties if item.get("queryable"))
+    payload.update(properties=properties, links=_link_payload(scope, ot),
+                   actions=actions, actionCount=len(actions),
+                   queryablePropertyCount=sum(item["queryable"] for item in properties))
     return payload
 
 
@@ -159,8 +144,6 @@ def _offset(next_token) -> int:
 
 
 def describe_objects(scope, args: dict) -> dict:
-    remote_ids = remote_object_type_ids(scope)
-    remote_states = _remote_binding_states(scope, remote_ids)
     raw_types = args.get("object_types")
     if raw_types is not None and args.get("next") not in (None, ""):
         raise ToolError("describe_objects_invalid_query: object_types 与 next 不能同时使用")
@@ -180,8 +163,7 @@ def describe_objects(scope, args: dict) -> dict:
                 resolved.append(ot)
         return {
             "mode": "details",
-            "objectTypes": [_detail(scope, ot, remote_ids, remote_states)
-                            for ot in resolved],
+            "objectTypes": [_detail(scope, ot) for ot in resolved],
             "returned": len(resolved),
             "total": len(scope.object_types),
             "hasMore": False,
@@ -196,7 +178,7 @@ def describe_objects(scope, args: dict) -> dict:
     has_more = end < len(pool)
     return {
         "mode": "summary",
-        "objectTypes": [_summary(scope, ot, remote_ids) for ot in page],
+        "objectTypes": [_summary(scope, ot) for ot in page],
         "returned": len(page),
         "total": len(pool),
         "offset": offset,

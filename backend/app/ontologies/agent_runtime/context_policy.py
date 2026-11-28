@@ -5,8 +5,8 @@ import json
 import re
 from typing import Any
 
-from app.ontologies.agent_runtime.boundary import remote_object_type_ids
 from app.ontologies.agent_runtime.limits import limit
+from app.ontologies.agent_runtime.query_coverage import coverage_metadata
 
 # 模型不需要的传输/展示字段：只在结果顶层剥离。业务 rows/items 由本体定义，
 # 其中同名属性必须原样保留。
@@ -29,7 +29,6 @@ _MONTH_VALUE_RE = re.compile(
 
 
 def ontology_catalog(scope) -> str:
-    remote_ids = remote_object_type_ids(scope)
     budget = min(16_000, limit("context_chars_cap") // 3)
     lines = [f"# 本体「{scope.ontology.name}」授权目录", f"releaseId={scope.release_id}"]
     used = sum(map(len, lines))
@@ -42,7 +41,11 @@ def ontology_catalog(scope) -> str:
                  and p.get("name") and (allowed is None or p["name"] in allowed)
                  and (queryable is None or p["name"] in queryable)]
         fields = ", ".join(f"{p['name']}:{p.get('type', 'string')}" for p in props[:6])
-        mode = "远程绑定" if item.id in remote_ids else "本地物化"
+        access = scope.query_coverage.object(item)
+        mode = {"remote": "远程绑定", "materialized": "本地物化",
+                "unmapped": "仅定义·无查询覆盖"}[access.mode]
+        if access.reason:
+            mode += f"，暂不可查询：{access.reason}"
         line = f"- {item.display_name} ({item.name}, id={item.id}, {mode}): {fields}"
         if len(props) > 6:
             line += f"；另有 {len(props) - 6} 个授权属性，先 describe_objects"
@@ -170,7 +173,7 @@ def tool_payload(result: dict, *, cap: int | None = None) -> str:
     标注截断。分页 cursor 不作为可遗弃字段，始终保留到最后的元数据兜底。
     """
     cap = cap or limit("tool_result_llm_cap")
-    stripped = _strip_transport(result)
+    stripped = {**_strip_transport(result), **coverage_metadata(result)}
     if len(payload := _json(stripped)) <= cap:
         return payload
     preview = _trim_lists(dict(stripped), result, compact=False)
@@ -203,15 +206,22 @@ def tool_payload(result: dict, *, cap: int | None = None) -> str:
     minimal = {key: value for key, value in metadata.items()
                if key in ("hasNext", "cursor", "error", "llmPreviewTruncated",
                           "llmPreviewOmitted", "notice")}
-    if len(payload := _json(minimal)) <= cap:
+    if "error" in minimal:
+        minimal["error"] = str(minimal["error"])[:240]
+    for keep in (3, 1):
+        if len(payload := _json({**minimal, **coverage_metadata(stripped, keep)})) <= cap:
+            return payload
+    if minimal.pop("cursor", None) is not None:
+        minimal["cursorOmitted"] = True
+        minimal["notice"] = "结果超出上下文预算；分页游标无法放入上下文，请缩小查询范围。"
+    for keep in (3, 1, 0):
+        if len(payload := _json({**minimal, **coverage_metadata(stripped, keep)})) <= cap:
+            return payload
+    smallest = {"llmPreviewTruncated": True, "llmPreviewOmitted": True,
+                "notice": "结果超出上下文预算；不能据此推断业务事实。"}
+    if len(payload := _json({**smallest, **coverage_metadata(stripped, 1)})) <= cap:
         return payload
-    minimal.pop("cursor", None)
-    minimal["cursorOmitted"] = True
-    minimal["notice"] = "结果超出上下文预算；分页游标无法放入上下文，请缩小查询范围。"
-    if len(payload := _json(minimal)) <= cap:
-        return payload
-    return _json({"llmPreviewTruncated": True, "llmPreviewOmitted": True,
-                  "notice": "结果超出上下文预算；不能据此推断业务事实。"})
+    return _json(smallest)
 
 
 def budget_messages(messages: list[dict], *, cap: int | None = None) -> list[dict]:

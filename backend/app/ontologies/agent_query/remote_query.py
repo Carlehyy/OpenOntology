@@ -13,6 +13,9 @@ from fastapi import HTTPException
 from app.auth.permissions import user_has_menu_access
 from app.ontologies.access import require_ontology_access
 from app.ontologies.agent_query import schemas as QS
+from app.ontologies.agent_query.errors import QueryError
+from app.ontologies.agent_query.relation_keys import published_relation_keys
+from app.ontologies.mappings.remote_binding import RemoteBindingError
 from app.ontologies.release_context import current_release_context
 
 
@@ -35,7 +38,6 @@ def set_remote_query_port(port: RemoteQueryPort) -> None:
 
 
 def _error(status, code, message, **extra):
-    from .service import QueryError
     return QueryError(status, code, message, **extra)
 
 
@@ -72,11 +74,14 @@ def uses_remote_sources(db, request: QS.QueryRequest) -> bool:
 class _PreparedSource:
     descriptor: dict
     lineage: dict[str, tuple[Any, str]]
+    meta: Any = None
 
 
-def prepare_remote_plan(db, user, request: QS.QueryRequest | dict, *, serialized=False):
+def prepare_remote_plan(db, user, request: QS.QueryRequest | dict, *, serialized=False,
+                        check_coverage=False):
     parsed = QS.QueryRequest.model_validate(request) if serialized else request
-    if parsed.spl is not None:
+    request_is_spl = parsed.spl is not None
+    if request_is_spl:
         # SPL 文本面：先翻译成结构树，再走完全相同的授权/证据/编译路径。
         parsed = prepare_spl_plan(db, user, parsed.spl,
                                   parsed.semantic_bindings or {},
@@ -87,7 +92,8 @@ def prepare_remote_plan(db, user, request: QS.QueryRequest | dict, *, serialized
         from app.auth.models import User
         user = db.execute(select(User).where(User.id == user.id).execution_options(
             populate_existing=True)).scalar_one_or_none()
-        plan = _prepare_remote_plan(db, user, parsed)
+        plan = _prepare_remote_plan(db, user, parsed,
+                                    check_coverage=check_coverage and request_is_spl)
         return (parsed, plan) if serialized else plan
     finally:
         # Release/profile locks only fence the metadata read. Remote execution
@@ -97,8 +103,9 @@ def prepare_remote_plan(db, user, request: QS.QueryRequest | dict, *, serialized
             db.rollback()
 
 
-def _prepare_remote_plan(db, user, request: QS.QueryRequest):
+def _prepare_remote_plan(db, user, request: QS.QueryRequest, *, check_coverage=False):
     from .service import UnifiedQueryService, verify_join_evidence
+    from app.ontologies.agent_runtime.query_coverage import coverage_gap
     from app.ontologies.mappings.remote_binding import get_remote_binding
 
     if not user or not getattr(user, "is_active", False):
@@ -126,6 +133,7 @@ def _prepare_remote_plan(db, user, request: QS.QueryRequest):
     metas = iter(resolver.sources.values())
     releases: dict[str, dict] = {}
     citations: list[dict] = []
+    requested_fields: dict[str, set[str]] = {}
     cap = 200
 
     def compile_level(query: QS.QueryRequest, path: str) -> tuple[dict, dict]:
@@ -188,7 +196,7 @@ def _prepare_remote_plan(db, user, request: QS.QueryRequest):
                 "maxRows": page_cap,
             }))
             sources[source.alias] = _PreparedSource(
-                descriptor, {name: (meta, name) for name in descriptor["propertyMap"]})
+                descriptor, {name: (meta, name) for name in descriptor["propertyMap"]}, meta)
             descriptors.append(descriptor)
             releases[f"{path}{source.alias}"] = {
                 "ontologyId": source.ontology_id, "releaseId": source.release_id,
@@ -209,12 +217,17 @@ def _prepare_remote_plan(db, user, request: QS.QueryRequest):
                 if prop not in outputs:
                     raise _error(422, "unknown_parameter", f"未知派生字段：{prop}")
                 return prop
-            meta = next(iter(source.lineage.values()))[0] if source.lineage else None
-            if meta is None:
+            if not source.lineage and not check_coverage:
                 raise _error(403, "property_forbidden", "该对象没有授权的映射属性")
+            meta = source.meta
             name, _ = resolver._resolve_property(meta, prop)
             if name not in source.descriptor["propertyMap"]:
-                raise _error(422, "remote_property_unmapped", f"属性「{name}」没有远程列映射")
+                details = ({"assistant_private_keys": ("coverageGap",),
+                            "coverageGap": coverage_gap("remote_property_unmapped", object_type=meta.ot,
+                                                        property_name=name)} if check_coverage else {})
+                raise _error(422, "remote_property_unmapped", f"属性「{name}」没有远程列映射", **details)
+            if check_coverage:
+                requested_fields.setdefault(meta.alias, set()).add(name)
             return name
 
         filter_leaves = 0
@@ -268,8 +281,7 @@ def _prepare_remote_plan(db, user, request: QS.QueryRequest):
                     raise _error(422, "invalid_parameter", "声明关系需要对象源；派生键关联使用可核验的业务键证据")
                 left_meta = next(iter(left.lineage.values()))[0]
                 right_meta = next(iter(right.lineage.values()))[0]
-                lp, rp, cardinality = _declared_keys(db, join, left_meta, right_meta,
-                                                     left.descriptor, right.descriptor)
+                lp, rp, cardinality = _declared_keys(db, join, left_meta, right_meta)
                 field(join.left, lp)
                 field(join.right, rp)
                 key_type = None
@@ -334,6 +346,20 @@ def _prepare_remote_plan(db, user, request: QS.QueryRequest):
         return plan, lineage
 
     plan, _ = compile_level(request, "")
+    if check_coverage:
+        for meta in resolver.sources.values():
+            access = meta.scope.query_coverage.object(meta.ot)
+            if access.reason:
+                raise _error(422, access.reason, "对象当前没有可用的查询路径。",
+                             assistant_private_keys=("coverageGap",),
+                             coverageGap=coverage_gap(access.reason, object_type=meta.ot))
+            for name, field_access in meta.scope.query_coverage.properties(
+                    meta.ot, sorted(requested_fields.get(meta.alias, ()))).items():
+                if field_access.reason:
+                    raise _error(422, field_access.reason, "指定属性当前不可查询。",
+                                 assistant_private_keys=("coverageGap",),
+                                 coverageGap=coverage_gap(field_access.reason, object_type=meta.ot,
+                                                          property_name=name))
     default_page_size = min(50, cap)
     page_size = (request.page_size if request.page_size is not None
                  else default_page_size)
@@ -687,44 +713,80 @@ def _filter_leaves(node):
     return []
 
 
-def _declared_keys(db, join, left, right, left_descriptor, right_descriptor):
+def _declared_keys(db, join, left, right):
     if (left.req.ontology_id != right.req.ontology_id
             or left.req.release_id != right.req.release_id):
         raise _error(422, "invalid_parameter", "声明关系必须属于同一本体发布版本")
-    link = left.scope.require_link_type(join.on.link_type_id)
-    forward = join.on.direction == "source_to_target"
-    src, tgt = (left, right) if forward else (right, left)
-    if src.ot.id != link.source_object_type_id or tgt.ot.id != link.target_object_type_id:
-        raise _error(422, "invalid_parameter", "声明关系端点与对象源不符")
-    context = current_release_context(db, left.req.ontology_id,
-                                      expected_release_id=left.req.release_id)
-    from app.ontologies.mappings.remote_binding import (
-        get_remote_binding, snapshot_link_binding_mode,
-    )
-    sb = get_remote_binding(context.snapshot, src.ot.id)
-    tb = get_remote_binding(context.snapshot, tgt.ot.id)
-    if sb is None or tb is None:
-        raise _error(422, "remote_relation_unsupported", "混合查询的声明关系需要远程键映射；本地关系仍走原本体查询")
-    mappings = [item for item in context.snapshot.get("linkMappings", [])
-                if snapshot_link_binding_mode(item) == "remote"
-                and item.get("linkTypeId") == link.id
-                and item.get("srcDatasetId") == sb["datasetId"]
-                and item.get("tgtDatasetId") == tb["datasetId"]]
-    if len(mappings) != 1 or mappings[0].get("edgeDatasetId"):
-        raise _error(422, "remote_relation_unmapped", "声明关系缺少唯一的已发布直接键映射")
-    mapping = mappings[0]
+    return _pinned_declared_keys(
+        db, left.scope, join.on.link_type_id, left.ot.id, right.ot.id,
+        ontology_id=left.req.ontology_id, release_id=left.req.release_id,
+        reverse=join.on.direction != "source_to_target")
+
+
+def declared_relation_keys(snapshot, scope, link, left_object_type_id,
+                           right_object_type_id, *, reverse: bool = False
+                           ) -> tuple[str, str]:
+    """declared_relation 在远程统一查询路径上实际使用的关联键（不查 DB）。
+
+    返回 ``(leftProperty, rightProperty)``：以 join 左/右为序的发布属性规范名，
+    即治理查询 plan 的 ``joins[].leftProperty/rightProperty``。``reverse=True``
+    表示 join 左侧是链接类型的目标端（等价 ``direction=target_to_source``）。
+
+    只读调用方已钉定的冻结发布快照 ``snapshot``（固定 release 的
+    ``scope.release.snapshot``）与内存中的 ``scope``：不访问数据库、不开也
+    不结束调用方事务、不访问外部数据源，可在一次覆盖构建里对多条关系反复
+    调用。数据源运行时校验（schema 漂移、基数实测）仍只在执行端口的执行阶段
+    发生，本函数不替代也不豁免；执行路径（``prepare_remote_plan``）另行对
+    发布指针做比较读（CAS），同一快照下两者判定与顺序逐条一致。
+
+    契约内失败一律 ``QueryError`` 并沿用既有 codes，不新增响应字段：
+
+    - ``remote_relation_unsupported``：任一端不是远程绑定（混合远程/本地）；
+    - ``remote_relation_unmapped``：没有唯一的已发布直接键映射（缺失、重复
+      或带 edgeDatasetId 连接表），或键列未映射到发布属性；
+    - ``invalid_parameter``：端点与链接类型不符、基数非法、scope 未固定发布；
+    - ``capability_forbidden``：链接类型不在授权范围（按执行端口边界归一）。
+
+    链接类型仍经 ``scope.require_link_type`` 解析（纯内存）。属性级授权不在
+    此判定：治理路径在拿到键之后才按 profile 判 ``property_forbidden``，
+    调用方用返回的规范名自行核对。
+    """
+    if scope.release is None:
+        raise _error(422, "invalid_parameter",
+                     "声明关系键只能从固定的发布版本解析；请从已发布本体进入助手后重试")
     try:
-        sp = sb["fieldMap"][mapping["srcKey"]]
-        tp = tb["fieldMap"][mapping["tgtKey"]]
-    except KeyError as exc:
-        raise _error(422, "remote_relation_unmapped", "声明关系键未映射到发布属性") from exc
-    cardinality = {"one-to-one": "1:1", "one-to-many": "1:N",
-                   "many-to-one": "N:1", "many-to-many": "N:M"}.get(link.cardinality)
-    if cardinality is None:
-        raise _error(422, "invalid_parameter", "声明关系基数无效")
-    if forward:
-        return sp, tp, cardinality
-    return tp, sp, {"1:N": "N:1", "N:1": "1:N"}.get(cardinality, cardinality)
+        link_type = _relation_endpoints(
+            scope, link, left_object_type_id, right_object_type_id,
+            reverse=reverse)
+        left, right, _ = published_relation_keys(snapshot, link_type, reverse=reverse)
+    except QueryError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 与执行端口边界同口径归一
+        raise _port_error(exc) from exc
+    return left, right
+
+
+def _pinned_declared_keys(db, scope, link_ref, left_type_id, right_type_id, *,
+                          ontology_id, release_id, reverse):
+    """执行路径：与 ``declared_relation_keys`` 同一判定，另对冻结发布做比较读。
+
+    顺序保持既有契约：授权内解析链接类型 → 端点核对 → 发布指针 CAS（expected
+    release）→ 快照判定。异常原样上抛，由执行边界归一。
+    """
+    link_type = _relation_endpoints(
+        scope, link_ref, left_type_id, right_type_id, reverse=reverse)
+    context = current_release_context(db, ontology_id,
+                                      expected_release_id=release_id)
+    return published_relation_keys(context.snapshot, link_type, reverse=reverse)
+
+
+def _relation_endpoints(scope, link_ref, left_type_id, right_type_id, *, reverse):
+    link = scope.require_link_type(link_ref)
+    src_id, tgt_id = ((right_type_id, left_type_id) if reverse
+                      else (left_type_id, right_type_id))
+    if src_id != link.source_object_type_id or tgt_id != link.target_object_type_id:
+        raise _error(422, "invalid_parameter", "声明关系端点与对象源不符")
+    return link
 
 
 def _port_error(exc):
@@ -773,11 +835,15 @@ def execute_remote_query(db, user, request, *, session_kind, session_id,
                          include_page_size: bool = False):
     result = None
     try:
-        plan = prepare_remote_plan(db, user, request)
+        # Apply the assistant's data-coverage check after SPL translation and
+        # authorization. Keep the original text in the port request and handle.
+        options = ({"check_coverage": True}
+                   if session_kind == "ontology_agent" and request.spl is not None else {})
+        plan = prepare_remote_plan(db, user, request, **options)
         result = _installed().execute(db, user, plan, request=request.model_dump(by_alias=True),
                                       session_kind=session_kind, session_id=session_id)
         from .service import _canonical_json, _sha256
-        current = prepare_remote_plan(db, user, request)
+        current = prepare_remote_plan(db, user, request, **options)
         if _sha256(_canonical_json(current)) != _sha256(_canonical_json(plan)):
             # fail closed。漂移几乎总来自窗口内的 profile 写入（管理员保存/
             # 评估回退恢复全量字段）：审计 agent_profile_updated 可直接查证；

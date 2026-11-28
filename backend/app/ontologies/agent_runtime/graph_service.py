@@ -18,12 +18,15 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from typing import Any, Iterable, Optional
 
-from sqlalchemy import String, Text, cast, or_
+from sqlalchemy import String, Text, cast, or_, tuple_
+from sqlalchemy.orm import aliased
 
 from app.models.ontology_formal import LinkInstance, ObjectInstance
 from app.ontologies.agent_runtime.boundary import (
     AgentScope, ToolError, remote_object_type_ids, require_materialized_object_type,
+    require_query_properties,
 )
+from app.ontologies.agent_runtime.query_coverage import coverage_gap, partial_coverage
 
 
 _MAX_DEPTH = 6
@@ -440,12 +443,42 @@ def _visible_instance(scope: AgentScope, instance_id: str) -> ObjectInstance:
         scope.db.query(ObjectInstance).filter(ObjectInstance.id == instance_id).first())
 
 
+def _assistant_frontier_links(scope, query, frontier, direction, gaps):
+    frontier_types = {row[0] for row in _instance_query(scope).with_entities(
+        ObjectInstance.object_type_id).filter(ObjectInstance.id.in_(frontier)).distinct()}
+    shapes = []
+    for link in scope.link_types.values():
+        src, dst = link.source_object_type_id, link.target_object_type_id
+        if not ((direction != "incoming" and src in frontier_types)
+                or (direction != "outgoing" and dst in frontier_types)):
+            continue
+        access = scope.query_coverage.link(link, local=True)
+        if access.reason:
+            gaps[link.id] = coverage_gap(access.reason, link_type=link)
+        else:
+            shapes.append((link.id, src, dst))
+    if not shapes:
+        return None
+    source, target = aliased(ObjectInstance), aliased(ObjectInstance)
+    query = (query.join(source, source.id == LinkInstance.source_object_id)
+             .join(target, target.id == LinkInstance.target_object_id)
+             .filter(source.ontology_id == scope.ontology.id,
+                     target.ontology_id == scope.ontology.id,
+                     tuple_(LinkInstance.link_type_id, source.object_type_id,
+                            target.object_type_id).in_(shapes)))
+    if scope.release_id is not None:
+        query = query.filter(source.ontology_release_id == scope.release_id,
+                             target.ontology_release_id == scope.release_id)
+    return query
+
+
 def _frontier_links(
     scope: AgentScope,
     frontier: set[str],
     direction: str,
     remaining: int,
     seen_edges: set[str],
+    gaps: dict[str, dict] | None,
 ) -> tuple[list[LinkInstance], bool]:
     if not frontier or not scope.link_types or remaining <= 0:
         return [], False
@@ -462,6 +495,13 @@ def _frontier_links(
             LinkInstance.source_object_id.in_(frontier),
             LinkInstance.target_object_id.in_(frontier),
         ))
+    if gaps is not None:
+        q = _assistant_frontier_links(scope, q, frontier, direction, gaps)
+        if q is None:
+            return [], False
+        rows = q.order_by(LinkInstance.id).limit(remaining + 1).all()
+        return rows[:remaining], len(rows) > remaining
+
     rows = q.order_by(LinkInstance.id).limit(remaining + 1).all()
     endpoint_ids = {
         endpoint_id
@@ -490,6 +530,7 @@ def _expand_graph(
     direction: str,
     max_depth: int,
     stop_id: Optional[str] = None,
+    gaps: dict[str, dict] | None = None,
 ) -> tuple[dict[str, list[tuple[str, LinkInstance, str]]], dict[str, int], bool]:
     if direction not in {"both", "outgoing", "incoming"}:
         raise ToolError("direction 只能是 both、outgoing 或 incoming")
@@ -502,7 +543,7 @@ def _expand_graph(
     for depth in range(max_depth):
         remaining = _MAX_VISIBLE_EDGES - len(seen_edges)
         rows, edge_truncated = _frontier_links(
-            scope, frontier, direction, remaining, seen_edges)
+            scope, frontier, direction, remaining, seen_edges, gaps)
         truncated = truncated or edge_truncated
         next_frontier: set[str] = set()
         for link in rows:
@@ -569,7 +610,9 @@ def find_paths(
     direction: str = "both",
     max_depth: int = 5,
     max_paths: int = 3,
+    check_coverage: bool = False,
 ) -> dict:
+    gaps = {} if check_coverage else None
     source = _visible_instance(scope, source_instance_id)
     target = _visible_instance(scope, target_instance_id)
     _require_materialized_instance(scope, source)
@@ -583,7 +626,8 @@ def find_paths(
         truncated = False
     else:
         adjacency, _, truncated = _expand_graph(
-            scope, source.id, direction=direction, max_depth=depth_limit, stop_id=target.id)
+            scope, source.id, direction=direction, max_depth=depth_limit,
+            stop_id=target.id, gaps=gaps)
         paths = []
         queue = deque([(source.id, [source.id], [])])
         while queue and len(paths) < path_limit:
@@ -621,6 +665,7 @@ def find_paths(
                   if link.link_type_id in scope.link_types],
         "found": bool(paths),
         "truncated": truncated,
+        **partial_coverage(list((gaps or {}).values())),
     }
 
 
@@ -671,16 +716,22 @@ def analyze_change_impact(
     *,
     direction: str = "both",
     max_depth: int = 3,
+    check_coverage: bool = False,
 ) -> dict:
+    gaps = {} if check_coverage else None
     source = _visible_instance(scope, instance_id)
     _require_materialized_instance(scope, source)
     object_type = scope.object_types[source.object_type_id]
-    property_name = scope.resolve_property(object_type, property_ref)
+    if check_coverage:
+        property_name = scope.resolve_visible_property(object_type, property_ref)
+        require_query_properties(scope, object_type, [property_name])
+    else:
+        property_name = scope.resolve_property(object_type, property_ref)
     depth_limit = _clamp(max_depth, 1, 4, 3)
     current_values = {**(source.properties or {}), **(source.computed or {})}
 
     adjacency, _, truncated = _expand_graph(
-        scope, source.id, direction=direction, max_depth=depth_limit)
+        scope, source.id, direction=direction, max_depth=depth_limit, gaps=gaps)
     depths, parents = _parent_paths(source.id, adjacency, depth_limit)
     affected_ids = [node_id for node_id, depth in depths.items() if depth > 0]
     all_ids = [source.id, *affected_ids]
@@ -738,4 +789,5 @@ def analyze_change_impact(
                   if link.link_type_id in scope.link_types],
         "truncated": truncated,
         "disclaimer": "当前结果表示关系可达范围，不等同于确定的业务因果；真实写入尚未发生。",
+        **partial_coverage(list((gaps or {}).values())),
     }

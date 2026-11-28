@@ -16,11 +16,15 @@
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from pydantic import ValidationError
 
-from app.ontologies.agent_runtime.boundary import ToolError
+from app.ontologies.agent_runtime.boundary import (
+    ToolError, require_query_coverage, require_query_properties,
+)
+from app.ontologies.agent_runtime.query_coverage import coverage_gap
 from app.ontologies.agent_runtime.chart_specs import _build_aggregate_chart
 from app.ontologies.agent_runtime.query_handles import (
     _release_terminal_page,
@@ -108,7 +112,7 @@ def _query_objects_spl(db, scope, user, session_id, args, cap,
     except ValidationError as exc:
         raise ToolError(f"query_objects_invalid_query: {exc}") from exc
     except QueryError as exc:
-        raise ToolError(f"{exc.code}: {exc.message}") from exc
+        raise ToolError.from_query_error(exc) from exc
 
     _release_terminal_page(db, user, session_id, data)
     labels = (spec or {}).get("labels") or {}
@@ -148,7 +152,8 @@ def _query_objects_spl(db, scope, user, session_id, args, cap,
 
 
 def query_objects(db, scope, user, session_id: str, args: dict,
-                  spec_cache: dict | None = None) -> dict:
+                  spec_cache: dict | None = None, *,
+                  reference_time: datetime | None = None) -> dict:
     """明细/排序/分页/多维分组/关联统计/SPL 的统一查询工具。"""
     from app.ontologies.agent_query import schemas as QS
     from app.ontologies.agent_query.service import (
@@ -183,7 +188,7 @@ def query_objects(db, scope, user, session_id: str, args: dict,
                 db, user, str(cursor), session_kind="ontology_agent",
                 session_id=session_id or "", include_page_size=True)
         except QueryError as exc:
-            raise ToolError(f"{exc.code}: {exc.message}") from exc
+            raise ToolError.from_query_error(exc) from exc
         _release_terminal_page(db, user, session_id, data)
         result = cursor_page_result(
             data=data, spec=cached_spec, user=user,
@@ -234,9 +239,14 @@ def query_objects(db, scope, user, session_id: str, args: dict,
                             "重复出现；同一类型只允许参与一次关联")
         lt = scope.require_link_type(join.get("link_type", ""))
         alias = f"s{index + 1}"
-        direction = ("source_to_target"
-                     if lt.source_object_type_id == prev_ot.id
-                     else "target_to_s")
+        endpoints = (lt.source_object_type_id, lt.target_object_type_id)
+        requested = (prev_ot.id, ot.id)
+        if requested == endpoints:
+            direction = "source_to_target"
+        elif requested == endpoints[::-1]:
+            direction = "target_to_source"
+        else:
+            raise ToolError("invalid_parameter: 声明关系端点与对象源不符")
         join_type = join.get("type") if join.get("type") in {"inner", "left"} else "inner"
         sources.append(QS.QuerySource(
             alias=alias, ontology_id=scope.ontology.id,
@@ -257,6 +267,7 @@ def query_objects(db, scope, user, session_id: str, args: dict,
         return aliases[ot.id], ot
 
     queryable_cache: dict[str, list[str]] = {}
+    requested_properties: dict[str, set[str]] = {}
 
     def queryable_props(ot) -> list[str]:
         if ot.id not in queryable_cache:
@@ -268,12 +279,16 @@ def query_objects(db, scope, user, session_id: str, args: dict,
         # 否则错误只能在计划编制阶段暴露，且提示不含可查询属性清单。
         name = scope.resolve_visible_property(ot, prop)
         available_names = queryable_props(ot)
-        if name not in set(available_names):
+        if name not in available_names:
             available = "、".join(available_names) or "（无）"
             raise ToolError(
                 f"query_objects_property_unqueryable: 属性「{name}」在对象类型"
                 f"「{ot.display_name}」上没有远程列映射或不可查询；"
-                f"可查询属性：{available}")
+                f"可查询属性：{available}",
+                gap=coverage_gap(scope.query_coverage.object(ot).reason
+                                 or "remote_property_unmapped", object_type=ot,
+                                 property_name=name))
+        requested_properties.setdefault(ot.id, set()).add(name)
         return name
 
     # ---- 过滤：object_type 缺省为主对象 ----
@@ -301,7 +316,7 @@ def query_objects(db, scope, user, session_id: str, args: dict,
         window_input["property"] = prop
         resolved_window = resolve_window(
             window_input, property_name=prop,
-            property_type=_definition_type(ot, prop))
+            property_type=_definition_type(ot, prop), reference_time=reference_time)
         where.extend(window_filters(resolved_window, source=alias))
 
     # ---- 分组/聚合/投影装配 ----
@@ -413,6 +428,9 @@ def query_objects(db, scope, user, session_id: str, args: dict,
         direction = item.get("direction", "asc")
         if direction not in {"asc", "desc"}:
             raise ToolError("query_objects_invalid_query: 排序方向需为 asc/desc")
+        if not stats_mode:
+            _, prop, ot = select_entries[int(out[1:])]
+            requested_properties.setdefault(ot.id, set()).add(prop)
         order_items.append({"output": out, "readable": readable_of[out],
                             "direction": direction})
 
@@ -434,6 +452,18 @@ def query_objects(db, scope, user, session_id: str, args: dict,
                                          direction=item["direction"])
                           for item in order_items],
                 page_size=page_size)
+            # Validate the authorized relation as requested before querying facts.
+            # Check edges first so a missing join cannot be mistaken for a zero count.
+            for join in joins:
+                lt = scope.link_types[join.on.link_type_id]
+                access = scope.query_coverage.link(lt)
+                if access.reason:
+                    raise ToolError(f"{access.reason}: 关系「{lt.display_name}」当前不可用于关联查询。",
+                                    gap=coverage_gap(access.reason, link_type=lt))
+            for source in sources:
+                require_query_coverage(scope, scope.object_types[source.object_type_id])
+            for type_id, names in requested_properties.items():
+                require_query_properties(scope, scope.object_types[type_id], sorted(names))
             if stats_mode:
                 # 下钻明细投影与主投影共用同一 32 项协议上限：分组字段与
                 # 过滤/窗口字段优先，其余可查询属性截断并显式标记省略。
@@ -483,7 +513,7 @@ def query_objects(db, scope, user, session_id: str, args: dict,
     except ValidationError as exc:
         raise ToolError(f"query_objects_invalid_query: {exc}") from exc
     except QueryError as exc:
-        raise ToolError(f"{exc.code}: {exc.message}") from exc
+        raise ToolError.from_query_error(exc) from exc
 
     _release_terminal_page(db, user, session_id, data)
     labels = (spec or {}).get("labels") or {}

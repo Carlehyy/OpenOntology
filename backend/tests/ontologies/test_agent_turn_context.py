@@ -12,16 +12,14 @@ def test_catalog_discovers_only_visible_properties_without_counting():
     item = SimpleNamespace(id="orders", name="Order", display_name="订单",
                            properties=[{"name": "number", "type": "string"},
                                        {"name": "private", "type": "string"}])
+    from app.ontologies.agent_runtime.query_coverage import DataAccess
+
     scope = SimpleNamespace(ontology=SimpleNamespace(name="订单本体"), release_id="release-1",
                             object_types={"orders": item},
                             allowed_property_names=lambda _: {"number"},
-                            queryable_property_names=lambda _: None)
-    original = context_policy.remote_object_type_ids
-    try:
-        context_policy.remote_object_type_ids = lambda _: set()
-        text = context_policy.ontology_catalog(scope)
-    finally:
-        context_policy.remote_object_type_ids = original
+                            queryable_property_names=lambda _: None,
+                            query_coverage=SimpleNamespace(object=lambda _: DataAccess("materialized")))
+    text = context_policy.ontology_catalog(scope)
     assert "number:string" in text
     assert "private" not in text
     assert "describe_objects" in text
@@ -39,6 +37,34 @@ def test_tool_preview_remains_json_and_keeps_completeness_separate():
     assert preview["partial"] is False
     assert preview["exact"] is True
     assert result["rows"][49]["amount"] == 49
+
+
+@pytest.mark.parametrize("query_view", [False, True])
+def test_coverage_survives_model_display_audit_and_ledger_compaction(monkeypatch, query_view):
+    from app.ontologies.agent_runtime import run_events, turn_presenter
+    from app.ontologies.agent_runtime.query_coverage import partial_coverage
+
+    gap = {"code": "relation_data_unmapped", "kind": "linkType",
+           "linkTypeId": "lt-supplier", "label": "订单供应商"}
+    result = {**partial_coverage([{**gap, "diagnostic": "internal-source-detail"}]),
+              "rows": [{"reference": "a" * 4000}], "queryId": "q-private",
+              "dataMode": "remote"}
+    if query_view:
+        result["querySpec"] = {"shape": "objects", "query": {}}
+    monkeypatch.setattr(run_events, "limit", lambda _: 1024)
+    preview = json.loads(context_policy.tool_payload(result, cap=650))
+    display = turn_presenter._display_result(result)
+    audit = turn_presenter._audit_result(result)
+    event = run_events.bounded_step_event({"type": "step", "result": result,
+                                           "arguments": {"example": "large" * 500}})
+    for projection in (preview, display, audit, event["result"]):
+        assert projection["partial"] is True
+        assert projection["dataCoverage"]["gaps"] == [gap]
+    assert len(json.dumps(event, ensure_ascii=False)) <= 1024
+    assert "queryId" not in event["result"]
+    if query_view:
+        assert "rows" not in display and "rows" not in audit
+        assert event["result"]["querySpec"] == result["querySpec"]
 
 
 def test_tool_preview_strips_plan_drilldown_and_chart_before_rows():
@@ -319,9 +345,8 @@ def test_turn_exit_releases_unread_query_pages(
 
 
 
-def test_prompt_requires_composite_coverage_distinct_rankings_and_time_limits(monkeypatch):
+def test_prompt_requires_composite_coverage_distinct_rankings_and_time_limits():
     from app.ontologies.agent_runtime.prompting import _system_prompt
-    monkeypatch.setattr(context_policy, "remote_object_type_ids", lambda _: set())
     scope = SimpleNamespace(ontology=SimpleNamespace(name="目录"), release_id="r1",
                             release=None, object_types={}, profile=SimpleNamespace(system_prompt_extra=""),
                             allowed_property_names=lambda _: None,

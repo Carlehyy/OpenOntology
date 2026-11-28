@@ -4,11 +4,15 @@ from __future__ import annotations
 import json
 
 from app.ontologies.agent_runtime.limits import limit
+from app.ontologies.agent_runtime.query_coverage import coverage_metadata
+
 
 def _summarize(name: str, result: dict) -> str:
     """步骤的一句话摘要，给前端时间线用。"""
     if "error" in result:
         return str(result["error"])[:120]
+    if (result.get("dataCoverage") or {}).get("gaps"):
+        return "已查询可用范围，部分数据覆盖不足"
     if name == "search_objects":
         return f"{result.get('objectType', '')} 命中 {result.get('total', 0)} 条，返回 {result.get('returned', 0)} 条"
     if name == "get_object":
@@ -155,6 +159,7 @@ def _graph_display_result(result: dict) -> dict:
 
 def _display_result(result: dict):
     """给前端展示查询描述与有界结果，远程明细由查询视图实时读取。"""
+    result = {**result, **coverage_metadata(result)} if result.get("dataCoverage") else result
     if result.get("querySpec"):
         from app.ontologies.agent_runtime.query_spec import public_query_result
         return public_query_result(result)
@@ -167,11 +172,10 @@ def _display_result(result: dict):
         return result
     if result.get("kind") in {"path", "impact"}:
         return _graph_display_result(result)
-    return {
-        "_truncated": True,
-        "_note": f"结果较大（约 {len(payload)} 字符），此处仅展示前 {cap} 字符预览。",
-        "preview": payload[:cap],
-    }
+    compact = {"_truncated": True, "_note": "结果较大，此处仅展示部分内容。",
+               **coverage_metadata(result, keep=2)}
+    budget = max(0, (cap - len(json.dumps(compact, ensure_ascii=False))) // 2 - 16)
+    return {**compact, "preview": payload[:budget]}
 
 
 def _audit_result(result: dict):
@@ -179,6 +183,8 @@ def _audit_result(result: dict):
     if result.get("querySpec") and "remote" in str(result.get("dataMode", "")):
         from app.ontologies.agent_runtime.query_spec import public_query_result
         result = public_query_result(result)
+    if result.get("dataCoverage"):
+        result = {**result, **coverage_metadata(result)}
     try:
         return json.loads(json.dumps(result, ensure_ascii=False, default=str))
     except Exception:  # noqa: BLE001

@@ -11,6 +11,8 @@ from weakref import WeakValueDictionary
 from app.ontologies.agent_runtime.boundary import ToolError
 from app.ontologies.agent_runtime.limits import limit
 from app.ontologies.agent_runtime.models import AgentProfile
+from app.ontologies.agent_runtime.query_coverage import partial_coverage
+from app.ontologies.agent_runtime.query_spec import canonical_json
 from app.ontologies.agent_runtime.toolkit import ToolRunner
 
 logger = logging.getLogger(__name__)
@@ -43,8 +45,17 @@ def _user_query_lock(user_id) -> threading.Lock:
         return lock
 
 
-def _run_tool_call(runner: ToolRunner, tc: dict) -> tuple[dict, int]:
-    started = time.time()
+def tool_call_key(tc: dict) -> tuple[str, str]:
+    # Model call IDs identify protocol messages, not the query. Preserve every
+    # argument (including a cursor, if any); canonical JSON ignores key order.
+    return tc["name"], canonical_json(tc.get("arguments") or {})
+
+
+def _run_tool_call(runner: ToolRunner, tc: dict, *, blocked: dict,
+                   key: tuple[str, str]) -> tuple[dict, int]:
+    if key in blocked:
+        return blocked[key], 0
+    started = time.monotonic()
     name = tc["name"]
     lock = (_user_query_lock(getattr(runner.user, "id", None))
             if name in _REMOTE_QUERY_TOOLS else None)
@@ -54,12 +65,14 @@ def _run_tool_call(runner: ToolRunner, tc: dict) -> tuple[dict, int]:
                 result = runner.run(name, tc.get("arguments") or {})
         else:
             result = runner.run(name, tc.get("arguments") or {})
-    except ToolError as e:
-        result = {"error": str(e)}
+    except ToolError as exc:
+        result = {"error": str(exc), **partial_coverage([exc.gap] if exc.gap else [])}
+        if exc.deterministic:
+            blocked[key] = result
     except Exception as e:  # noqa: BLE001 — 工具内部意外不摧毁回合
         logger.exception("工具 %s 执行异常", name)
         result = {"error": f"工具内部错误: {e}"}
-    return result, int((time.time() - started) * 1000)
+    return result, int((time.monotonic() - started) * 1000)
 
 
 def _parallel_task_runner(runner: ToolRunner, context: dict) -> ToolRunner:
@@ -90,7 +103,8 @@ def _parallel_task_runner(runner: ToolRunner, context: dict) -> ToolRunner:
             session, scope,
             decision_context=deepcopy(context["decision_context"]),
             world_model_context={**context["world_model_context"], "user": user},
-            user=user, query_session_id=context["query_session_id"])
+            user=user, query_session_id=context["query_session_id"],
+            window_reference_time=context["window_reference_time"])
         task_runner._query_spec_cache = dict(context["query_spec_cache"])
         return task_runner
     except Exception:
@@ -98,15 +112,18 @@ def _parallel_task_runner(runner: ToolRunner, context: dict) -> ToolRunner:
         raise
 
 
-def _execute_tool_calls(runner: ToolRunner, tool_calls: list[dict]) -> list[tuple[dict, list[dict], int]]:
-    """执行一批工具调用：可并行批次用有界线程池，结果按调用顺序返回。"""
+def _execute_tool_calls(runner: ToolRunner, tool_calls: list[dict], *,
+                        blocked: dict | None = None) -> list[tuple[dict, list[dict], int]]:
+    """执行一批工具调用：同口径的确定性阻断每轮只探查一次。"""
+    blocked = {} if blocked is None else blocked
+    keys = [tool_call_key(tc) for tc in tool_calls]
     workers = min(limit("parallel_tool_workers"), len(tool_calls))
     parallel = (len(tool_calls) > 1 and workers > 1
                 and all(tc["name"] in _PARALLEL_SAFE_TOOLS for tc in tool_calls))
     if not parallel:
         outcomes = []
-        for tc in tool_calls:
-            result, duration = _run_tool_call(runner, tc)
+        for tc, key in zip(tool_calls, keys):
+            result, duration = _run_tool_call(runner, tc, blocked=blocked, key=key)
             outcomes.append((result, [], duration))
         return outcomes
 
@@ -123,22 +140,28 @@ def _execute_tool_calls(runner: ToolRunner, tool_calls: list[dict]) -> list[tupl
         "world_model_context": {key: value for key, value in runner.world_model_context.items()
                                 if key != "user"},
         "query_session_id": runner.query_session_id,
+        "window_reference_time": runner.window_reference_time,
         "query_spec_cache": dict(runner._query_spec_cache),
     }
 
-    def task(tc: dict):
-        task_runner = _parallel_task_runner(runner, context)
-        try:
-            result, duration = _run_tool_call(task_runner, tc)
-            return (result, task_runner.citations, duration,
-                    task_runner._query_spec_cache, task_runner._open_queries)
-        finally:
-            task_runner.db.rollback()
-            task_runner.db.close()
+    key_locks = {key: threading.Lock() for key in set(keys)}
+
+    def task(tc: dict, key: tuple[str, str]):
+        with key_locks[key]:
+            if key in blocked:
+                return blocked[key], [], 0, {}, {}
+            task_runner = _parallel_task_runner(runner, context)
+            try:
+                result, duration = _run_tool_call(task_runner, tc, blocked=blocked, key=key)
+                return (result, task_runner.citations, duration,
+                        task_runner._query_spec_cache, task_runner._open_queries)
+            finally:
+                task_runner.db.rollback()
+                task_runner.db.close()
 
     with ThreadPoolExecutor(max_workers=workers,
                             thread_name_prefix="agent-tools") as pool:
-        futures = [pool.submit(task, tc) for tc in tool_calls]
+        futures = [pool.submit(task, tc, key) for tc, key in zip(tool_calls, keys)]
         outcomes = []
         for future in futures:
             result, citations, duration, query_specs, open_queries = future.result()

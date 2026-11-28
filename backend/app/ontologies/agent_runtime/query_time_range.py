@@ -1,9 +1,11 @@
 """远程绑定对象的数据时间范围（源端 min/max 一次聚合）。"""
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import ValidationError
 
-from app.ontologies.agent_runtime.boundary import ToolError
+from app.ontologies.agent_runtime.boundary import ToolError, require_query_coverage
 from app.ontologies.agent_runtime.query_planning import (
     _definition_type, _definitions,
 )
@@ -15,7 +17,8 @@ _TEMPORAL_TYPES = {"date", "datetime", "timestamp", "time"}
 
 
 def get_data_time_range(db, scope, user, session_id: str, ot,
-                        time_property=None, filters=None, window=None) -> dict:
+                        time_property=None, filters=None, window=None, *,
+                        reference_time: datetime | None = None) -> dict:
     """远程绑定对象的数据时间范围（min/max 一次双聚合下推源端）。"""
     from app.ontologies.agent_query import schemas as QS
     from app.ontologies.agent_query.service import QueryError, execute_unified_query
@@ -29,31 +32,20 @@ def get_data_time_range(db, scope, user, session_id: str, ot,
         raise ToolError("profile_query_disabled: 当前本体助手未启用查询额度")
     if scope.release is None:
         raise ToolError("data_time_range_release_required: 需要固定的发布版本")
-    from app.ontologies.mappings.remote_binding import (
-        RemoteBindingError, get_remote_binding,
-    )
-    try:
-        binding = get_remote_binding(scope.release.snapshot, ot.id)
-    except RemoteBindingError as exc:
-        raise ToolError(f"{exc.code}: {exc.message}") from exc
-    if binding is None:
+    prop = scope.resolve_visible_property(ot, time_property) if time_property else None
+    require_query_coverage(scope, ot, property_name=prop)
+    if scope.query_coverage.object(ot).mode != "remote":
         raise ToolError("data_time_range_local_unsupported: 数据时间范围工具面向"
                         "远程绑定对象；本地物化对象请用 aggregate_objects 按时间"
                         "属性 min/max 统计")
 
-    definitions = _definitions(ot)
-    temporal = [name for name, p in definitions.items()
-                if str(p.get("type") or "").lower() in _TEMPORAL_TYPES]
-    remote_bound = {prop for prop in binding.get("fieldMap", {}).values()
-                    if prop != "__primary_key__"}
-    temporal = [name for name in temporal if name in remote_bound]
-    if not temporal:
+    queryable = scope.queryable_property_names(ot)
+    temporal = [name for name, p in _definitions(ot).items()
+                if name in queryable and str(p.get("type") or "").lower() in _TEMPORAL_TYPES]
+    if not temporal and prop is None:
         raise ToolError(f"data_time_range_no_temporal: 对象「{ot.display_name}」没有"
                         "可用的 date/datetime/timestamp 映射属性")
-    prop = time_property or temporal[0]
-    if prop not in definitions:
-        # 允许 displayName 引用
-        prop = scope.resolve_visible_property(ot, prop)
+    prop = prop or temporal[0]
     if prop not in temporal:
         raise ToolError(f"data_time_range_not_temporal: 属性「{prop}」不是时间类型；"
                         f"可用：{'、'.join(temporal)}")
@@ -63,7 +55,9 @@ def get_data_time_range(db, scope, user, session_id: str, ot,
         if isinstance(item, dict) and item.get("op") == "contains":
             raise ToolError("data_time_range_invalid_filter: 时间范围查询不支持 "
                             "contains；请使用明确的等值、范围或 in 条件")
-        resolved_filters.append(item)
+        name = scope.resolve_visible_property(ot, item["property"])
+        require_query_coverage(scope, ot, property_name=name)
+        resolved_filters.append({**item, "property": name})
     resolved_window = None
     window_leaves = []
     if window is not None:
@@ -74,7 +68,7 @@ def get_data_time_range(db, scope, user, session_id: str, ot,
         window_input["property"] = prop
         resolved_window = resolve_window(
             window_input, property_name=prop,
-            property_type=_definition_type(ot, prop))
+            property_type=_definition_type(ot, prop), reference_time=reference_time)
         window_leaves = window_filters(resolved_window, source="objects")
     payload = {
         "sources": [{"alias": "objects", "ontologyId": scope.ontology.id,
@@ -93,7 +87,7 @@ def get_data_time_range(db, scope, user, session_id: str, ot,
     except ValidationError as exc:
         raise ToolError(f"data_time_range_invalid_query: {exc}") from exc
     except QueryError as exc:
-        raise ToolError(f"{exc.code}: {exc.message}") from exc
+        raise ToolError.from_query_error(exc, object_type=ot) from exc
     if (result.get("partial") or result.get("exact") is False
             or result.get("completeness", "complete") != "complete"):
         raise ToolError("data_time_range_incomplete: 远程查询未返回完整时间范围")

@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+from functools import cached_property
 from typing import Any, Optional
 
 from sqlalchemy import func
@@ -23,6 +24,9 @@ from app.models.ontology_formal import (
     ObjectType, LinkType, ActionType, ObjectInstance,
 )
 from app.ontologies.agent_runtime.models import AgentProfile
+from app.ontologies.agent_runtime.query_coverage import (
+    LOCAL_REMOTE_FENCE, QueryCoverage, coverage_gap,
+)
 from app.ontologies.release_context import CurrentReleaseContext, current_release_context
 from app.ontologies.versions.snapshot_contract import (
     snapshot_models,
@@ -30,7 +34,53 @@ from app.ontologies.versions.snapshot_contract import (
 
 
 class ToolError(Exception):
-    """工具层可恢复错误 — 返回给 LLM 让其自我修正，不打断对话。"""
+    """工具层可恢复错误；数据覆盖错误附安全的机器可读范围。"""
+
+    def __init__(self, message: str, *, gap: dict | None = None,
+                 deterministic: bool = True):
+        super().__init__(message)
+        self.gap = gap
+        self.code = gap["code"] if gap else None
+        self.deterministic = deterministic and gap is not None
+
+    @classmethod
+    def from_query_error(cls, exc, *, object_type=None) -> ToolError:
+        # Only a gap constructed from authorized definitions by the planner is
+        # forwarded. Connector diagnostics can include physical source details.
+        if "coverageGap" in exc.assistant_private_keys:
+            return cls(f"{exc.code}: {exc.message}", gap=exc.extra["coverageGap"],
+                       deterministic=exc.code != "query_coverage_unavailable")
+        if exc.code in {"SOURCE_SCHEMA_DRIFT", "SOURCE_CONFIG_UNAVAILABLE"}:
+            return cls(f"{exc.code}: 当前发布绑定的来源或字段配置不可用。",
+                       gap=coverage_gap(exc.code, object_type=object_type),
+                       deterministic=False)
+        if exc.status >= 500:
+            code = exc.code if exc.code in {"SOURCE_UNAVAILABLE", "remote_query_unavailable"} else "query_source_failed"
+            return cls(f"{code}: 数据源或查询服务本次未能完成查询。",
+                       gap=coverage_gap(code, object_type=object_type),
+                       deterministic=False)
+        return cls(f"{exc.code}: {exc.message}")
+
+
+def require_query_coverage(scope, object_type, *, property_name: str | None = None) -> None:
+    """Call after resolving object and any explicit property within the profile."""
+    coverage = scope.query_coverage
+    label = object_type.display_name or object_type.name
+    access = coverage.object(object_type)
+    if access.reason:
+        raise ToolError(f"{access.reason}: 对象「{label}」当前没有可用的查询路径。",
+                        gap=coverage_gap(access.reason, object_type=object_type))
+    if property_name is not None:
+        require_query_properties(scope, object_type, [property_name])
+
+
+def require_query_properties(scope, object_type, names) -> None:
+    for name, access in scope.query_coverage.properties(object_type, names).items():
+        if access.reason:
+            raise ToolError(
+                f"{access.reason}: 对象「{object_type.display_name}」的属性「{name}」当前不可查询。",
+                gap=coverage_gap(access.reason, object_type=object_type, property_name=name),
+                deterministic=access.reason != "query_coverage_unavailable")
 
 
 def remote_object_type_ids(scope: AgentScope) -> set[str]:
@@ -75,10 +125,11 @@ def require_materialized_object_type(scope: AgentScope, object_type) -> None:
                     if scope.release is not None else
                     "当前会话未固定发布版本，请从已发布本体重新进入助手后统计；")
         raise ToolError(
-            "remote_ontology_semantic_query_required: "
+            f"{LOCAL_REMOTE_FENCE}: "
             f"对象类型「{object_type.display_name}」为远程绑定，本地无物化事实，"
             "不返回空结果或 0 统计冒充完整；" + guidance
-            + "明细/按 ID/排序/分页/关联统计请用 query_objects")
+            + "明细/按 ID/排序/分页/关联统计请用 query_objects",
+            gap=coverage_gap(LOCAL_REMOTE_FENCE, object_type=object_type))
 
 
 def get_or_create_profile(db: Session, ontology_id: str) -> AgentProfile:
@@ -205,12 +256,15 @@ class AgentScope:
         ) or "（无）"
         raise ToolError(f"属性「{ref}」不在对象类型「{ot.display_name}」上，或拼写有误。可用属性：{avail}")
 
+    @cached_property
+    def query_coverage(self) -> QueryCoverage:
+        return QueryCoverage(self, remote_object_type_ids(self))
+
     def queryable_property_names(self, ot: Any) -> set[str] | None:
         """授权声明属性与当前远程列映射的交集；本地类型返回 None。"""
-        if ot.id not in remote_object_type_ids(self):
+        if ot.id not in self.query_coverage.remote_ids:
             return None
-        from app.ontologies.agent_runtime.property_visibility import remote_binding_states
-        state = remote_binding_states(self, {str(ot.id)}).get(str(ot.id), {})
+        state = self.query_coverage.property_states[ot.id]
         allowed = self.allowed_property_names(ot.id)
         declared = {str(p["name"]) for p in (ot.properties or [])
                     if isinstance(p, dict) and p.get("name")
@@ -289,7 +343,7 @@ class AgentScope:
         改为显式转介：数据在联邦远程，须经受治理查询取数。
         """
         counts = self.instance_counts()
-        remote_ids = remote_object_type_ids(self)
+        coverage = self.query_coverage
         lines: list[str] = []
         lines.append(f"# 本体「{self.ontology.name}」")
         if self.ontology.description:
@@ -300,18 +354,22 @@ class AgentScope:
             lines.append("（无授权的对象类型）")
         for t in self.object_types.values():
             desc = f" — {t.description}" if t.description else ""
-            if t.id in remote_ids:
+            access = coverage.object(t)
+            if access.mode == "remote":
                 lines.append(
                     f"### {t.display_name} (name={t.name}, 远程绑定·本地无物化事实)"
                     f"{desc}")
-                lines.append(
-                    "- 数据在联邦远程源：统计用 aggregate_objects（group_by 支持 "
-                    "day/week/month/quarter/year 时间分桶与多维分组，趋势一次取全期间）；"
-                    "数据时间范围用 get_data_time_range；明细/按 ID/排序/分页/关联统计"
-                    "用 query_objects；不得凭本地 0 或结构样例推断")
-            else:
+                if not access.reason:
+                    lines.append(
+                        "- 统计用 aggregate_objects；时间范围用 get_data_time_range；"
+                        "明细、分页及支持的关系用 query_objects。")
+            elif access.mode == "materialized":
                 n = counts.get(t.id, 0)
                 lines.append(f"### {t.display_name} (name={t.name}, 实例数={n}){desc}")
+            else:
+                lines.append(f"### {t.display_name} (name={t.name}, 仅定义){desc}")
+            if access.reason:
+                lines.append(f"- 暂不可查询：{access.reason}；不代表数据为零。")
             allowed_props = self.allowed_property_names(t.id)
             queryable_props = self.queryable_property_names(t)
             for p in (t.properties or []):
@@ -333,10 +391,13 @@ class AgentScope:
             src = self.object_types.get(lt.source_object_type_id)
             tgt = self.object_types.get(lt.target_object_type_id)
             desc = f" — {lt.description}" if lt.description else ""
+            access = coverage.link(lt)
+            mode = (f"不可查询：{access.reason}" if access.reason else
+                    "本地遍历" if access.mode == "materialized" else "query_objects 关联")
             lines.append(
                 f"- {lt.display_name} (name={lt.name}): "
                 f"{src.display_name if src else '?'} → {tgt.display_name if tgt else '?'}"
-                f" [{lt.cardinality}]{desc}")
+                f" [{lt.cardinality}；{mode}]{desc}")
 
         lines.append("\n## 可用动作（业务操作，先 propose_action 预演，永不直接执行）")
         if not self.actions:

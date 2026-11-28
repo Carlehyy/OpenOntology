@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from app.ontologies.agent_query.schemas import MAX_SELECT_ITEMS
 from app.ontologies.agent_runtime.boundary import ToolError
+from app.ontologies.agent_runtime.query_coverage import coverage_gap
 from app.ontologies.agent_runtime.limits import limit as runtime_limit
 from app.ontologies.agent_runtime.query_planning import (
     _bounded_projection, _visible_properties,
@@ -140,7 +141,7 @@ def _execute(db, user, session_id, payload, *, release: bool = True):
     except ValidationError as exc:
         raise ToolError(f"remote_aggregate_invalid_query: {exc}") from exc
     except QueryError as exc:
-        raise ToolError(f"{exc.code}: {exc.message}") from exc
+        raise ToolError.from_query_error(exc) from exc
     try:
         _assert_complete(result)
     except ToolError:
@@ -161,7 +162,7 @@ def _fetch_enum_page(db, user, session_id, cursor: str) -> dict:
             db, user, cursor, session_kind="ontology_agent",
             session_id=session_id or "")
     except QueryError as exc:
-        raise ToolError(f"{exc.code}: {exc.message}") from exc
+        raise ToolError.from_query_error(exc) from exc
 
 
 def _scalar_count(db, user, session_id, count_payload, where) -> int:
@@ -246,7 +247,9 @@ def _assert_remote_properties_queryable(scope, ot, properties) -> None:
         "remote_aggregate_property_unqueryable: 属性"
         f"{'、'.join(f'「{name}」' for name in missing)}"
         f"在对象类型「{ot.display_name}」上没有远程列映射或不可查询；"
-        f"可查询属性：{available}")
+        f"可查询属性：{available}",
+        gap=coverage_gap("remote_property_unmapped", object_type=ot,
+                         property_name=missing[0]))
 
 
 def _contains_unresolved(want, *, reason: str = "候选取值未枚举完整") -> ToolError:
@@ -311,6 +314,8 @@ def _collect_enum_rows(db, user, session_id, payload, *, want: str) -> tuple[lis
             try:
                 page = _fetch_enum_page(db, user, session_id, cursor)
             except ToolError as exc:
+                if exc.gap:
+                    raise
                 code = str(exc).split(":", 1)[0]
                 raise _contains_unresolved(
                     want, reason=f"续页失败（{code}），无法确认候选取值完整") from exc

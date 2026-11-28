@@ -20,7 +20,7 @@ from decimal import Decimal
 
 from pydantic import ValidationError
 
-from app.ontologies.agent_runtime.boundary import ToolError
+from app.ontologies.agent_runtime.boundary import ToolError, require_query_coverage
 from app.ontologies.agent_runtime.query_spec import (
     build_query_spec, make_drilldown, spec_hash,
 )
@@ -201,6 +201,8 @@ def analyze_window_distinct(*, db, scope, user, session_id, ot, args,
             f"超过单请求上限 16（当前 {len(where)} 个；窗口边界占用 2 个槽，"
             "filters 最多 14 个）；请减少 filters 后重试")
 
+    for item in group_items:
+        require_query_coverage(scope, ot, property_name=item["property"])
     source = QS.QuerySource(alias="s0", ontology_id=scope.ontology.id,
                             release_id=scope.release_id, object_type_id=ot.id)
     inner_where = [QS.FilterLeaf.model_validate(item) for item in where]
@@ -235,7 +237,7 @@ def analyze_window_distinct(*, db, scope, user, session_id, ot, args,
                 session_id=session_id or "", include_page_size=True)
         except Exception as exc:  # noqa: BLE001 - 统一错误码透传
             if isinstance(exc, QueryError):
-                raise ToolError(f"{exc.code}: {exc.message}") from exc
+                raise ToolError.from_query_error(exc, object_type=ot) from exc
             from pydantic import ValidationError
             if isinstance(exc, ValidationError):
                 raise ToolError(f"sequence_invalid_query: {exc}") from exc

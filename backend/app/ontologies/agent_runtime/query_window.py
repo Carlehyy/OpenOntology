@@ -265,9 +265,11 @@ def _relative_text(info: dict) -> str:
 
 
 def resolve_window(window: dict, *, property_name: str | None = None,
-                   property_type: str | None = None) -> dict:
+                   property_type: str | None = None,
+                   reference_time: datetime | None = None) -> dict:
     """解析窗口为冻结的 absolute 口径。
 
+    对话回合显式传入 ``reference_time``，让回合内的相对窗口重试保持同一口径。
     ``property_type`` 为发布声明类型时，日期属性按本地自然日边界表达：
     relative 窗口把日期值扩到覆盖整个自然日；显式 [start, end) 的 end
     保持排他日期（仅当 end 带非零时刻时按自然日进位），不再无条件
@@ -282,7 +284,7 @@ def resolve_window(window: dict, *, property_name: str | None = None,
     if not prop:
         raise _fail("window_property_required", "window 必须提供时间属性 property")
     timezone_name, zone = _zone(window.get("timezone"))
-    clock = utc_now()
+    clock = reference_time or utc_now()
     if clock.tzinfo is None:
         clock = clock.replace(tzinfo=timezone.utc)
     now_utc = _to_utc(clock, "now")

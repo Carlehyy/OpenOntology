@@ -30,6 +30,7 @@ import json
 import logging
 import time
 from contextlib import contextmanager
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Optional
 
@@ -47,9 +48,11 @@ from app.models.ontology_formal import (
     ObjectInstance, LinkInstance, PropertyFact,
 )
 from app.ontologies.agent_runtime.boundary import (
-    AgentScope, ToolError, require_materialized_object_type,
+    AgentScope, ToolError, require_materialized_object_type, require_query_coverage,
+    require_query_properties,
 )
 from app.ontologies.agent_runtime.limits import limit as runtime_limit
+from app.ontologies.agent_runtime.query_coverage import coverage_gap, partial_coverage
 from app.ontologies.agent_runtime.tool_definitions import TOOL_DEFS
 from app.ontologies.agent_runtime.chart_specs import (
     _build_aggregate_chart, _is_temporal, _METRIC_LABELS,
@@ -314,11 +317,13 @@ class ToolRunner:
     def __init__(self, db: Session, scope: AgentScope, *,
                  decision_context: Optional[dict] = None,
                  world_model_context: Optional[dict] = None,
-                 user=None, query_session_id: str = ""):
+                 user=None, query_session_id: str = "",
+                 window_reference_time: datetime | None = None):
         self.db = db
         self.scope = scope
         self.user = user
         self.query_session_id = query_session_id
+        self.window_reference_time = window_reference_time
         self.decision_context = decision_context or {}
         # 世界模型推演上下文：{"user": <User>} —— 菜单权限门控 + 调用记录审计人
         self.world_model_context = world_model_context or {}
@@ -387,18 +392,15 @@ class ToolRunner:
 
     def _require_local_type(self, ot) -> None:
         require_materialized_object_type(self.scope, ot)
+        require_query_coverage(self.scope, ot)
 
     def _require_local_link(self, link_type) -> None:
-        """链接任一端为远程绑定类型时，本地链接事实不完整，遍历整体拒绝。
-
-        只遍历到 0 个邻居不能当作"确实没有关联"——远程侧数据面不参与
-        本地投影，安静返回空会冒充完整图景。
-        """
-        for type_id in (link_type.source_object_type_id,
-                        link_type.target_object_type_id):
-            ot = self.scope.object_types.get(type_id)
-            if ot is not None:
-                require_materialized_object_type(self.scope, ot)
+        access = self.scope.query_coverage.link(link_type, local=True)
+        if access.reason:
+            raise ToolError(
+                f"{access.reason}: 关系「{link_type.display_name}」没有可供本地遍历的数据覆盖；"
+                "请用 describe_objects 核对关系能力。",
+                gap=coverage_gap(access.reason, link_type=link_type))
 
     # ------------------------------------------------------------ 各工具实现
 
@@ -417,6 +419,22 @@ class ToolRunner:
             query = query.filter(
                 LinkInstance.ontology_release_id == self.scope.release_id)
         return query
+
+    def _neighbors(self, instance_id, link_type, direction):
+        if direction == "out":
+            here, there = LinkInstance.source_object_id, LinkInstance.target_object_id
+            type_id = link_type.target_object_type_id
+        else:
+            here, there = LinkInstance.target_object_id, LinkInstance.source_object_id
+            type_id = link_type.source_object_type_id
+        query = (self._link_query(LinkInstance, ObjectInstance)
+                 .join(ObjectInstance, ObjectInstance.id == there)
+                 .filter(LinkInstance.link_type_id == link_type.id, here == instance_id,
+                         ObjectInstance.ontology_id == self.scope.ontology.id,
+                         ObjectInstance.object_type_id == type_id))
+        if self.scope.release_id is not None:
+            query = query.filter(ObjectInstance.ontology_release_id == self.scope.release_id)
+        return query.order_by(LinkInstance.id)
 
     def _instances_of(self, type_id: str) -> list[ObjectInstance]:
         return (self._instance_query()
@@ -541,6 +559,7 @@ class ToolRunner:
         ot = self.scope.require_object_type(args.get("object_type", ""))
         self._require_local_type(ot)
         filters = self._validated_filters(ot, args.get("filters"))
+        require_query_properties(self.scope, ot, [item["property"] for item in filters or []])
         limit = self._limit(args.get("limit"))
         if self.db.get_bind().dialect.name == "postgresql":
             with self._sql_read_budget():
@@ -598,53 +617,54 @@ class ToolRunner:
         inst = self.scope.visible_instance(
             self.db.query(ObjectInstance).filter(
                 ObjectInstance.id == args.get("instance_id", "")).first())
-        self._cite(inst)
         ot = self.scope.object_types[inst.object_type_id]
+        self._require_local_type(ot)
+        self._cite(inst)
 
-        neighbors = []
+        neighbors, gaps = [], []
         for lt in self.scope.link_types.values():
-            for direction, self_col, other_col in (
-                    ("out", LinkInstance.source_object_id, LinkInstance.target_object_id),
-                    ("in", LinkInstance.target_object_id, LinkInstance.source_object_id)):
-                links = (self._link_query()
-                         .filter(LinkInstance.link_type_id == lt.id,
-                                 self_col == inst.id)
-                         .limit(50).all())
+            directions = []
+            if lt.source_object_type_id == ot.id:
+                directions.append("out")
+            if lt.target_object_type_id == ot.id:
+                directions.append("in")
+            if not directions:
+                continue
+            access = self.scope.query_coverage.link(lt, local=True)
+            if access.reason:
+                gaps.append(coverage_gap(access.reason, link_type=lt))
+                continue
+            for direction in directions:
+                links = self._neighbors(inst.id, lt, direction).limit(51).all()
                 if not links:
                     continue
-                sample = []
-                for li in links[:5]:
-                    other_id = li.target_object_id if direction == "out" else li.source_object_id
-                    other = self._instance_query().filter(
-                        ObjectInstance.id == other_id).first()
-                    if other and other.object_type_id in self.scope.object_types:
-                        sample.append({"instanceId": other.id, "label": _label(self.scope, other)})
                 neighbors.append({
                     "linkType": lt.display_name, "linkTypeName": lt.name,
-                    "direction": direction, "count": len(links), "sample": sample,
+                    "direction": direction, "count": min(len(links), 50),
+                    "sample": [{"instanceId": other.id, "label": _label(self.scope, other)}
+                               for _, other in links[:5]],
+                    **({"truncated": True} if len(links) > 50 else {}),
                 })
-        return {"objectType": ot.display_name, **_row(self.scope, inst), "links": neighbors}
+        return {"objectType": ot.display_name, **_row(self.scope, inst), "links": neighbors,
+                **partial_coverage(gaps)}
 
     def _tool_traverse_links(self, args: dict) -> dict:
         inst = self.scope.visible_instance(
             self.db.query(ObjectInstance).filter(
                 ObjectInstance.id == args.get("instance_id", "")).first())
         lt = self.scope.require_link_type(args.get("link_type", ""))
-        self._require_local_link(lt)
         direction = args.get("direction") or "out"
-        self_col = LinkInstance.source_object_id if direction == "out" else LinkInstance.target_object_id
+        if direction not in ("out", "in"):
+            raise ToolError("direction 只能是 out 或 in")
+        start_type = lt.source_object_type_id if direction == "out" else lt.target_object_type_id
+        if inst.object_type_id != start_type:
+            raise ToolError("起点对象类型与关系方向不匹配")
+        self._require_local_link(lt)
         limit = self._limit(args.get("limit"))
 
-        links = (self._link_query()
-                 .filter(LinkInstance.link_type_id == lt.id,
-                         self_col == inst.id)
-                 .limit(limit + 1).all())
+        links = self._neighbors(inst.id, lt, direction).limit(limit + 1).all()
         items = []
-        for li in links[:limit]:
-            other_id = li.target_object_id if direction == "out" else li.source_object_id
-            other = self._instance_query().filter(ObjectInstance.id == other_id).first()
-            if not other or other.object_type_id not in self.scope.object_types:
-                continue
+        for li, other in links[:limit]:
             self._cite(other)
             ot = self.scope.object_types[other.object_type_id]
             items.append({"objectType": ot.display_name, **_row(self.scope, other),
@@ -667,35 +687,39 @@ class ToolRunner:
 
         # 逐跳预解析链接类型（越界即失败：每一跳都受作用域约束，防经由链接泄露隐藏类型）
         hops = []
+        current_type = start.object_type_id
         for h in path:
             if not isinstance(h, dict):
                 raise ToolError('path 每一跳必须是对象，如 {"link_type":"下单","direction":"out"}')
             lt = self.scope.require_link_type(h.get("link_type", ""))
-            self._require_local_link(lt)
             direction = h.get("direction") or "out"
             if direction not in ("out", "in"):
                 raise ToolError("direction 只能是 out 或 in")
+            endpoints = (lt.source_object_type_id, lt.target_object_type_id)
+            here, there = endpoints if direction == "out" else endpoints[::-1]
+            if current_type != here:
+                raise ToolError("起点对象类型与关系方向不匹配")
+            self._require_local_link(lt)
             hops.append((lt, direction))
+            current_type = there
 
         visited = {start.id}
         frontier = [start.id]
         budget_hit = frontier_capped = False
         hop_trace: list[dict] = []
         for depth, (lt, direction) in enumerate(hops):
-            self_col = (LinkInstance.source_object_id if direction == "out"
-                        else LinkInstance.target_object_id)
             cur = frontier[:runtime_limit("frontier_cap")]
             if len(frontier) > runtime_limit("frontier_cap"):
                 frontier_capped = True
             next_ids: list[str] = []
             next_seen: set[str] = set()
             for node_id in cur:
-                links = (self._link_query(
-                            LinkInstance.source_object_id, LinkInstance.target_object_id)
-                         .filter(LinkInstance.link_type_id == lt.id, self_col == node_id)
-                         .limit(runtime_limit("hop_fanout_cap")).all())
-                for src_id, tgt_id in links:
-                    other = tgt_id if direction == "out" else src_id
+                links = self._neighbors(node_id, lt, direction).limit(
+                    runtime_limit("hop_fanout_cap") + 1).all()
+                if len(links) > runtime_limit("hop_fanout_cap"):
+                    frontier_capped = True
+                for _, neighbor in links[:runtime_limit("hop_fanout_cap")]:
+                    other = neighbor.id
                     if other in visited or other in next_seen:
                         continue
                     next_seen.add(other)
@@ -743,6 +767,7 @@ class ToolRunner:
             direction=args.get("direction") or "both",
             max_depth=args.get("max_depth") or 5,
             max_paths=args.get("max_paths") or 3,
+            check_coverage=True,
         )
         for node in result.get("nodes") or []:
             instance = self.db.query(ObjectInstance).filter(
@@ -761,6 +786,7 @@ class ToolRunner:
             args.get("proposed_value"),
             direction=args.get("direction") or "both",
             max_depth=args.get("max_depth") or 3,
+            check_coverage=True,
         )
         for node in result.get("nodes") or []:
             instance = self.db.query(ObjectInstance).filter(
@@ -958,6 +984,9 @@ class ToolRunner:
             return [{"output": output, "direction": direction}]
 
         order_spec = local_order_spec()
+        names = [item["property"] for item in filters or []]
+        names.extend(prop for prop in (metric_prop, group_by) if prop)
+        require_query_properties(self.scope, ot, names)
         if self.db.get_bind().dialect.name == "postgresql":
             return self._sql_aggregate_objects(
                 ot, metric, metric_prop, group_by, filters,
@@ -1081,13 +1110,15 @@ class ToolRunner:
         from app.ontologies.agent_runtime.unified_query_tools import query_objects
         return query_objects(self.db, self.scope, self.user,
                              self.query_session_id, args or {},
-                             spec_cache=self._query_spec_cache)
+                             spec_cache=self._query_spec_cache,
+                             reference_time=self.window_reference_time)
 
     def _tool_analyze_sequences(self, args: dict) -> dict:
         from app.ontologies.agent_runtime.sequence_tools import analyze_sequences
         return analyze_sequences(self.db, self.scope, self.user,
                                  self.query_session_id, args or {},
-                                 spec_cache=self._query_spec_cache)
+                                 spec_cache=self._query_spec_cache,
+                                 reference_time=self.window_reference_time)
 
     def _tool_describe_objects(self, args: dict) -> dict:
         from app.ontologies.agent_runtime.describe_tools import describe_objects
@@ -1102,7 +1133,7 @@ class ToolRunner:
         return get_data_time_range(
             self.db, self.scope, self.user, self.query_session_id, ot,
             time_property=args.get("time_property"), filters=filters,
-            window=args.get("window"))
+            window=args.get("window"), reference_time=self.window_reference_time)
 
     def _tool_get_object_history(self, args: dict) -> dict:
         inst = self.scope.visible_instance(

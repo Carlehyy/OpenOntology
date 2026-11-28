@@ -20,7 +20,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from app.ontologies.agent_runtime.boundary import ToolError
+from app.ontologies.agent_runtime.boundary import ToolError, require_query_coverage
 from app.ontologies.agent_runtime.query_spec import (
     build_columns, build_query_spec, drilldown_conditions, make_drilldown,
     map_rows, spec_hash,
@@ -162,7 +162,8 @@ def _aggregate_spec(*, scope, ot, where, resolved_window, subject_prop,
 
 
 def analyze_sequences(db, scope, user, session_id: str, args: dict,
-                      spec_cache: dict | None = None) -> dict:
+                      spec_cache: dict | None = None, *,
+                      reference_time: datetime | None = None) -> dict:
     from app.ontologies.agent_query import schemas as QS
     from app.ontologies.agent_query.service import (
         QueryError, execute_unified_query, fetch_unified_query_page,
@@ -198,6 +199,8 @@ def analyze_sequences(db, scope, user, session_id: str, args: dict,
         raise ToolError("sequence_invalid_threshold: threshold 必须 ≥ 1")
 
     where = [_filter_leaf(scope, ot, item) for item in (args.get("filters") or [])]
+    for prop in dict.fromkeys([subject_prop, time_prop, *(item["property"] for item in where)]):
+        require_query_coverage(scope, ot, property_name=prop)
     resolved_window = None
     raw_window = args.get("window")
     if raw_window is not None:
@@ -209,7 +212,8 @@ def analyze_sequences(db, scope, user, session_id: str, args: dict,
         definition = _definitions(ot).get(time_prop) or {}
         resolved_window = resolve_window(
             window_input, property_name=time_prop,
-            property_type=str(definition.get("type") or "string").lower())
+            property_type=str(definition.get("type") or "string").lower(),
+            reference_time=reference_time)
         where.extend(window_filters(resolved_window, source="s0"))
 
     if mode == "window_distinct":
@@ -234,7 +238,7 @@ def analyze_sequences(db, scope, user, session_id: str, args: dict,
         except ValidationError as exc:
             raise ToolError(f"sequence_invalid_query: {exc}") from exc
         except QueryError as exc:
-            raise ToolError(f"{exc.code}: {exc.message}") from exc
+            raise ToolError.from_query_error(exc, object_type=ot) from exc
 
     # ---- 默认：窗口内去重主体数（>=N），不走明细下载 ----
     if mode == "distinct":
@@ -258,6 +262,8 @@ def analyze_sequences(db, scope, user, session_id: str, args: dict,
                 "bucket": bucket,
                 "readable": str(item["property"]),
             })
+        for item in group_items:
+            require_query_coverage(scope, ot, property_name=item["property"])
         if not group_items:
             built = _aggregate_spec(
                 scope=scope, ot=ot, where=where,
@@ -481,6 +487,8 @@ def analyze_sequences(db, scope, user, session_id: str, args: dict,
     if mode in {"consecutive", "interval"} and threshold < 1:
         threshold = 1
 
+    for item in [*group_items, *(leaf for stage in stage_filters for leaf in stage)]:
+        require_query_coverage(scope, ot, property_name=item["property"])
     probe = QS.QueryRequest(
         sources=[source], where=[QS.FilterLeaf.model_validate(item) for item in where],
         aggregates=[QS.AggregateItem(fn="count", as_="value"),
@@ -546,6 +554,9 @@ def analyze_sequences(db, scope, user, session_id: str, args: dict,
             next_page = fetch_unified_query_page(
                 db, user, str(cursor), session_kind="ontology_agent",
                 session_id=session_id or "", include_page_size=True)
+        except QueryError as exc:
+            _cancel_sequence_handle(db, user, session_id, detail_data)
+            raise ToolError.from_query_error(exc, object_type=ot) from exc
         except Exception:
             # 续页失败：当前页/句柄必须显式回收，不能把配额留给下一回合。
             _cancel_sequence_handle(db, user, session_id, detail_data)
