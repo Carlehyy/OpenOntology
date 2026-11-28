@@ -8,7 +8,8 @@
   SSH 传输参数与生产依赖 `PROD_*` 均来自 Repository secrets/variables，清单
   在 runner 上物化。
 - `retain-debezium-image.yml`：留存官方 Debezium 多架构镜像到项目 GHCR，
-  由 `fix/debezium-image-*` 分支的摘要变更或手动触发，不部署、不清理旧版本。
+  由 `fix/debezium-image-update/**`（首次为 `fix/debezium-image-retention`）
+  分支的摘要变更或手动触发，不部署、不清理旧版本。
   从 `main` 手动运行时检出 `nano-ontoprompt`，其他分支使用所选分支的固定摘要。
 - `check-retained-images.yml`：每日 UTC 03:23 在默认分支启动，检出
   `nano-ontoprompt`，匿名核验该发布分支固定镜像的索引、架构和全部镜像层。
