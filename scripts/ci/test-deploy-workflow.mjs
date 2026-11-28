@@ -69,6 +69,32 @@ for (const [id, flag] of [
   assert.ok(deploy.includes(`needs.${id}.result == 'success'`))
 }
 
+const prWorkflow = readFileSync(new URL('../../.github/workflows/ci.yml', import.meta.url), 'utf8')
+function checkPrBackendShards(text) {
+  const backend = job(text, 'backend')
+  assert.match(backend, /^      fail-fast: false\n      matrix:\n        shard: \[1, 2, 3, 4, 5, 6\]$/m)
+  assert.match(step(backend, 'Run regression suite'), /--splits=6 --group=\$\{\{ matrix\.shard \}\}/)
+  assert.match(step(backend, 'Run regression suite'), /--splitting-algorithm=least_duration/)
+  for (const name of [
+    'Validate a fresh database migration', 'Ontology assistant PostgreSQL acceptance',
+    'Operations reports PostgreSQL acceptance',
+  ]) {
+    assert.match(step(backend, name), /^        if: matrix\.shard == 1$/m)
+  }
+  for (const name of ['Upload ontology assistant acceptance evidence', 'Upload operations reports acceptance evidence']) {
+    assert.match(step(backend, name), /^        if: always\(\) && matrix\.shard == 1$/m)
+  }
+}
+checkPrBackendShards(prWorkflow)
+for (const invalid of [
+  prWorkflow.replace('shard: [1, 2, 3, 4, 5, 6]', 'shard: [1, 2, 3, 4, 5]'),
+  prWorkflow.replace('--group=${{ matrix.shard }}', '--group=1'),
+  prWorkflow.replace('if: matrix.shard == 1', 'if: matrix.shard == 2'),
+  prWorkflow.replace('if: always() && matrix.shard == 1', 'if: always()'),
+]) {
+  assert.throws(() => checkPrBackendShards(invalid))
+}
+
 const report = job(workflow, 'report')
 const needs = block => block.match(/^    needs: \[([^\]]+)\]$/m)[1].split(', ')
 assert.deepEqual(needs(report).sort(), [...needs(deploy), 'deploy'].sort())

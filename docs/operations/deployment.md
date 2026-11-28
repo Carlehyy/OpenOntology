@@ -416,11 +416,28 @@ docker.sock、以非 root（uid 10001）只读 rootfs 运行。
     up -d --build integrated_cdc_executor
   ```
 
-- **镜像**：`backend/Dockerfile.cdc`。Python 运行时同 backend 镜像；Debezium
-  Server 发行版与其 Java 21 运行时整体取自固定摘要官方镜像
-  `quay.io/debezium/server:3.7.1.Final@sha256:80803a8a2b4bae4280ba9b350577fa57f9e79cf9a115b2dd30040c68e9a704c1`
-  （升级 = 换摘要重测，不跟踪浮动 tag）。复用已构建 backend 镜像的快速路径
-  见 Dockerfile 头注释（`CDC_PREBUILT_BACKEND=1`）。
+- **镜像**：`backend/Dockerfile.cdc` 的 `DEBEZIUM_SERVER_IMAGE` 是唯一摘要
+  事实源。Python 运行时同 backend 镜像；Debezium Server 3.7.1.Final 与其
+  Java 21 运行时完整留存在项目自己的 `ghcr.io/carlehyy/openontology/debezium`。
+  OCI 索引、amd64/arm64 子清单、配置和镜像层全部保留上游摘要；生产构建
+  匿名读取这份公开副本，不再依赖 Quay 保留历史清单。复用已构建 backend
+  镜像的快速路径见 Dockerfile 头注释（`CDC_PREBUILT_BACKEND=1`）。
+- **镜像更新与保留**：在 `fix/debezium-image-update/<说明>` 功能分支更新上述 ARG，标签
+  必须为 `3.7.1.Final-sha256-<完整摘要>`，并带相同的 `@sha256:`。推送该分支
+  会运行 `Retain Debezium image`，从固定的官方摘要完整复制所有平台及证明
+  清单，拒绝覆盖指向其他摘要的已有标签。首次发布后，包管理员需在 GHCR
+  Package settings 将此官方镜像副本设为 Public；用
+  `python3 scripts/ci/debezium-image.py check` 验证匿名拉取所有镜像层，再跑
+  完整构建、JVM 启动与真实 PG/MySQL 副本验收后，才合入发布分支。
+  不使用 `latest`，不自动跟随上游标签，不配置镜像清理任务；已发布与回滚所需
+  的摘要标签长期保留。删除留存版本是独立运维操作，必须先确认所有发布与
+  回滚版本都不再引用它。
+- **镜像可用性巡检**：`Check retained images` 从默认分支 `main` 每日 UTC
+  03:23 触发，检出 `nano-ontoprompt`，匿名校验当前固定索引、双架构及全部
+  镜像层。失败显示在 Actions 并保存 artifact，不自动更新摘要或触发部署；
+  管理员应启用该工作流的失败通知。发布的 Docker 门禁也先检查匿名访问，
+  随后的完整构建及真实副本验收继续作为发布条件。此工作流文件必须同时存在
+  于 `main`；只放在发布分支不会启动 GitHub 的定时任务。
 - **状态卷**：`integrated_cdc_state` 挂到 `/var/lib/openontology-cdc`，按
   `连接/generation` 分目录存 Debezium 偏移与模式历史。订阅增删、凭据轮换
   （暂停等待连接重测）同代续用偏移；物理端点变更被控制面 409 阻塞，直到

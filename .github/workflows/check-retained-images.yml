@@ -1,0 +1,50 @@
+name: Check retained images
+
+on:
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-retained-images
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # schedule reads this workflow from main, but production pins live here.
+      - uses: actions/checkout@v4
+        with:
+          ref: nano-ontoprompt
+
+      - name: Install registry copy tool
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends skopeo
+
+      - name: Test retention guards
+        run: python3 scripts/ci/test-debezium-image.py
+
+      - name: Verify anonymous access to all retained image data
+        run: |
+          set -o pipefail
+          mkdir -p .artifacts/retained-images
+          python3 scripts/ci/debezium-image.py check 2>&1 | tee .artifacts/retained-images/check.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: retained-images-${{ github.run_id }}
+          path: .artifacts/retained-images
+          retention-days: 14
+
+      - name: Report unavailable dependency
+        if: failure()
+        run: |
+          printf '::error::Retained Debezium image is not anonymously pullable. Restore its existing digest; do not repin production to the moving upstream tag.\n'
+          printf 'Dependency check failed. Inspect the retained-image artifact and restore the locked image before the next release.\n' >> "$GITHUB_STEP_SUMMARY"

@@ -27,6 +27,11 @@
   用例。由 `test-deploy-guards.sh` 一并执行。
 - `test-deploy-workflow.mjs`：验证部署锁与前端分片接线，并用合成 Git/GitHub
   响应覆盖分支时效、验证基线和发布状态。由 `test-deploy-guards.sh` 执行。
+- `debezium-image.py`：从 `backend/Dockerfile.cdc` 读取唯一固定摘要，`copy`
+  完整留存官方多架构镜像到 GHCR，`check` 匿名校验留存镜像（默认拉取全部
+  镜像层，`--metadata-only` 用于部署前快速检查），`ref` 输出当前引用。
+  `test-debezium-image.py` 覆盖不可变引用、平台、摘要和禁止覆盖等守卫，
+  由 `test-deploy-guards.sh` 统一执行。
 - `test-deploy-guards.sh`：校验部署目录正反例，并通过
   `DEPLOY_VALIDATE_ONLY=1` 验证镜像摘要严格模式从最终 `.env` 读取、显式
   进程环境优先，同时验证当前配置来源契约、生产包白名单和 runtime source
