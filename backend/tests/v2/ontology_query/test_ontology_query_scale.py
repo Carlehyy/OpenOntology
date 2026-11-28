@@ -184,8 +184,12 @@ def test_pg_grouped_sql_retains_full_counts_and_empty_input_evidence(
 
 
 def test_pg_search_empty_page_keeps_same_statement_full_scope_type_gate(db, query_scope, monkeypatch):
-    _, _, profile, scope = query_scope
+    project, release, profile, scope = query_scope
     profile.allowed_properties = {"scale-order": ["amount", "bucket"]}
+    _rows(db, project, release, [1])
+    db.refresh(profile)
+    # Resolve coverage with the real fixture before installing compile-only PG stubs.
+    assert scope.query_coverage.object(scope.require_object_type("Order")).reason is None
     runner = ToolRunner(db, scope)
     statements = []
     invalid = False
