@@ -261,7 +261,7 @@ class RetentionTest(unittest.TestCase):
     def test_upstream_source_carries_the_same_digest(self) -> None:
         expected = self.fake.index_digest.split(":", 1)[1]
         self.assertEqual(
-            self.donor.source, f"quay.io/debezium/server:3.7.1.Final@sha256:{expected}"
+            self.donor.source, f"quay.io/debezium/server@sha256:{expected}"
         )
 
     def test_ref_command_prints_the_full_reference(self) -> None:
@@ -539,7 +539,7 @@ class RetentionTest(unittest.TestCase):
         source, destination = commands[0][-2], commands[0][-1]
         self.assertEqual(source, self.source_argv)
         self.assertEqual(
-            source, f"docker://quay.io/debezium/server:3.7.1.Final@{self.donor.digest}"
+            source, f"docker://quay.io/debezium/server@{self.donor.digest}"
         )
         self.assertEqual(destination, self.tag_argv)
         self.assertTrue(destination.startswith("docker://ghcr.io/carlehyy/openontology/debezium:"))

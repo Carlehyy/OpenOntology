@@ -75,7 +75,7 @@ class Donor:
     @property
     def source(self) -> str:
         """The upstream image carrying the very same digest."""
-        return f"{SOURCE_REPOSITORY}:{self.version}@{self.digest}"
+        return f"{SOURCE_REPOSITORY}@{self.digest}"
 
 
 def resolve_donor(dockerfile: Path = DOCKERFILE) -> Donor:
