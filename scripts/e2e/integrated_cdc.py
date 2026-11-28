@@ -76,10 +76,35 @@ IMAGES = {
     "backend": "oo-ontology-mcp-backend:acceptance",
     "cdc-executor": "openontology-cdc-executor:canary",
 }
+EXECUTOR_DOCKERFILE = ROOT / "backend" / "Dockerfile.cdc"
+
+
+def read_debezium_server_image(dockerfile: Path) -> str:
+    """Read the single immutable Debezium server image from the peer Dockerfile.
+
+    The driver never carries its own image pin: the executor image is built
+    from ``backend/Dockerfile.cdc``, so that file's ARG is the only source of
+    truth. There is no fallback - a missing, ambiguous or floating value
+    stops the driver instead of silently running another distribution.
+    """
+    prefix = "ARG DEBEZIUM_SERVER_IMAGE="
+    values = [line.strip()[len(prefix):].strip()
+              for line in dockerfile.read_text(encoding="utf-8").splitlines()
+              if line.strip().startswith(prefix)]
+    if len(values) != 1:
+        raise RuntimeError(
+            f"{dockerfile} must declare exactly one ARG DEBEZIUM_SERVER_IMAGE, "
+            f"found {len(values)}")
+    value = values[0]
+    if "@sha256:" not in value:
+        raise RuntimeError(
+            f"DEBEZIUM_SERVER_IMAGE must be digest-pinned, got: {value}")
+    return value
+
+
 # The pinned Debezium server distribution is embedded in the executor image
 # (peer Dockerfile.cdc); the upstream image is never run directly here.
-DEBEZIUM_SERVER_IMAGE = "quay.io/debezium/server:3.7.1.Final"
-EXECUTOR_DOCKERFILE = ROOT / "backend" / "Dockerfile.cdc"
+DEBEZIUM_SERVER_IMAGE = read_debezium_server_image(EXECUTOR_DOCKERFILE)
 EXECUTOR_BUILD_COMMAND = [
     "docker", "build", "-f", "backend/Dockerfile.cdc",
     "--build-arg", "PYTHON_BASE_IMAGE=oo-ontology-mcp-backend:acceptance",

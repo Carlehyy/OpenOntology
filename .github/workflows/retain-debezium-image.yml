@@ -1,0 +1,132 @@
+name: Retain Debezium image
+
+on:
+  push:
+    branches: ['fix/debezium-image-*']
+    paths:
+      - backend/Dockerfile.cdc
+      - scripts/ci/debezium-image.py
+      - scripts/ci/test-debezium-image.py
+      - .github/workflows/retain-debezium-image.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: retain-debezium-image
+  cancel-in-progress: false
+
+jobs:
+  retain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name == 'main' && 'nano-ontoprompt' || github.ref }}
+
+      - name: Install registry copy tool
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends skopeo
+
+      - name: Test retention guards
+        run: python3 scripts/ci/test-debezium-image.py
+
+      - name: Retain exact upstream image and all platforms
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci/debezium-image.py copy
+
+      - name: Authenticate donor build
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Verify retained amd64 JDK and replica SMT
+        run: docker build --platform linux/amd64 --target debezium -f backend/Dockerfile.cdc backend
+
+      - name: Record retained reference
+        run: |
+          mkdir -p .artifacts/debezium-retention
+          python3 scripts/ci/debezium-image.py ref | tee .artifacts/debezium-retention/image.txt
+          printf 'Retained reference: `%s`\n\n' "$(python3 scripts/ci/debezium-image.py ref)" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Before promotion, verify anonymous pulls, both platforms, and the complete CDC/replica canary. Keep every digest tag needed by releases and rollback.\n' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Inspect package visibility
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data } = await github.rest.packages.getPackageForUser({
+              package_type: 'container', package_name: 'openontology/debezium', username: context.repo.owner,
+            })
+            core.info(`Package: ${data.html_url}; visibility: ${data.visibility}`)
+            await core.summary.addLink('Retained Debezium package', data.html_url)
+              .addRaw(` — visibility: ${data.visibility}\n`).write()
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debezium-retention-${{ github.run_id }}
+          path: .artifacts/debezium-retention
+          retention-days: 14
+
+  validate:
+    needs: retain
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 50
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name == 'main' && 'nano-ontoprompt' || github.ref }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Verify official donor version and JDK
+        run: |
+          image="$(python3 scripts/ci/debezium-image.py ref)"
+          docker run --rm --network none --entrypoint sh "$image" -ec '
+            test "$DEBEZIUM_VERSION" = 3.7.1.Final
+            test -f /debezium/debezium-server-dist-3.7.1.Final-runner.jar
+            test -d /debezium/config/lib
+            command -v java javac jar
+            java -version
+          '
+
+      - name: Build complete executor with restricted archive modes
+        run: |
+          trap 'chmod -R go+rX backend/app backend/integrated_runtime' EXIT
+          chmod -R go-rwx backend/app backend/integrated_runtime
+          docker build -f backend/Dockerfile.cdc -t openontology-debezium-validation:ci backend
+
+      - name: Real PG and MySQL replica acceptance
+        env:
+          REPLICA_ACCEPTANCE_IMAGE: openontology-debezium-validation:ci
+        run: bash scripts/ci/test-integrated-replica-acceptance.sh
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: debezium-validation-${{ matrix.arch }}-${{ github.run_id }}
+          path: .artifacts/ci-replicaacceptance
+          retention-days: 14

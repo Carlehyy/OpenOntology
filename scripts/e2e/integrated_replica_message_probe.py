@@ -32,13 +32,39 @@ ART = ROOT / ".artifacts" / "replica-message-probe"
 NETWORK = "oo-replica-spike-20261112"
 SOURCE = "oo-replica-spike-20261112-source-pg-1"
 IMAGE = "openontology-cdc-executor:canary"
-DBZ = "quay.io/debezium/server:3.7.1.Final@sha256:80803a8a2b4bae4280ba9b350577fa57f9e79cf9a115b2dd30040c68e9a704c1"
+EXECUTOR_DOCKERFILE = ROOT / "backend" / "Dockerfile.cdc"
 RECEIVER = "oo-replica-msgprobe-receiver"
 CONNECTOR = "oo-replica-msgprobe-dbz"
 LABEL = "openontology.replica-msgprobe=20261113"
 PREFIX = "replica_probe_msg"
 USER = "replica_fixture"
 DATABASE = "replica_source"
+
+
+def read_debezium_server_image(dockerfile: Path) -> str:
+    """Read the single immutable Debezium server image from the peer Dockerfile.
+
+    The probe never carries its own image pin: the executor image is built
+    from ``backend/Dockerfile.cdc``, so that file's ARG is the only source of
+    truth. There is no fallback - a missing, ambiguous or floating value
+    stops the probe instead of silently running another distribution.
+    """
+    prefix = "ARG DEBEZIUM_SERVER_IMAGE="
+    values = [line.strip()[len(prefix):].strip()
+              for line in dockerfile.read_text(encoding="utf-8").splitlines()
+              if line.strip().startswith(prefix)]
+    if len(values) != 1:
+        raise RuntimeError(
+            f"{dockerfile} must declare exactly one ARG DEBEZIUM_SERVER_IMAGE, "
+            f"found {len(values)}")
+    value = values[0]
+    if "@sha256:" not in value:
+        raise RuntimeError(
+            f"DEBEZIUM_SERVER_IMAGE must be digest-pinned, got: {value}")
+    return value
+
+
+DBZ = read_debezium_server_image(EXECUTOR_DOCKERFILE)
 
 
 def run(args, *, stdin=None, timeout=90, check=True):

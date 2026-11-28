@@ -1,6 +1,7 @@
 # integrated CDC 执行器镜像：backend Python 运行时 + Debezium Server 发行版
-# 及其 Java 21 运行时。发行版与 JVM 都取自同一个固定摘要的官方镜像，
-# 不引入第二个外部信任源，JVM 版本即 Debezium 自身的运行版本。
+# 及其 Java 21 运行时。发行版与 JVM 都取自官方镜像的完整 GHCR 留存副本，
+# 索引、各架构与镜像层保留上游摘要；生产构建不依赖 Quay 的历史保留期。
+# 升级先运行 retain-debezium-image.yml，完整验收后再合入此处固定摘要。
 #
 # 同一镜像同时服务两个执行器（共用 Java 依赖，命令不同）：
 #   - python -m app.data_channel.integrated.cdc_executor（Sentinel CDC）
@@ -23,7 +24,7 @@
 #
 # 执行器不需要 Node 运行时与 docker CLI，故不拷入（最小化攻击面）。
 ARG PYTHON_BASE_IMAGE=python:3.12-slim
-ARG DEBEZIUM_SERVER_IMAGE=quay.io/debezium/server:3.7.1.Final@sha256:6641f2a181fc872fe599bb7763864f29469499520320add166126c9ba379f889
+ARG DEBEZIUM_SERVER_IMAGE=ghcr.io/carlehyy/openontology/debezium:3.7.1.Final-sha256-14108cdd17bca0c12f867343ebfb208440569dc3d1d54bd4a08b187c81f714fe@sha256:14108cdd17bca0c12f867343ebfb208440569dc3d1d54bd4a08b187c81f714fe
 
 FROM ${DEBEZIUM_SERVER_IMAGE} AS debezium
 # Red Hat 系镜像的 JRE 携带指向 donor 文件系统的绝对符号链接（conf/、

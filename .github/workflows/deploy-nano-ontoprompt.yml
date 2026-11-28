@@ -508,6 +508,12 @@ jobs:
           name: frontend-dist-${{ github.run_id }}
           path: frontend/dist
 
+      - name: Verify retained Debezium image before building
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends skopeo
+          python3 scripts/ci/debezium-image.py check --metadata-only
+
       - name: Build Docker images
         # Synthetic credentials are confined to the disposable build/canary job.
         env: &service-canary-env

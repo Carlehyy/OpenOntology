@@ -50,6 +50,17 @@ def _service_blocks(text: str) -> dict[str, str]:
     return blocks
 
 
+def _dockerfile_debezium_arg() -> str:
+    """The single immutable Debezium image value the executor build consumes."""
+    root = Path(__file__).resolve().parents[3]
+    text = (root / "backend" / "Dockerfile.cdc").read_text(encoding="utf-8")
+    prefix = "ARG DEBEZIUM_SERVER_IMAGE="
+    values = [line.strip()[len(prefix):].strip() for line in text.splitlines()
+              if line.strip().startswith(prefix)]
+    assert len(values) == 1, values
+    return values[0]
+
+
 def test_project_and_port_isolation(cdc):
     base = _load("integrated_stack_for_cdc", "scripts/e2e/integrated_stack.py")
     fed = _load("federated_ports_for_cdc", "scripts/e2e/federated_fixture.py")
@@ -134,7 +145,15 @@ def test_executor_service_matches_runtime_contract(cdc, compose_text):
         "--build-arg", "PYTHON_BASE_IMAGE=oo-ontology-mcp-backend:acceptance",
         "--build-arg", "CDC_PREBUILT_BACKEND=1",
         "-t", "openontology-cdc-executor:canary", "backend"]
-    assert cdc.DEBEZIUM_SERVER_IMAGE == "quay.io/debezium/server:3.7.1.Final"
+    # The drivers carry no image pin of their own: both read the single
+    # immutable ARG value from the peer Dockerfile that builds the executor,
+    # so a floating or stale upstream tag can never be run here.
+    pinned = _dockerfile_debezium_arg()
+    assert re.search(r"@sha256:[0-9a-f]{64}$", pinned)
+    assert cdc.DEBEZIUM_SERVER_IMAGE == pinned
+    probe = _load("integrated_replica_message_probe",
+                  "scripts/e2e/integrated_replica_message_probe.py")
+    assert probe.DBZ == pinned
 
 
 def test_phase_service_sets_are_bounded(cdc, compose_text):

@@ -27,6 +27,7 @@ assert_rejected() {
 }
 
 bash "$SCRIPT_DIR/test-classify-deploy-changes.sh"
+python3 "$SCRIPT_DIR/test-debezium-image.py"
 
 assert_accepted /opt/openontology
 assert_accepted /srv/apps/openontology_1
