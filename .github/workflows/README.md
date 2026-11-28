@@ -7,7 +7,8 @@
   `scripts/ci/classify-deploy-changes.sh`），不是增量单测；未知路径仍全量。
   SSH 传输参数与生产依赖 `PROD_*` 均来自 Repository secrets/variables，清单
   在 runner 上物化。
-- `retain-debezium-image.yml`：`fix/debezium-image-*` 分支变更固定摘要后，或手动
+- `retain-debezium-image.yml`：`fix/debezium-image-update/**`（首次为
+  `fix/debezium-image-retention`）分支变更固定摘要后，或手动
   触发时，完整留存官方 Debezium 多架构镜像到项目 GHCR；仅该作业拥有
   `packages: write`，不部署、不覆盖已有摘要标签，也不删除旧版本。
 - `check-retained-images.yml`：每日 UTC 03:23 从默认分支 `main` 触发，检出

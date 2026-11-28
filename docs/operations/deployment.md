@@ -422,7 +422,7 @@ docker.sock、以非 root（uid 10001）只读 rootfs 运行。
   OCI 索引、amd64/arm64 子清单、配置和镜像层全部保留上游摘要；生产构建
   匿名读取这份公开副本，不再依赖 Quay 保留历史清单。复用已构建 backend
   镜像的快速路径见 Dockerfile 头注释（`CDC_PREBUILT_BACKEND=1`）。
-- **镜像更新与保留**：在 `fix/debezium-image-*` 功能分支更新上述 ARG，标签
+- **镜像更新与保留**：在 `fix/debezium-image-update/<说明>` 功能分支更新上述 ARG，标签
   必须为 `3.7.1.Final-sha256-<完整摘要>`，并带相同的 `@sha256:`。推送该分支
   会运行 `Retain Debezium image`，从固定的官方摘要完整复制所有平台及证明
   清单，拒绝覆盖指向其他摘要的已有标签。首次发布后，包管理员需在 GHCR
